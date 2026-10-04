@@ -1,6 +1,6 @@
 -- First-time-player hints. Pure: given a state snapshot and the set of finished hints, returns the single hint that
 -- should be showing (or nil). Hints disappear for good when their condition is met; progress is saved server-side.
--- Tested in tests/guide_test.luau.
+-- Tested in tests/collection_test.luau.
 --
 -- `state` fields: Cash, Count, Capacity, Stats{BlocksDug, CashEarned, DeepestDepth}, OwnedToolCount, NextToolPrice,
 --   NextToolName, Carrying (bool), HasDeposited (bool), CollectionFound (number), Touch (bool), depthMeters (number)

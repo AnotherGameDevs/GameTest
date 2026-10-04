@@ -1,4 +1,4 @@
--- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/shift_test.luau.
+-- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/collection_test.luau.
 local ShiftSpec = {}
 
 -- depletion = { Total = fraction of all cells dug, ByLayer = { [layerId] = fraction }, AgeMinutes }

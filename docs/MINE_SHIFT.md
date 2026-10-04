@@ -51,3 +51,8 @@ Unsaved state: the refresh is server-session state. Players' cash, tools, collec
   type-check. Economy figures are from `tools/economy_sim.py` (analytic, **not a playtest**).
 * **Not verified (needs Studio):** the refresh sequence in a live server, players being moved out, the banner, relocation
   of real models, physics of the elevator after a refresh. See `docs/PLAYTEST_PLAN.md`.
+
+## Known behaviour
+* With only tier 1-2 tools about half the grid (Soil + Clay) is diggable, so the 55% rule cannot fire until someone owns a
+  Heavy Shovel or better; before that only the 60-minute age rule (>= 10% dug) refreshes the mine.
+* A client that joins mid-countdown sees the banner from the next server tick (it is a broadcast, not saved state).

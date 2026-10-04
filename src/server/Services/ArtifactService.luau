@@ -384,7 +384,7 @@ local function inMine(pos: Vector3): boolean
 	local b = Grid.Bounds()
 	local ex = Config.Exit
 	local maxZ = b.MaxZ + (ex.Enabled and ex.Run or 0)
-	return pos.X >= b.MinX - 1 and pos.X <= b.MaxX + 1 and pos.Z >= b.MinZ - 1 and pos.Z <= maxZ + 1 and pos.Y < b.TopY + 3
+	return pos.X >= b.MinX - 1 and pos.X <= b.MaxX + 1 and pos.Z >= b.MinZ - 1 and pos.Z < maxZ and pos.Y < b.TopY + 3
 end
 ArtifactService.InMine = inMine
 

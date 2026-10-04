@@ -806,7 +806,7 @@ return GroundPlan
           <string name="Name">GuideSpec</string>
           <string name="Source"><![CDATA[-- First-time-player hints. Pure: given a state snapshot and the set of finished hints, returns the single hint that
 -- should be showing (or nil). Hints disappear for good when their condition is met; progress is saved server-side.
--- Tested in tests/guide_test.luau.
+-- Tested in tests/collection_test.luau.
 --
 -- `state` fields: Cash, Count, Capacity, Stats{BlocksDug, CashEarned, DeepestDepth}, OwnedToolCount, NextToolPrice,
 --   NextToolName, Carrying (bool), HasDeposited (bool), CollectionFound (number), Touch (bool), depthMeters (number)
@@ -1289,7 +1289,7 @@ return SettingsSpec
       <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">ShiftSpec</string>
-          <string name="Source"><![CDATA[-- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/shift_test.luau.
+          <string name="Source"><![CDATA[-- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/collection_test.luau.
 local ShiftSpec = {}
 
 -- depletion = { Total = fraction of all cells dug, ByLayer = { [layerId] = fraction }, AgeMinutes }
@@ -2614,7 +2614,7 @@ local function inMine(pos: Vector3): boolean
 	local b = Grid.Bounds()
 	local ex = Config.Exit
 	local maxZ = b.MaxZ + (ex.Enabled and ex.Run or 0)
-	return pos.X >= b.MinX - 1 and pos.X <= b.MaxX + 1 and pos.Z >= b.MinZ - 1 and pos.Z <= maxZ + 1 and pos.Y < b.TopY + 3
+	return pos.X >= b.MinX - 1 and pos.X <= b.MaxX + 1 and pos.Z >= b.MinZ - 1 and pos.Z < maxZ and pos.Y < b.TopY + 3
 end
 ArtifactService.InMine = inMine
 
@@ -4360,6 +4360,7 @@ function MineShiftService.RefreshNow()
 	-- 1. carriers who have not left the mine by now drop their artifact (it is relocated, never deleted)
 	for _, player in ipairs(ArtifactService.CarriersInMine()) do
 		ArtifactService.ForceDrop(player)
+		Remotes.Get("Notify"):FireClient(player, "The mine was refreshed - your artifact was moved to Lost & Found at camp.", "Danger")
 	end
 	ArtifactService.RelocateFromMine()
 	-- 2. everyone inside goes to camp, 3. new terrain
@@ -4381,13 +4382,18 @@ local function runShift()
 	-- wait for carriers to bring their artifact out (bounded)
 	local waited = 0
 	while #ArtifactService.CarriersInMine() > 0 and waited < cfg.CarryDeferSeconds do
-		if waited % 10 == 0 then
+		if waited > 0 and waited % 10 == 0 then
 			broadcast("Deferred", cfg.CarryDeferSeconds - waited)
 		end
 		task.wait(1)
 		waited += 1
 	end
-	MineShiftService.RefreshNow()
+	-- never leave the service stuck: a failed refresh is logged, the banner is cleared, and the next check may retry
+	local ok, err = pcall(MineShiftService.RefreshNow)
+	if not ok then
+		warn("[MineShiftService] refresh failed: " .. tostring(err))
+		broadcast("Done")
+	end
 	running = false
 end
 

@@ -47,6 +47,7 @@ function MineShiftService.RefreshNow()
 	-- 1. carriers who have not left the mine by now drop their artifact (it is relocated, never deleted)
 	for _, player in ipairs(ArtifactService.CarriersInMine()) do
 		ArtifactService.ForceDrop(player)
+		Remotes.Get("Notify"):FireClient(player, "The mine was refreshed - your artifact was moved to Lost & Found at camp.", "Danger")
 	end
 	ArtifactService.RelocateFromMine()
 	-- 2. everyone inside goes to camp, 3. new terrain
@@ -68,13 +69,18 @@ local function runShift()
 	-- wait for carriers to bring their artifact out (bounded)
 	local waited = 0
 	while #ArtifactService.CarriersInMine() > 0 and waited < cfg.CarryDeferSeconds do
-		if waited % 10 == 0 then
+		if waited > 0 and waited % 10 == 0 then
 			broadcast("Deferred", cfg.CarryDeferSeconds - waited)
 		end
 		task.wait(1)
 		waited += 1
 	end
-	MineShiftService.RefreshNow()
+	-- never leave the service stuck: a failed refresh is logged, the banner is cleared, and the next check may retry
+	local ok, err = pcall(MineShiftService.RefreshNow)
+	if not ok then
+		warn("[MineShiftService] refresh failed: " .. tostring(err))
+		broadcast("Done")
+	end
 	running = false
 end
 
