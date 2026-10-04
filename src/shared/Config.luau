@@ -105,6 +105,7 @@ Config.Relic = {
 	ControlPerHit = 25, -- control lost per validated hit (4 hits)
 	AttackRange = 7, -- studs, attacker to carrier
 	AttackCooldown = 1.0, -- seconds between a player's strikes
+	RequestGap = 0.25, -- minimum seconds between ANY two attack requests from one player, accepted or not (anti-spam)
 	StrikeKnockback = 9, -- studs/s pushed onto the carrier by a hit (one clamped velocity set, never stacked)
 	ShoveRange = 7, -- the carrier's defensive shove
 	ShoveCooldown = 4.0,

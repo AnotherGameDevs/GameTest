@@ -69,6 +69,12 @@ expiry + stale requests, bounded reset hold. **NOT verified (needs Studio, 2+ pl
 * The safe-zone grace is cumulative (stepping out only drains it at half speed), so zig-zagging at the line can not stall forever.
 * A rejected hit (pickup protection) no longer spends the attacker's cooldown; no relic event can start while the mine is shutting down for a reset.
 
+## Validation round 2 (code changes, still unverified in engine)
+* Attack/pickup line of sight now ignores **every** player's character (no accidental body-blocking by a third player), ignores non-collidable
+  (cosmetic) parts and our own prop folders, and is blocked only by collidable world geometry. Range is still validated for the intended target only.
+* A per-player `RequestGap` (0.25 s) applies to every attack request, accepted or rejected; rejected hits still do not spend the gameplay cooldown, and
+  cosmetic effects are sent only for applied hits. The run sheet is `docs/RELIC_PLAYTEST.md` (tests 28-38 NOT RUN).
+
 ## Known unresolved issues / risks
 * Line-of-sight uses one ray between torsos; corners and thin geometry may over/under-block. Needs playtesting.
 * Knockback is applied client-side; a modified client can ignore it (acceptable: it only affects themselves).

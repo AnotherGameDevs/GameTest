@@ -326,6 +326,7 @@ Config.Relic = {
 	ControlPerHit = 25, -- control lost per validated hit (4 hits)
 	AttackRange = 7, -- studs, attacker to carrier
 	AttackCooldown = 1.0, -- seconds between a player's strikes
+	RequestGap = 0.25, -- minimum seconds between ANY two attack requests from one player, accepted or not (anti-spam)
 	StrikeKnockback = 9, -- studs/s pushed onto the carrier by a hit (one clamped velocity set, never stacked)
 	ShoveRange = 7, -- the carrier's defensive shove
 	ShoveCooldown = 4.0,
@@ -5988,6 +5989,7 @@ local carryTool: Tool? = nil
 local lastAttack: { [number]: number } = {} -- userId -> last strike (cooldown)
 local engagedAt: { [number]: number } = {} -- userId -> last time they struck at / reached for the carrier (shove eligibility)
 local lastShove = -1e9
+local lastRequest: { [number]: number } = {}
 local lastSafe: { [number]: Vector3 } = {}
 local lastAnnounce = -1e9
 local warnedGrace = false
@@ -6164,13 +6166,24 @@ function RelicService.Discover(player: Player, treasureId: string, position: Vec
 	return true
 end
 
--- Everything that must not count as an obstacle: both characters, the relic's own model and carried tool.
-local function ignoreFor(a: Player, b: Player): { Instance }
+-- Everything that must not count as an obstacle: EVERY player's character (a third player standing between attacker and carrier does
+-- not block - there is no body-block mechanic; range is still validated against the intended target only), the relic's own model and
+-- carried tool, and our own effect/prop folders. Only collidable world geometry blocks (see lineOfSight).
+local function ignoreFor(_a: Player?, _b: Player?): { Instance }
 	local out: { Instance } = { folder }
-	for _, inst in ipairs({ a.Character, b.Character, carryTool }) do
-		if inst then
-			table.insert(out, inst)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character then
+			table.insert(out, p.Character)
 		end
+	end
+	for _, name in ipairs({ "Artifacts", "Projectiles" }) do
+		local f = Workspace:FindFirstChild(name)
+		if f then
+			table.insert(out, f)
+		end
+	end
+	if carryTool then
+		table.insert(out, carryTool)
 	end
 	return out
 end
@@ -6179,7 +6192,7 @@ local function lineOfSight(a: BasePart, b: BasePart, ignore: { Instance }): bool
 	local rp = RaycastParams.new()
 	rp.FilterType = Enum.RaycastFilterType.Exclude
 	rp.FilterDescendantsInstances = ignore
-	rp.RespectCanCollide = false
+	rp.RespectCanCollide = true -- cosmetic (non-collidable) parts never block an attack or a pickup; solid cells and structures do
 	local from, to = a.Position + Vector3.new(0, 1.2, 0), b.Position + Vector3.new(0, 0.8, 0)
 	return Workspace:Raycast(from, to - from, rp) == nil -- anything solid between them (cells, walls, structures) blocks the hit
 end
@@ -6415,6 +6428,12 @@ local function onAttackRequest(player: Player)
 	if not RateLimiter.Check(player, "RelicAttack") then
 		return
 	end
+	-- a small request gap that applies even to REJECTED hits (so remote spam is cheap to ignore and can not repeat effects)
+	local nowReq = os.clock()
+	if nowReq - (lastRequest[player.UserId] or -1e9) < R.RequestGap then
+		return
+	end
+	lastRequest[player.UserId] = nowReq
 	if not event or event.State ~= "Carried" then
 		return
 	end
@@ -6541,6 +6560,7 @@ function RelicService.Init()
 		lastSafe[player.UserId] = nil
 		lastAttack[player.UserId] = nil
 		engagedAt[player.UserId] = nil
+		lastRequest[player.UserId] = nil
 	end)
 
 	-- Watcher: safe-zone grace, last safe position, unreachable relics.
