@@ -9,6 +9,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
+local SessionLock = require(script.Parent.SessionLock)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
@@ -41,8 +42,15 @@ local function defaultData()
 end
 
 local function migrate(data)
+	-- fields that must be tables are replaced by their defaults if a corrupted save holds something else
+	local template = defaultData()
+	for k, v in pairs(template) do
+		if type(v) == "table" and type(data[k]) ~= "table" and data[k] ~= nil then
+			data[k] = Util.DeepCopy(v)
+		end
+	end
 	DataMigrations.Migrate(data, Config.Data.CurrentVersion, Defs)
-	Util.Reconcile(data, defaultData())
+	Util.Reconcile(data, template)
 	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
 	data.Settings = SettingsSpec.Sanitize(data.Settings) -- clamp whatever was saved
 	DataMigrations.SanitizeCollection(data, Defs)
@@ -96,8 +104,7 @@ end
 -- Session lock: a profile records which server (JobId) owns it. A second server refuses to load a profile that is
 -- locked by a live session, so two servers can never both write one player's progress. Stale locks expire.
 local function lockedByOther(old): boolean
-	local lock = old and old.SessionLock
-	return type(lock) == "table" and lock.JobId ~= game.JobId and (os.time() - (tonumber(lock.At) or 0)) < LOCK_TIMEOUT
+	return SessionLock.IsLockedByOther(old, game.JobId, os.time(), LOCK_TIMEOUT)
 end
 
 function DataService.OnLoaded(cb: (Player, any) -> ())
@@ -146,7 +153,7 @@ function DataService.Save(player: Player, force: boolean?, release: boolean?): b
 				lostLock = true
 				return nil -- another live server owns this profile: do NOT overwrite it
 			end
-			snapshot.SessionLock = (not release) and { JobId = game.JobId, At = os.time() } or nil
+			snapshot.SessionLock = (not release) and SessionLock.Claim(game.JobId, os.time()) or nil
 			return snapshot
 		end)
 	end, 3)
@@ -182,7 +189,7 @@ local function load(player: Player)
 				end
 				read = old
 				local new = old or {}
-				new.SessionLock = { JobId = game.JobId, At = os.time() }
+				new.SessionLock = SessionLock.Claim(game.JobId, os.time())
 				return new
 			end)
 			return read
@@ -211,7 +218,19 @@ local function load(player: Player)
 		data = defaultData()
 	else
 		data.SessionLock = nil
-		migrate(data)
+		local okMigrate, errMigrate = pcall(migrate, data)
+		if not okMigrate then
+			-- never play on (or save over) a profile we could not understand
+			warn("[DataService] Could not migrate " .. player.Name .. "'s save: " .. tostring(errMigrate))
+			noSave = true
+			if not isStudio() then
+				if player.Parent then
+					player:Kick("Your saved progress could not be read. Please rejoin - nothing was overwritten.")
+				end
+				return
+			end
+			data = defaultData()
+		end
 	end
 	if not player.Parent then
 		if store and not noSave then

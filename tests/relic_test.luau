@@ -100,6 +100,12 @@ do
 	check("knockback of nothing is nothing", select(1, RelicRules.ClampKnockback(0, 0, 10, 5)) == 0)
 end
 
+-- ================================================================== interaction consistency ==========
+do
+	check("the server accepts exactly the prompt distance plus a small documented tolerance", RelicRules.PickupInReach(R.PickupReach) and RelicRules.PickupInReach(R.PickupReach + R.PickupTolerance) and not RelicRules.PickupInReach(R.PickupReach + R.PickupTolerance + 0.1))
+	check("the tolerance is small (<= 2 studs)", R.PickupTolerance > 0 and R.PickupTolerance <= 2)
+end
+
 -- ================================================================== safe zone and deposit ============================
 do
 	local camp = Config.Camp

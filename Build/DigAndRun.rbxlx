@@ -335,7 +335,8 @@ Config.Relic = {
 	MaxKnockbackH = 24, -- hard caps on any knockback, studs/s
 	MaxKnockbackUp = 7,
 	PickupProtection = 3.0, -- seconds a new carrier cannot lose control (short, so it never covers the escape route)
-	PickupReach = 12,
+	PickupReach = 10, -- the interaction distance: the prompt appears and works within this many studs
+	PickupTolerance = 1.5, -- the ONLY extra slack the server allows beyond the prompt (latency / the player stepping back as they press)
 	RegrabLockout = 5.0, -- the player who just dropped/placed it can not re-grab it for this long (no control reset by place + re-pickup)
 	PlaceReach = 8,
 	SafeBoundaryZ = 64, -- the camp's safe zone starts at this z (camp side); PvP and control loss stop there
@@ -1827,6 +1828,11 @@ function RelicRules.InSafeZone(x: number, y: number, z: number): boolean
 	local halfX = camp.Size.X / 2
 	local farZ = camp.Position.Z + camp.Size.Z / 2
 	return z >= r.SafeBoundaryZ and z <= farZ + 4 and math.abs(x - camp.Position.X) <= halfX + 4 and y < 14
+end
+
+-- Pickup distance: exactly what the prompt shows, plus the small documented tolerance (interaction consistency, not balance).
+function RelicRules.PickupInReach(distance: number): boolean
+	return distance <= Config.Relic.PickupReach + Config.Relic.PickupTolerance
 end
 
 -- May `attacker` strike the carrier right now? ctx = { EventState, AttackerId, CarrierId, Distance, LineOfSight,
@@ -3887,8 +3893,12 @@ local function highestOwnedTool(owned, defs): string
 	return best or "rusty_shovel"
 end
 
+local function asTable(v)
+	return type(v) == "table" and v or {}
+end
+
 local function toolsV2(data, defs)
-	data.OwnedTools = data.OwnedTools or {}
+	data.OwnedTools = asTable(data.OwnedTools)
 	local granted = {}
 	for legacyId, grants in pairs(DataMigrations.LEGACY_TOOL_GRANTS) do
 		if data.OwnedTools[legacyId] then
@@ -3902,11 +3912,11 @@ local function toolsV2(data, defs)
 		end
 	end
 	data.OwnedTools.rusty_shovel = true
-	data.Equipment = data.Equipment or {}
+	data.Equipment = asTable(data.Equipment)
 	if #granted > 0 or not defs.Tools[data.Equipment.ToolId or ""] or not data.OwnedTools[data.Equipment.ToolId or ""] then
 		data.Equipment.ToolId = highestOwnedTool(data.OwnedTools, defs)
 	end
-	data.MigrationLog = data.MigrationLog or {}
+	data.MigrationLog = asTable(data.MigrationLog)
 	if #granted > 0 then
 		data.MigrationLog.ToolsV2 = table.concat(granted, ",")
 	end
@@ -3917,8 +3927,8 @@ end
 local function collectionV3(data, defs)
 	data.Display = type(data.Display) == "table" and data.Display or {}
 	data.Guide = type(data.Guide) == "table" and data.Guide or {}
-	data.MigrationLog = data.MigrationLog or {}
-	local stats = data.Stats or {}
+	data.MigrationLog = asTable(data.MigrationLog)
+	local stats = asTable(data.Stats)
 	if (stats.CashEarned or 0) > 0 or (stats.BlocksDug or 0) >= 4 then
 		data.Guide.mine = true
 	end
@@ -3950,21 +3960,21 @@ end
 
 -- Always-on repair: drops unknown tool/backpack ids and makes sure the equipped items are valid and owned.
 function DataMigrations.Sanitize(data, defs, starterTool: string, starterBackpack: string)
-	data.OwnedTools = data.OwnedTools or {}
+	data.OwnedTools = asTable(data.OwnedTools)
 	for id in pairs(data.OwnedTools) do
 		if not defs.Tools[id] then
 			data.OwnedTools[id] = nil
 		end
 	end
 	data.OwnedTools[starterTool] = true
-	data.OwnedBackpacks = data.OwnedBackpacks or {}
+	data.OwnedBackpacks = asTable(data.OwnedBackpacks)
 	for id in pairs(data.OwnedBackpacks) do
 		if not defs.Backpacks[id] then
 			data.OwnedBackpacks[id] = nil
 		end
 	end
 	data.OwnedBackpacks[starterBackpack] = true
-	data.Equipment = data.Equipment or {}
+	data.Equipment = asTable(data.Equipment)
 	if not defs.Tools[data.Equipment.ToolId or ""] or not data.OwnedTools[data.Equipment.ToolId] then
 		data.Equipment.ToolId = highestOwnedTool(data.OwnedTools, defs)
 	end
@@ -4004,6 +4014,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
+local SessionLock = require(script.Parent.SessionLock)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
@@ -4036,8 +4047,15 @@ local function defaultData()
 end
 
 local function migrate(data)
+	-- fields that must be tables are replaced by their defaults if a corrupted save holds something else
+	local template = defaultData()
+	for k, v in pairs(template) do
+		if type(v) == "table" and type(data[k]) ~= "table" and data[k] ~= nil then
+			data[k] = Util.DeepCopy(v)
+		end
+	end
 	DataMigrations.Migrate(data, Config.Data.CurrentVersion, Defs)
-	Util.Reconcile(data, defaultData())
+	Util.Reconcile(data, template)
 	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
 	data.Settings = SettingsSpec.Sanitize(data.Settings) -- clamp whatever was saved
 	DataMigrations.SanitizeCollection(data, Defs)
@@ -4091,8 +4109,7 @@ end
 -- Session lock: a profile records which server (JobId) owns it. A second server refuses to load a profile that is
 -- locked by a live session, so two servers can never both write one player's progress. Stale locks expire.
 local function lockedByOther(old): boolean
-	local lock = old and old.SessionLock
-	return type(lock) == "table" and lock.JobId ~= game.JobId and (os.time() - (tonumber(lock.At) or 0)) < LOCK_TIMEOUT
+	return SessionLock.IsLockedByOther(old, game.JobId, os.time(), LOCK_TIMEOUT)
 end
 
 function DataService.OnLoaded(cb: (Player, any) -> ())
@@ -4141,7 +4158,7 @@ function DataService.Save(player: Player, force: boolean?, release: boolean?): b
 				lostLock = true
 				return nil -- another live server owns this profile: do NOT overwrite it
 			end
-			snapshot.SessionLock = (not release) and { JobId = game.JobId, At = os.time() } or nil
+			snapshot.SessionLock = (not release) and SessionLock.Claim(game.JobId, os.time()) or nil
 			return snapshot
 		end)
 	end, 3)
@@ -4177,7 +4194,7 @@ local function load(player: Player)
 				end
 				read = old
 				local new = old or {}
-				new.SessionLock = { JobId = game.JobId, At = os.time() }
+				new.SessionLock = SessionLock.Claim(game.JobId, os.time())
 				return new
 			end)
 			return read
@@ -4206,7 +4223,19 @@ local function load(player: Player)
 		data = defaultData()
 	else
 		data.SessionLock = nil
-		migrate(data)
+		local okMigrate, errMigrate = pcall(migrate, data)
+		if not okMigrate then
+			-- never play on (or save over) a profile we could not understand
+			warn("[DataService] Could not migrate " .. player.Name .. "'s save: " .. tostring(errMigrate))
+			noSave = true
+			if not isStudio() then
+				if player.Parent then
+					player:Kick("Your saved progress could not be read. Please rejoin - nothing was overwritten.")
+				end
+				return
+			end
+			data = defaultData()
+		end
 	end
 	if not player.Parent then
 		if store and not noSave then
@@ -6114,7 +6143,7 @@ local function spawnModel()
 	prompt.ObjectText = def.Name
 	prompt.ActionText = "Take the relic (contested!)"
 	prompt.HoldDuration = 0.5
-	prompt.MaxActivationDistance = R.PickupReach - 2
+	prompt.MaxActivationDistance = R.PickupReach -- same distance the server enforces (plus RelicRules' small tolerance)
 	prompt.RequiresLineOfSight = false
 	prompt.Parent = root
 	prompt.Triggered:Connect(function(player)
@@ -6210,7 +6239,7 @@ function RelicService.Pickup(player: Player, relicId: any)
 	if not char or not hrp or not hum then
 		return
 	end
-	if (hrp.Position - event.Position).Magnitude > R.PickupReach then
+	if not RelicRules.PickupInReach((hrp.Position - event.Position).Magnitude) then
 		return
 	end
 	-- no taking it through walls (the prompt itself does not require line of sight)
@@ -6613,6 +6642,28 @@ return RelicService
         </Item>
         <Item class="ModuleScript" referent="48">
           <Properties>
+            <string name="Name">SessionLock</string>
+            <string name="Source"><![CDATA[-- Pure session-lock rules for DataService (tests/saving_test.luau). A profile records which server (JobId) owns it and when it last
+-- refreshed that claim. A second server may not load a profile that another LIVE server holds; a lock older than `timeout` is treated
+-- as dead (crash / lost release) so players are never locked out forever.
+local SessionLock = {}
+
+function SessionLock.IsLockedByOther(record, jobId: string, now: number, timeout: number): boolean
+	local lock = type(record) == "table" and record.SessionLock
+	return type(lock) == "table" and lock.JobId ~= jobId and (now - (tonumber(lock.At) or 0)) < timeout
+end
+
+-- The lock to write when this server keeps the profile (or nil to release it).
+function SessionLock.Claim(jobId: string, now: number)
+	return { JobId = jobId, At = now }
+end
+
+return SessionLock
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="49">
+          <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
 -- clamped/validated by SettingsSpec and only known keys are stored, in the existing profile (data.Settings), which the
@@ -6647,7 +6698,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="49">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -7003,7 +7054,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="50">
+        <Item class="ModuleScript" referent="51">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -7069,7 +7120,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="51">
+        <Item class="ModuleScript" referent="52">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -7131,7 +7182,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="52">
+        <Item class="ModuleScript" referent="53">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -7237,7 +7288,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="53">
+        <Item class="ModuleScript" referent="54">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -7647,7 +7698,7 @@ return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="54">
+        <Item class="ModuleScript" referent="55">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -7884,7 +7935,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="55">
+        <Item class="ModuleScript" referent="56">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -7987,7 +8038,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="56">
+        <Item class="ModuleScript" referent="57">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -8118,23 +8169,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="57">
+  <Item class="StarterPlayer" referent="58">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="58">
+    <Item class="StarterPlayerScripts" referent="59">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="59">
+      <Item class="Folder" referent="60">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="60">
+        <Item class="Folder" referent="61">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="61">
+          <Item class="ModuleScript" referent="62">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -8242,7 +8293,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="62">
+          <Item class="ModuleScript" referent="63">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -8274,7 +8325,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="63">
+          <Item class="ModuleScript" referent="64">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -8582,7 +8633,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="64">
+          <Item class="ModuleScript" referent="65">
             <Properties>
               <string name="Name">CampShelf</string>
               <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
@@ -8717,7 +8768,7 @@ return CampShelf
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="65">
+          <Item class="ModuleScript" referent="66">
             <Properties>
               <string name="Name">CollectionUI</string>
               <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
@@ -8939,7 +8990,7 @@ return CollectionUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="66">
+          <Item class="ModuleScript" referent="67">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -9370,7 +9421,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="67">
+          <Item class="ModuleScript" referent="68">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -9813,7 +9864,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="68">
+          <Item class="ModuleScript" referent="69">
             <Properties>
               <string name="Name">GuideController</string>
               <string name="Source"><![CDATA[-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
@@ -10001,7 +10052,7 @@ return GuideController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="69">
+          <Item class="ModuleScript" referent="70">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -10077,7 +10128,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="70">
+          <Item class="ModuleScript" referent="71">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -10159,7 +10210,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="71">
+          <Item class="ModuleScript" referent="72">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -10465,7 +10516,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="72">
+          <Item class="ModuleScript" referent="73">
             <Properties>
               <string name="Name">RelicController</string>
               <string name="Source"><![CDATA[-- Client side of the contested relic (docs/RELIC_PVP.md). Everything shown here is read from server-published Workspace attributes
@@ -10823,7 +10874,7 @@ return RelicController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="73">
+          <Item class="ModuleScript" referent="74">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -10896,7 +10947,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="74">
+          <Item class="ModuleScript" referent="75">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -11013,7 +11064,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="75">
+          <Item class="ModuleScript" referent="76">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
@@ -11359,10 +11410,28 @@ local function renderTabs()
 	end
 end
 
-function ShopUI.Render()
+-- Everything the shop shows depends on this signature. State snapshots arrive on every block dug; re-rendering identical content would
+-- rebuild every thumbnail viewport for nothing, so an unchanged signature skips the work.
+local lastRenderKey = ""
+local function renderKey(): string
+	local d = State.Data
+	local owned = {}
+	for id in pairs(d.OwnedTools or {}) do table.insert(owned, id) end
+	for id in pairs(d.OwnedBackpacks or {}) do table.insert(owned, id) end
+	table.sort(owned)
+	return table.concat({ tab, sel.Kind, sel.Id, tostring(d.Cash), tostring(d.ToolId), tostring(d.BackpackId), tostring(d.Carrying ~= nil),
+		tostring(d.Consumables and d.Consumables.dynamite or 0), table.concat(owned, ","), tostring(refs.inspect and refs.inspect.Visible) }, "|")
+end
+
+function ShopUI.Render(force: boolean?)
 	if not root then
 		return
 	end
+	local key = renderKey()
+	if not force and key == lastRenderKey then
+		return
+	end
+	lastRenderKey = key
 	-- keep the selection valid for the current tab
 	if tab == "Tools" and sel.Kind == "Backpack" then
 		sel = { Kind = "Tool", Id = State.Data.ToolId or "rusty_shovel" }
@@ -11399,7 +11468,7 @@ function ShopUI.Open()
 		target = id
 	end
 	sel = { Kind = "Tool", Id = target }
-	ShopUI.Render()
+	ShopUI.Render(true)
 end
 
 function ShopUI.Close()
@@ -11530,7 +11599,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="76">
+          <Item class="ModuleScript" referent="77">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -11576,7 +11645,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="77">
+          <Item class="ModuleScript" referent="78">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -11652,7 +11721,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="78">
+          <Item class="ModuleScript" referent="79">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -12182,7 +12251,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="79">
+          <Item class="ModuleScript" referent="80">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -12296,7 +12365,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="80">
+          <Item class="ModuleScript" referent="81">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -12441,7 +12510,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="81">
+        <Item class="LocalScript" referent="82">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.

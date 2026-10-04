@@ -22,8 +22,12 @@ local function highestOwnedTool(owned, defs): string
 	return best or "rusty_shovel"
 end
 
+local function asTable(v)
+	return type(v) == "table" and v or {}
+end
+
 local function toolsV2(data, defs)
-	data.OwnedTools = data.OwnedTools or {}
+	data.OwnedTools = asTable(data.OwnedTools)
 	local granted = {}
 	for legacyId, grants in pairs(DataMigrations.LEGACY_TOOL_GRANTS) do
 		if data.OwnedTools[legacyId] then
@@ -37,11 +41,11 @@ local function toolsV2(data, defs)
 		end
 	end
 	data.OwnedTools.rusty_shovel = true
-	data.Equipment = data.Equipment or {}
+	data.Equipment = asTable(data.Equipment)
 	if #granted > 0 or not defs.Tools[data.Equipment.ToolId or ""] or not data.OwnedTools[data.Equipment.ToolId or ""] then
 		data.Equipment.ToolId = highestOwnedTool(data.OwnedTools, defs)
 	end
-	data.MigrationLog = data.MigrationLog or {}
+	data.MigrationLog = asTable(data.MigrationLog)
 	if #granted > 0 then
 		data.MigrationLog.ToolsV2 = table.concat(granted, ",")
 	end
@@ -52,8 +56,8 @@ end
 local function collectionV3(data, defs)
 	data.Display = type(data.Display) == "table" and data.Display or {}
 	data.Guide = type(data.Guide) == "table" and data.Guide or {}
-	data.MigrationLog = data.MigrationLog or {}
-	local stats = data.Stats or {}
+	data.MigrationLog = asTable(data.MigrationLog)
+	local stats = asTable(data.Stats)
 	if (stats.CashEarned or 0) > 0 or (stats.BlocksDug or 0) >= 4 then
 		data.Guide.mine = true
 	end
@@ -85,21 +89,21 @@ end
 
 -- Always-on repair: drops unknown tool/backpack ids and makes sure the equipped items are valid and owned.
 function DataMigrations.Sanitize(data, defs, starterTool: string, starterBackpack: string)
-	data.OwnedTools = data.OwnedTools or {}
+	data.OwnedTools = asTable(data.OwnedTools)
 	for id in pairs(data.OwnedTools) do
 		if not defs.Tools[id] then
 			data.OwnedTools[id] = nil
 		end
 	end
 	data.OwnedTools[starterTool] = true
-	data.OwnedBackpacks = data.OwnedBackpacks or {}
+	data.OwnedBackpacks = asTable(data.OwnedBackpacks)
 	for id in pairs(data.OwnedBackpacks) do
 		if not defs.Backpacks[id] then
 			data.OwnedBackpacks[id] = nil
 		end
 	end
 	data.OwnedBackpacks[starterBackpack] = true
-	data.Equipment = data.Equipment or {}
+	data.Equipment = asTable(data.Equipment)
 	if not defs.Tools[data.Equipment.ToolId or ""] or not data.OwnedTools[data.Equipment.ToolId] then
 		data.Equipment.ToolId = highestOwnedTool(data.OwnedTools, defs)
 	end

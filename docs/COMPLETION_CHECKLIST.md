@@ -1,8 +1,9 @@
 # DIG & RUN! — completion checklist (working document)
 
-Legend: ✅ implemented + verified offline · 🟡 implemented, needs Roblox Studio play-test · 🔧 in progress this pass ·
-❌ missing · 💥 broken. **Nothing here has been run in Roblox Studio** (this environment has no Studio): "verified" means
-unit tests, luau-lsp type-check and desk review only. See `docs/PLAYTEST_PLAN.md` for the exact in-engine tests.
+**Engine-verified features: NONE.** Nothing in this project has ever been run in Roblox Studio or on a live server (this environment has no
+Studio). The columns below keep three things apart: *Implemented* (code exists), *Offline-verified* (unit tests / type-check / desk review) and
+*Engine-verified* (observed in Studio). Every row's Engine column is ❌ until you send playtest results. In-engine tests: `docs/PLAYTEST_PLAN.md`,
+`docs/RELIC_PLAYTEST.md`.
 
 ## Audit summary (Stage 1)
 Found at the start of this pass: complete server-authoritative loop, 8-tier tools, carry-to-camp artifacts, elevator,
@@ -12,35 +13,23 @@ tabs (COMING SOON placeholders), floating signs (receiving, elevator), collidabl
 overlapping HUD on narrow windows, shop not scale-to-fit, MetricsService printing in production, no shop proximity check.
 
 ## Requirement map
+| # | Requirement | Implemented | Offline-verified | Engine-verified | Notes |
+|---|-------------|:---:|:---:|:---:|-------|
+| S2 | Playable loop (spawn→dig→sell→buy→improve), hold-to-mine, crosshair/highlight/hit agree, feedback | ✅ | partly (unit/desk) | ❌ | TOO FAR / TOO HARD labels; server cooldowns |
+| S3 | Tool assembly (one spec → held/FP/preview), FP camera, settings, menu, InputMode | ✅ | ✅ assembly (139 checks) | ❌ | mouse BASE constant is an estimate |
+| S4 | 8 tiers + 5 backpacks, previews, compare, inspect, no placeholder tabs | ✅ | model only (`economy_sim`) | ❌ | prices provisional; shop render skips unchanged state |
+| S5 | Deeper layered mine, layer gating, mine variation, buried remnants, discovery pockets | ✅ | ✅ (mine_style) | ❌ | `MINE_DETAIL.md` |
+| S5b | Mine reset lifecycle + recovery area + generation ids | ✅ | ✅ (loot_reset) | ❌ | `MINE_RESET.md` |
+| S5c | Hidden randomized loot, per-generation limits, real-artifact tells | ✅ | ✅ | ❌ | `LOOT.md` |
+| S6 | Personal important artifacts: carry/place/deposit/recovery | ✅ | ✅ (artifact tests) | ❌ | `ARTIFACT_RECOVERY.md` |
+| S6b | Artifact models | 4 final-pending-review, **7 UNFINISHED (meshes generated, not imported)** | structure only | ❌ | blocked on Studio import: `ARTIFACT_MESHES.md` |
+| S6c | **Server relic contested PvP** | ✅ | ✅ (relic, 69 checks) | ❌ **AWAITING MULTIPLAYER VALIDATION** | `RELIC_PVP.md`; run sheet `RELIC_PLAYTEST.md`; incomplete |
+| S7 | Collection journal, camp shelf, set completion | ✅ | ✅ (spec logic) | ❌ | client-only shelf |
+| S8 | World: camp spacing, no sand overlap, recovery pad, safe-zone line, signs | ✅ | ✅ layout tests + runtime `WorldAudit` | ❌ | |
+| S9 | Onboarding (empty-outline bug fixed), UI tokens, scale-to-fit, audio | ✅ | ✅ guide logic | ❌ | audio = built-in placeholder sounds |
+| S10 | Saving: UpdateAsync + session lock, migrations v1→v3, corrupted-save repair, failed-load kick | ✅ | ✅ (saving tests) | ❌ | never run against a real DataStore |
+| S10b | Two-player / performance | — | — | ❌ blocked | needs Studio |
+| S11 | Release materials | ✅ drafted | — | — | publish checklist is secondhand |
 
-| # | Requirement | Status | Notes / dependency |
-|---|-------------|--------|--------------------|
-| S2 | Playable loop (spawn→dig→sell→buy→improve) | 🟡 | `GuideSpec` hints added; needs Studio loop run |
-| S2 | Hold-to-mine, cooldowns, crosshair/highlight/hit agree | 🟡 | shared targeting, server cooldown |
-| S2 | Full-backpack / invalid-target / too-far feedback | 🟡 | "TOO FAR" / "TOO HARD" label under the crosshair |
-| S2 | Server-controlled damage/loot/currency/ownership | ✅ | DigService/Economy; no-duplicate-loot is a synchronous cell check |
-| S3 | Tool assembly (one spec → held/FP/preview) | ✅ 🟡 | `tests/tool_assembly_test` (118 checks) |
-| S3 | FP camera, sensitivity, settings, pause menu, InputMode | 🟡 | BASE mouse constant is an estimate |
-| S4 | 8-tier tools + backpacks, previews, compare, inspect | 🟡 | prices re-checked vs. deeper mine (`tools/economy_sim.py`) |
-| S4 | Remove placeholder tabs | ✅ | Utility/Cosmetics removed; backpack previews use real pack models |
-| S5 | Mine depth/layers support progression | 🟡 | 24×24×20, four 5-row layers, toughness 24/42/72/110, layer gating by tool tier (`docs/MINE_SHIFT.md`) |
-| S5 | Mine reset lifecycle | 🟡 | Active→Warning→Evacuating→Regenerating→Active, recovery area, generation ids (`docs/MINE_RESET.md`); behaviour unit-tested, live sequence needs Studio + 2 players |
-| S5c | Random buried loot, per-generation limits, tells | 🟡 | `docs/LOOT.md`; behaviour unit-tested; presentation needs Studio |
-| S6 | Artifact discovery, carry, place, deposit, recovery policy | ✅ 🟡 | `artifact_test` (+relocation cases) |
-| S6 | Rarity reveals one visual language | 🟡 | EffectsController |
-| S7 | Collection journal (J) | 🟡 | `CollectionSpec` (pure) + `CollectionUI` |
-| S7 | Camp personal display + choice | 🟡 | client-side shelf, saved `Display` list |
-| S7 | Set completion | 🟡 | per-layer sets, toast on completion |
-| S8 | World: camp spacing, no sand overlap, signs | ✅ 🟡 | audit + `WorldAudit`; floating signs fixed this pass |
-| S9 | Onboarding hints | 🟡 | `GuideSpec` + `GuideController`; empty-outline bug fixed (`docs/TUTORIAL.md`), Skip/Restart, baseline restart, saved progress (unit-tested) |
-| S9 | UI unification, number formatting | 🟡 | `UIKit.Tokens`/`flatButton`/`fit`; shop/menu/journal scale-to-fit; HUD centre text constrained |
-| S5b | Mine variation, buried remnants, discovery pockets | 🟡 | `docs/MINE_DETAIL.md`; 269 offline checks; needs Studio |
-| S6b | Artifact models (one source for reveal/carry/journal/shelf) | 🟡 | 4 primitive models final-pending-review; **7 artifacts UNFINISHED: meshes generated (`docs/ARTIFACT_MESHES.md`), not imported (needs Studio)** |
-| S6c | Server relic contested PvP (`docs/RELIC_PVP.md`) | 🟡 | implemented; behaviour unit-tested offline (63 checks); NOT tested in Studio / with two players |
-| S9 | Audio | 🟡 | **built-in Roblox placeholder sounds** – replacement needed before release |
-| S10 | Persistence + migrations + failed-load safety | 🟡 | v3 migration (unit-tested); UpdateAsync + session lock; failed load kicks in production; BindToClose waits for all saves |
-| S10 | Two-player / performance testing | ❌ (blocked) | needs Studio/server; see playtest plan |
-| S11 | Release materials | ✅ (drafted) | `docs/RELEASE_CANDIDATE.md`, `docs/PLAYTEST_PLAN.md`; publish checklist is secondhand |
-
-Dependencies: S5 (deeper mine) → elevator stops derive from layers → camp/elevator audit; S7 → needs data v3 (S10);
-S9 guide needs S7 (collection step) and S5 (shift banner).
+Dependencies: S5 (depth) → elevator stops from layers; S7 needs data v3; relic (S6c) depends on carry gates (S6), reset (S5b) and the safe-zone line (S8).
+Independent work does not wait for the relic playtest.

@@ -12,6 +12,11 @@ function RelicRules.InSafeZone(x: number, y: number, z: number): boolean
 	return z >= r.SafeBoundaryZ and z <= farZ + 4 and math.abs(x - camp.Position.X) <= halfX + 4 and y < 14
 end
 
+-- Pickup distance: exactly what the prompt shows, plus the small documented tolerance (interaction consistency, not balance).
+function RelicRules.PickupInReach(distance: number): boolean
+	return distance <= Config.Relic.PickupReach + Config.Relic.PickupTolerance
+end
+
 -- May `attacker` strike the carrier right now? ctx = { EventState, AttackerId, CarrierId, Distance, LineOfSight,
 -- Now, LastAttack, ProtectedUntil, AttackerAlive, CarrierAlive, AttackerCarrying, AttackerInSafe, CarrierInSafe }
 function RelicRules.CheckStrike(ctx): (boolean, string?)

@@ -341,10 +341,28 @@ local function renderTabs()
 	end
 end
 
-function ShopUI.Render()
+-- Everything the shop shows depends on this signature. State snapshots arrive on every block dug; re-rendering identical content would
+-- rebuild every thumbnail viewport for nothing, so an unchanged signature skips the work.
+local lastRenderKey = ""
+local function renderKey(): string
+	local d = State.Data
+	local owned = {}
+	for id in pairs(d.OwnedTools or {}) do table.insert(owned, id) end
+	for id in pairs(d.OwnedBackpacks or {}) do table.insert(owned, id) end
+	table.sort(owned)
+	return table.concat({ tab, sel.Kind, sel.Id, tostring(d.Cash), tostring(d.ToolId), tostring(d.BackpackId), tostring(d.Carrying ~= nil),
+		tostring(d.Consumables and d.Consumables.dynamite or 0), table.concat(owned, ","), tostring(refs.inspect and refs.inspect.Visible) }, "|")
+end
+
+function ShopUI.Render(force: boolean?)
 	if not root then
 		return
 	end
+	local key = renderKey()
+	if not force and key == lastRenderKey then
+		return
+	end
+	lastRenderKey = key
 	-- keep the selection valid for the current tab
 	if tab == "Tools" and sel.Kind == "Backpack" then
 		sel = { Kind = "Tool", Id = State.Data.ToolId or "rusty_shovel" }
@@ -381,7 +399,7 @@ function ShopUI.Open()
 		target = id
 	end
 	sel = { Kind = "Tool", Id = target }
-	ShopUI.Render()
+	ShopUI.Render(true)
 end
 
 function ShopUI.Close()

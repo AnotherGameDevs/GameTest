@@ -172,7 +172,7 @@ local function spawnModel()
 	prompt.ObjectText = def.Name
 	prompt.ActionText = "Take the relic (contested!)"
 	prompt.HoldDuration = 0.5
-	prompt.MaxActivationDistance = R.PickupReach - 2
+	prompt.MaxActivationDistance = R.PickupReach -- same distance the server enforces (plus RelicRules' small tolerance)
 	prompt.RequiresLineOfSight = false
 	prompt.Parent = root
 	prompt.Triggered:Connect(function(player)
@@ -268,7 +268,7 @@ function RelicService.Pickup(player: Player, relicId: any)
 	if not char or not hrp or not hum then
 		return
 	end
-	if (hrp.Position - event.Position).Magnitude > R.PickupReach then
+	if not RelicRules.PickupInReach((hrp.Position - event.Position).Magnitude) then
 		return
 	end
 	-- no taking it through walls (the prompt itself does not require line of sight)
