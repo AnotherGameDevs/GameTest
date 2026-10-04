@@ -55,13 +55,19 @@ into camp, so a reset cannot make delivery trivial. Pickups are also refused onc
 
 ## Configurable values (`Config.Relic`, provisional)
 MaxControl 100 · ControlPerHit 25 · AttackRange 7 · AttackCooldown 1.0 · StrikeKnockback 9 · ShoveRange 7 · ShoveCooldown 4.0 · ShoveKnockback 20 ·
-ShoveEngageSeconds 12 · MaxKnockbackH 24 / Up 7 · PickupProtection 3.0 · PickupReach 14 · PlaceReach 8 · SafeBoundaryZ 64 · CampGraceSeconds 20 ·
+ShoveEngageSeconds 12 · MaxKnockbackH 24 / Up 7 · PickupProtection 3.0 · PickupReach 12 · PlaceReach 8 · SafeBoundaryZ 64 · CampGraceSeconds 20 ·
 RecoveryPoint (0,0,53) · UnreachableBelowY -90 · Reset.RelicHoldSeconds 90. Rate limits: RelicAttack 6/2 s, RelicPickup 4/3 s, RelicPlace 3/3 s.
 
-## Verified offline (`tests/relic_test.luau`, 63 checks of behaviour)
+## Verified offline (`tests/relic_test.luau`, 66 checks of behaviour)
 type separation, no hint of an undiscovered relic, first-pickup-wins, ownership transfer, protection, control meter and drop, strike/shove validation (range,
 LOS flag, cooldown, event state, safe zone, self, unrelated), bounded knockback, safe-zone/grace/stalling, deposit exactly once and only by the carrier,
 expiry + stale requests, bounded reset hold. **NOT verified (needs Studio, 2+ players):** everything that touches the engine — see PLAYTEST_PLAN #28-40.
+
+## Review fixes (desk review, still unverified in engine)
+* Place-down + instant re-grab no longer refills the control meter: the player who dropped it cannot take it back for `RegrabLockout` (5 s).
+* Pickup now needs line of sight (reach 12), so a relic can not be taken through walls.
+* The safe-zone grace is cumulative (stepping out only drains it at half speed), so zig-zagging at the line can not stall forever.
+* A rejected hit (pickup protection) no longer spends the attacker's cooldown; no relic event can start while the mine is shutting down for a reset.
 
 ## Known unresolved issues / risks
 * Line-of-sight uses one ray between torsos; corners and thin geometry may over/under-block. Needs playtesting.

@@ -9,7 +9,7 @@ RelicEvent.__index = RelicEvent
 function RelicEvent.new(id: string, treasureId: string, value: number, discovererId: number, position, generation: number, policy, now: number)
 	return setmetatable({
 		Id = id, TreasureId = treasureId, Value = value, DiscovererId = discovererId, Position = position, Generation = generation,
-		State = "Discovered", CarrierId = nil, Control = policy.MaxControl, ProtectedUntil = 0, InCampSince = nil :: number?,
+		State = "Discovered", CarrierId = nil, Control = policy.MaxControl, ProtectedUntil = 0, SafeSeconds = 0, LastTrack = nil :: number?, LastDropperId = nil :: number?, DroppedAt = -1e9,
 		Transfers = 0, DiscoveredAt = now, policy = policy,
 	}, RelicEvent)
 end
@@ -26,11 +26,15 @@ function RelicEvent:Pickup(userId: number, now: number): (boolean, string?)
 	if self.State == "Carried" then
 		return false, "AlreadyCarried"
 	end
+	if userId == self.LastDropperId and now - self.DroppedAt < self.policy.RegrabLockout then
+		return false, "TooSoon" -- placing it down and re-grabbing must not refill the control meter
+	end
 	self.State = "Carried"
 	self.CarrierId = userId
 	self.Control = self.policy.MaxControl -- a new carrier starts with full control...
 	self.ProtectedUntil = now + self.policy.PickupProtection -- ...and a SHORT protection window
-	self.InCampSince = nil
+	self.SafeSeconds = 0
+	self.LastTrack = nil
 	self.Transfers += 1
 	return true
 end
@@ -41,9 +45,12 @@ function RelicEvent:Drop(position, now: number): boolean
 		return false
 	end
 	self.State = "Dropped"
+	self.LastDropperId = self.CarrierId
+	self.DroppedAt = now
 	self.CarrierId = nil
 	self.Position = position
-	self.InCampSince = nil
+	self.SafeSeconds = 0
+	self.LastTrack = nil
 	self.ProtectedUntil = 0
 	return true
 end
@@ -80,16 +87,22 @@ function RelicEvent:Expire(): boolean
 	return true
 end
 
--- Camp safe-zone grace: tracks how long the carrier has been inside the safe zone. Returns true once the grace has run out.
+-- Camp safe-zone grace: CUMULATIVE time spent in the safe zone. Stepping out does not reset it (that would allow stalling at the
+-- line); it only drains at half speed. Returns true once the carrier has used up the grace.
 function RelicEvent:TrackCamp(inSafeZone: boolean, now: number): boolean
-	if self.State ~= "Carried" or not inSafeZone then
-		self.InCampSince = nil
+	if self.State ~= "Carried" then
+		self.SafeSeconds = 0
+		self.LastTrack = nil
 		return false
 	end
-	if not self.InCampSince then
-		self.InCampSince = now
+	local dt = self.LastTrack and math.max(now - self.LastTrack, 0) or 0
+	self.LastTrack = now
+	if inSafeZone then
+		self.SafeSeconds += dt
+	else
+		self.SafeSeconds = math.max(self.SafeSeconds - dt * 0.5, 0)
 	end
-	return now - self.InCampSince >= self.policy.CampGraceSeconds
+	return self.SafeSeconds >= self.policy.CampGraceSeconds
 end
 
 return RelicEvent

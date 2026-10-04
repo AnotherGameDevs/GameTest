@@ -201,8 +201,8 @@ function RelicService.Discover(player: Player, treasureId: string, position: Vec
 	if not R.Enabled or not def or not def.Relic or not DataService.Get(player) then
 		return false
 	end
-	if event and event:IsActive() then
-		return false
+	if (event and event:IsActive()) or not MineState.Accepting() then
+		return false -- one contested relic per server; and never start one while the mine is shutting down for a reset
 	end
 	local size = ArtifactService.ArtifactSize(treasureId)
 	local cf = supportedSpot({ position, position + Vector3.new(1, 0, 0), position - Vector3.new(1, 0, 0),
@@ -223,6 +223,27 @@ function RelicService.Discover(player: Player, treasureId: string, position: Vec
 	return true
 end
 
+-- Everything that must not count as an obstacle: both characters, the relic's own model and carried tool.
+local function ignoreFor(a: Player, b: Player): { Instance }
+	local out: { Instance } = { folder }
+	for _, inst in ipairs({ a.Character, b.Character, carryTool }) do
+		if inst then
+			table.insert(out, inst)
+		end
+	end
+	return out
+end
+
+local function lineOfSight(a: BasePart, b: BasePart, ignore: { Instance }): boolean
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = ignore
+	rp.RespectCanCollide = false
+	local from, to = a.Position + Vector3.new(0, 1.2, 0), b.Position + Vector3.new(0, 0.8, 0)
+	return Workspace:Raycast(from, to - from, rp) == nil -- anything solid between them (cells, walls, structures) blocks the hit
+end
+
+
 -- Pickup ----------------------------------------------------------------------------------------------------------------------
 function RelicService.Pickup(player: Player, relicId: any)
 	if type(relicId) ~= "string" or not RateLimiter.Check(player, "RelicPickup") then
@@ -238,12 +259,21 @@ function RelicService.Pickup(player: Player, relicId: any)
 	if (hrp.Position - event.Position).Magnitude > R.PickupReach then
 		return
 	end
+	-- no taking it through walls (the prompt itself does not require line of sight)
+	local root = worldModel and worldModel.PrimaryPart
+	if root and not lineOfSight(hrp, root, ignoreFor(player, player)) then
+		say(player, "There is something in the way.", "Info")
+		return
+	end
 	if CarryRegistry.IsCarrying(player) then
 		say(player, "Put down what you are carrying first.", "Danger")
 		return
 	end
-	local ok = event:Pickup(player.UserId, os.clock()) -- atomic: simultaneous pickups: exactly one succeeds
+	local ok, why = event:Pickup(player.UserId, os.clock()) -- atomic: simultaneous pickups: exactly one succeeds
 	if not ok then
+		if why == "TooSoon" then
+			say(player, "You just dropped it - someone else gets a chance first.", "Info")
+		end
 		return
 	end
 	destroyModel()
@@ -355,26 +385,6 @@ function RelicService.Place(player: Player)
 end
 
 -- Combat ----------------------------------------------------------------------------------------------------------------------
--- Everything that must not count as an obstacle: both characters, the relic's own model and carried tool.
-local function ignoreFor(a: Player, b: Player): { Instance }
-	local out: { Instance } = { folder }
-	for _, inst in ipairs({ a.Character, b.Character, carryTool }) do
-		if inst then
-			table.insert(out, inst)
-		end
-	end
-	return out
-end
-
-local function lineOfSight(a: BasePart, b: BasePart, ignore: { Instance }): boolean
-	local rp = RaycastParams.new()
-	rp.FilterType = Enum.RaycastFilterType.Exclude
-	rp.FilterDescendantsInstances = ignore
-	rp.RespectCanCollide = false
-	local from, to = a.Position + Vector3.new(0, 1.2, 0), b.Position + Vector3.new(0, 0.8, 0)
-	return Workspace:Raycast(from, to - from, rp) == nil -- anything solid between them (cells, walls, structures) blocks the hit
-end
-
 local function pushOnClient(target: Player, from: Vector3, to: Vector3, speed: number, up: number, kind: string)
 	-- Knockback is applied ONCE by the target's own client (it owns its character), bounded by RelicRules.ClampKnockback.
 	local vx, vy, vz = RelicRules.ClampKnockback(to.X - from.X, to.Z - from.Z, speed, up)
@@ -412,12 +422,12 @@ local function strike(attacker: Player, carrier: Player)
 		end
 		return
 	end
-	lastAttack[attacker.UserId] = now
 	local applied, dropped = event:Hit(attacker.UserId, R.ControlPerHit, now)
 	if not applied then
 		say(attacker, "The carrier just picked it up - they are protected for a moment.", "Info")
-		return
+		return -- a rejected hit does not spend the attacker's cooldown
 	end
+	lastAttack[attacker.UserId] = now
 	pushOnClient(carrier, (aHrp :: BasePart).Position, (cHrp :: BasePart).Position, R.StrikeKnockback, 3, "Hit")
 	publish()
 	if dropped then
@@ -612,7 +622,7 @@ function RelicService.Init()
 					lastSafe[event.CarrierId] = hrp.Position
 				end
 				local inSafe = RelicRules.InSafeZone(hrp.Position.X, hrp.Position.Y, hrp.Position.Z)
-				if inSafe and not event.InCampSince and not warnedGrace and carrier then
+				if inSafe and event.SafeSeconds < 1 and not warnedGrace and carrier then
 					warnedGrace = true
 					say(carrier, ("Deposit the relic at the receiving table within %d seconds!"):format(R.CampGraceSeconds), "Danger")
 				end
@@ -620,6 +630,7 @@ function RelicService.Init()
 					warnedGrace = false
 				end
 				if event:TrackCamp(inSafe, now) then
+					warnedGrace = false
 					returnToRecovery(("%s did not deposit the %s in time - it returned to the mine entrance."):format(carrier and carrier.DisplayName or "The carrier", relicName()))
 				end
 			end

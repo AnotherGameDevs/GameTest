@@ -37,6 +37,12 @@ do
 	check("placing it down makes it unclaimed (no exclusive owner)", e:Drop({ X = 5 }, 20) and e.State == "Dropped" and e.CarrierId == nil and e.Position.X == 5)
 	check("ANOTHER player may take it (ownership transfers on validated pickup only)", e:Pickup(3, 21) and e.CarrierId == 3 and e.Transfers == 2)
 	check("the event identity is unchanged through transfers", e.Id == "E1" and e.TreasureId == "sun_mask")
+	-- place-down + re-grab must not refill the control meter
+	local g = newEvent(0); g:Pickup(2, 0)
+	g:Hit(3, R.ControlPerHit, R.PickupProtection + 1)
+	g:Drop({ X = 1 }, 10)
+	check("the player who just dropped it can not instantly re-grab it", not g:Pickup(2, 10.5) and select(2, g:Pickup(2, 10.5)) == "TooSoon")
+	check("someone else can, and the dropper can after the lockout", g:Pickup(3, 11) and g:Drop({ X = 2 }, 12) and g:Pickup(2, 12 + R.RegrabLockout + 0.1))
 end
 
 -- ================================================================== control meter =====================================
@@ -106,9 +112,21 @@ do
 	local e = newEvent(0); e:Pickup(2, 0)
 	check("entering the safe zone does not award anything", e.State == "Carried" and not e:TrackCamp(true, 5))
 	check("the grace period is short and configurable", R.CampGraceSeconds >= 10 and R.CampGraceSeconds <= 40)
-	check("leaving the zone resets the grace", not e:TrackCamp(false, 8) and e.InCampSince == nil)
-	e:TrackCamp(true, 10)
-	check("stalling in the safe zone past the grace is detected", not e:TrackCamp(true, 10 + R.CampGraceSeconds - 1) and e:TrackCamp(true, 10 + R.CampGraceSeconds))
+	e:TrackCamp(true, 10); e:TrackCamp(true, 15)
+	local before = e.SafeSeconds
+	e:TrackCamp(false, 17)
+	check("stepping out does not reset the grace (it only drains slowly)", e.SafeSeconds > 0 and e.SafeSeconds < before)
+	local stall = newEvent(0); stall:Pickup(2, 0)
+	local t, tripped = 0, false
+	for i = 1, 200 do -- stepping across the line every 8 s never escapes the grace
+		t += 1
+		local inside = (i // 8) % 2 == 0
+		if stall:TrackCamp(inside, t) then tripped = true; break end
+	end
+	check("zig-zagging across the boundary can not stall forever", tripped and t < 200)
+	local steady = newEvent(0); steady:Pickup(2, 0)
+	steady:TrackCamp(true, 0)
+	check("standing in the safe zone past the grace is detected", not steady:TrackCamp(true, R.CampGraceSeconds - 1) and steady:TrackCamp(true, R.CampGraceSeconds))
 	local ok, value = e:Deposit(2)
 	check("the carrier deposits: reward exactly once", ok and value == 3500 and e.State == "Secured")
 	check("a second deposit fails", not e:Deposit(2))

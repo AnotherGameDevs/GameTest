@@ -113,10 +113,11 @@ Config.Relic = {
 	MaxKnockbackH = 24, -- hard caps on any knockback, studs/s
 	MaxKnockbackUp = 7,
 	PickupProtection = 3.0, -- seconds a new carrier cannot lose control (short, so it never covers the escape route)
-	PickupReach = 14,
+	PickupReach = 12,
+	RegrabLockout = 5.0, -- the player who just dropped/placed it can not re-grab it for this long (no control reset by place + re-pickup)
 	PlaceReach = 8,
 	SafeBoundaryZ = 64, -- the camp's safe zone starts at this z (camp side); PvP and control loss stop there
-	CampGraceSeconds = 20, -- inside the safe zone without depositing for this long -> the relic returns to the recovery point
+	CampGraceSeconds = 20, -- CUMULATIVE time in the safe zone without depositing -> the relic returns to the recovery point (leaving only decays it at half speed)
 	RecoveryPoint = Vector3.new(0, 0, 53), -- on the entrance boardwalk, inside the contested area, outside the safe zone
 	UnreachableBelowY = -90, -- a dropped relic below this (or outside the map) is returned to the recovery point
 }
