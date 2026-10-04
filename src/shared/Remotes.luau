@@ -14,6 +14,7 @@ local EVENTS = {
 	"TreasureFound", -- S->C  treasure reveal
 	"Sold", -- S->C  (amount, count)
 	"Notify", -- S->C  (text, kind)
+	"ReturnResult", -- S->C  (ok, secondsUntilReady)
 }
 
 local folder: Folder

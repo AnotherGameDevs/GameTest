@@ -19,6 +19,7 @@ local EconomyService = {}
 
 local soldRemote = Remotes.Get("Sold")
 local notifyRemote = Remotes.Get("Notify")
+local returnRemote = Remotes.Get("ReturnResult")
 local lastSell: { [Player]: number } = {}
 local lastReturn: { [Player]: number } = {}
 
@@ -98,21 +99,29 @@ local function purchase(player: Player, kind: any, id: any)
 end
 
 local function returnToCamp(player: Player)
-	if not Config.ReturnToCamp.Enabled or not RateLimiter.Check(player, "ReturnToCamp") then
+	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	if not RateLimiter.Check(player, "ReturnToCamp") then
+		returnRemote:FireClient(player, false, 1)
 		return
 	end
 	local now = os.clock()
 	local wait = Config.ReturnToCamp.Cooldown - (now - (lastReturn[player] or -1e9))
 	if wait > 0 then
-		notifyRemote:FireClient(player, ("Return to Camp ready in %ds"):format(math.ceil(wait)), "Info")
+		returnRemote:FireClient(player, false, wait)
 		return
 	end
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-	if hrp then
-		lastReturn[player] = now
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.CFrame = WorldBuilder.SpawnCFrame
+	if not hrp or not humanoid or humanoid.Health <= 0 then
+		notifyRemote:FireClient(player, "Can't return to camp right now.", "Danger")
+		return
 	end
+	lastReturn[player] = now
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.CFrame = WorldBuilder.SpawnCFrame
+	returnRemote:FireClient(player, true, Config.ReturnToCamp.Cooldown)
 end
 
 function EconomyService.Init()

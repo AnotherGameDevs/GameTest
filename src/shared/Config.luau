@@ -36,7 +36,7 @@ Config.Layers = {
 }
 
 Config.Dig = {
-	ReachPadding = 4, -- studs added to tool reach for server distance check (lag tolerance)
+	ReachTolerance = 2, -- studs of slack the SERVER adds to tool Reach (movement/latency). Client indicator uses none.
 	CooldownTolerance = 0.80, -- server accepts hits at >= 80% of the tool's nominal interval
 	SplashFraction = 0.55, -- damage fraction applied to neighbours when tool DigRadius > 0
 	MaxBroadcastDistance = 220, -- only clients within this distance get hit feedback

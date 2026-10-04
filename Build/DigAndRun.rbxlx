@@ -48,7 +48,7 @@ Config.Layers = {
 }
 
 Config.Dig = {
-	ReachPadding = 4, -- studs added to tool reach for server distance check (lag tolerance)
+	ReachTolerance = 2, -- studs of slack the SERVER adds to tool Reach (movement/latency). Client indicator uses none.
 	CooldownTolerance = 0.80, -- server accepts hits at >= 80% of the tool's nominal interval
 	SplashFraction = 0.55, -- damage fraction applied to neighbours when tool DigRadius > 0
 	MaxBroadcastDistance = 220, -- only clients within this distance get hit feedback
@@ -101,6 +101,7 @@ return Config
           <string name="Name">Defs</string>
           <string name="Source"><![CDATA[-- Data-driven definitions: tools, backpacks, treasure, rarity.
 local Config = require(script.Parent.Config)
+local Grid = require(script.Parent.Grid)
 local P = Config.Palette
 
 local Defs = {}
@@ -118,12 +119,12 @@ Defs.Rarity = {
 -- (this is what makes better shovels *behave* differently, not only hit harder).
 Defs.Tools = {
 	rusty_shovel = {
-		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 14,
+		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 8,
 		Price = 0, RequiredReputation = 0, Order = 1, Color = Color3.fromHex("8A6A55"), Scale = 1.0,
 		Blurb = "Slow. One block at a time.",
 	},
 	digging_shovel = {
-		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 16,
+		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 10,
 		Price = 180, RequiredReputation = 0, Order = 2, Color = P.Teal, Scale = 1.35,
 		Blurb = "Faster, harder, and smashes neighbouring blocks too!",
 	},
@@ -148,10 +149,17 @@ Defs.Treasure = {
 	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
 }
 
--- The ONE reach rule. Server validates with it; the client reach indicator uses the same function.
--- Distance is measured from the character's HumanoidRootPart to the dig cell's centre.
-function Defs.DigReachLimit(tool): number
-	return tool.Reach + Config.Dig.ReachPadding + Config.Site.CellSize
+-- The ONE reach rule, used by server validation and the client reach indicator.
+-- tool.Reach is the literal distance in studs from the character's HumanoidRootPart to the NEAREST POINT of the
+-- target cell (so a block's face 8 studs away is in reach of an 8-stud tool; no cell-size allowance).
+-- `tolerance` is extra slack: the server passes Config.Dig.ReachTolerance, the client passes 0.
+function Defs.CellInReach(tool, from: Vector3, x: number, y: number, z: number, tolerance: number?): boolean
+	local c = Grid.CellCenter(x, y, z)
+	local h = Grid.CellSize / 2
+	local dx = math.max(math.abs(from.X - c.X) - h, 0)
+	local dy = math.max(math.abs(from.Y - c.Y) - h, 0)
+	local dz = math.max(math.abs(from.Z - c.Z) - h, 0)
+	return math.sqrt(dx * dx + dy * dy + dz * dz) <= tool.Reach + (tolerance or 0)
 end
 
 function Defs.LayerAtCell(y: number)
@@ -301,6 +309,7 @@ local EVENTS = {
 	"TreasureFound", -- S->C  treasure reveal
 	"Sold", -- S->C  (amount, count)
 	"Notify", -- S->C  (text, kind)
+	"ReturnResult", -- S->C  (ok, secondsUntilReady)
 }
 
 local folder: Folder
@@ -717,8 +726,7 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 		return
 	end
 	local center = Grid.CellCenter(x, y, z)
-	local maxDist = Defs.DigReachLimit(tool)
-	if (hrp.Position - center).Magnitude > maxDist then
+	if not Defs.CellInReach(tool, hrp.Position, x, y, z, Config.Dig.ReachTolerance) then
 		return
 	end
 	lastHit[player] = now
@@ -802,6 +810,7 @@ local EconomyService = {}
 
 local soldRemote = Remotes.Get("Sold")
 local notifyRemote = Remotes.Get("Notify")
+local returnRemote = Remotes.Get("ReturnResult")
 local lastSell: { [Player]: number } = {}
 local lastReturn: { [Player]: number } = {}
 
@@ -881,21 +890,29 @@ local function purchase(player: Player, kind: any, id: any)
 end
 
 local function returnToCamp(player: Player)
-	if not Config.ReturnToCamp.Enabled or not RateLimiter.Check(player, "ReturnToCamp") then
+	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	if not RateLimiter.Check(player, "ReturnToCamp") then
+		returnRemote:FireClient(player, false, 1)
 		return
 	end
 	local now = os.clock()
 	local wait = Config.ReturnToCamp.Cooldown - (now - (lastReturn[player] or -1e9))
 	if wait > 0 then
-		notifyRemote:FireClient(player, ("Return to Camp ready in %ds"):format(math.ceil(wait)), "Info")
+		returnRemote:FireClient(player, false, wait)
 		return
 	end
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-	if hrp then
-		lastReturn[player] = now
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.CFrame = WorldBuilder.SpawnCFrame
+	if not hrp or not humanoid or humanoid.Health <= 0 then
+		notifyRemote:FireClient(player, "Can't return to camp right now.", "Danger")
+		return
 	end
+	lastReturn[player] = now
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.CFrame = WorldBuilder.SpawnCFrame
+	returnRemote:FireClient(player, true, Config.ReturnToCamp.Cooldown)
 end
 
 function EconomyService.Init()
@@ -1575,6 +1592,10 @@ function WorldBuilder.Build()
 
 	-- Rim posts around the pit so the site reads from afar
 	for i = 0, 7 do
+		-- RimPost2 stood at (0, 72): dead centre of the straight spawn -> dig site route, so it is not built.
+		if i == 2 then
+			continue
+		end
 		local ang = i / 8 * math.pi * 2
 		local r = math.max(half, halfZ) * 1.5
 		part(world, "RimPost" .. i, Vector3.new(2, Config.Site.BorderHeight, 2),
@@ -1706,6 +1727,7 @@ return Audio
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -1718,10 +1740,12 @@ local player = Players.LocalPlayer
 local CameraController = {}
 
 local TOGGLE_KEY = Enum.KeyCode.V -- temporary comparison toggle
-local FREE_CURSOR_KEY = Enum.KeyCode.LeftAlt -- hold to release the cursor in first person (e.g. click TO CAMP)
+local FREE_CURSOR_KEY = Enum.KeyCode.LeftAlt -- press to toggle MINING mode <-> FREE-CURSOR mode (first person)
 local START_FIRST_PERSON = true
 local THIRD_PERSON_DISTANCE = 12
-local SHOVEL_FADE = 0.8 -- LocalTransparencyModifier applied only while the shovel covers the crosshair
+local SHOVEL_FADE = 0.85 -- LocalTransparencyModifier applied while the shovel covers the crosshair / mining face
+local SHOVEL_FP_SCALE = 0.5 -- the held shovel is drawn this fraction of its size in first person (local only)
+local CLEARANCE_RADIUS = 0.06 -- of viewport height: how far around the crosshair must stay clear
 
 local desktop = not UserInputService.TouchEnabled
 local wantFirst = START_FIRST_PERSON
@@ -1764,16 +1788,48 @@ local function applyMode()
 			player.CameraMinZoomDistance = 0.5
 		end)
 	end
-	if hint then
-		hint.Text = wantFirst and "FIRST PERSON  -  V: switch view  -  hold ALT: free cursor"
-			or "THIRD PERSON  -  V: switch view"
+end
+
+local function updateHint()
+	if not hint then
+		return
+	end
+	if not wantFirst then
+		hint.Text = "THIRD PERSON  -  V: switch view  -  R: return to camp"
+	elseif UI.IsCursorFree() then
+		hint.Text = "FREE CURSOR  -  ALT: back to mining  -  V: switch view"
+	else
+		hint.Text = "MINING  -  ALT: free cursor  -  V: switch view  -  R: return to camp"
+	end
+end
+
+-- Pauses camera rotation (mouse-look, right-drag, wheel zoom) by sinking those inputs ahead of the default
+-- camera scripts. Only used while a menu / free-cursor mode owns the pointer.
+local frozen = false
+local function setCameraFrozen(freeze: boolean)
+	if freeze == frozen then
+		return
+	end
+	frozen = freeze
+	if freeze then
+		ContextActionService:BindActionAtPriority("DigFreezeCamera", function()
+			return Enum.ContextActionResult.Sink
+		end, false, Enum.ContextActionPriority.High.Value + 100,
+			Enum.UserInputType.MouseMovement, Enum.UserInputType.MouseButton2, Enum.UserInputType.MouseWheel)
+	else
+		ContextActionService:UnbindAction("DigFreezeCamera")
 	end
 end
 
 function CameraController.Toggle()
 	if desktop then
 		wantFirst = not wantFirst
+		if not wantFirst then
+			UI.SetCursorFree(false) -- third person always has a free pointer; leave the mode flag clean
+		end
 		applyMode()
+		updateHint()
+		setCameraFrozen(wantFirst and UI.IsMenuOpen())
 	end
 end
 
@@ -1818,35 +1874,70 @@ local function buildHud()
 	hint.Parent = crossGui
 end
 
--- Fades the held shovel only while it would sit on top of the crosshair (one extra ray; no art changes).
+-- Local-only first-person shovel shrink. Scales every part, weld offset and the grip about the hand so the
+-- model keeps its proportions. Tracked per tool instance in a local attribute, and undone in third person.
+local function setToolScale(tool: Instance, scale: number)
+	local current = tool:GetAttribute("FPScale") or 1
+	if math.abs(current - scale) < 1e-3 then
+		return
+	end
+	local ratio = scale / current
+	for _, d in ipairs(tool:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Size *= ratio
+		elseif d:IsA("Weld") then
+			local c0 = d.C0
+			d.C0 = CFrame.new(c0.Position * ratio) * (c0 - c0.Position)
+		end
+	end
+	if tool:IsA("Tool") then
+		local g = tool.Grip
+		tool.Grip = CFrame.new(g.Position * ratio) * (g - g.Position)
+		local base = tool:FindFirstChild("BaseGripValue")
+		if base and base:IsA("CFrameValue") then
+			base.Value = tool.Grip
+		end
+	end
+	tool:SetAttribute("FPScale", scale)
+end
+
+local CLEARANCE_OFFSETS = {
+	Vector2.new(0, 0), Vector2.new(1, 0), Vector2.new(-1, 0), Vector2.new(0, 1), Vector2.new(0, -1),
+}
+
+-- Shrinks the held shovel in first person and fades it only while it sits over the crosshair or the
+-- area right around it (the face being mined). Five rays per frame; no art changes.
 local function updateToolClearance(dt: number)
 	local char = player.Character
 	local tool = char and char:FindFirstChild("Shovel")
+	if not tool then
+		return
+	end
+	local first = CameraController.IsFirstPerson()
+	setToolScale(tool, first and SHOVEL_FP_SCALE or 1)
+
 	local target = 0
-	if tool and CameraController.IsFirstPerson() and not UI.IsMenuOpen() then
+	if first and not UI.IsMenuOpen() then
 		if tool ~= lastTool then
 			lastTool = tool
 			toolParams.FilterDescendantsInstances = { tool }
 		end
 		local cam = Workspace.CurrentCamera
-		local vp = cam.ViewportSize / 2
-		local ray = cam:ViewportPointToRay(vp.X, vp.Y)
-		if Workspace:Raycast(ray.Origin, ray.Direction * 40, toolParams) then
-			target = SHOVEL_FADE
+		local c = cam.ViewportSize / 2
+		local r = cam.ViewportSize.Y * CLEARANCE_RADIUS
+		for _, o in ipairs(CLEARANCE_OFFSETS) do
+			local ray = cam:ViewportPointToRay(c.X + o.X * r, c.Y + o.Y * r)
+			if Workspace:Raycast(ray.Origin, ray.Direction * 40, toolParams) then
+				target = SHOVEL_FADE
+				break
+			end
 		end
 	end
 	fade += (target - fade) * math.min(1, dt * 14)
-	if tool and (fade > 0.01 or target > 0) then
-		for _, d in ipairs(tool:GetDescendants()) do
-			if d:IsA("BasePart") then
-				d.LocalTransparencyModifier = fade
-			end
-		end
-	elseif tool and fade <= 0.01 and lastTool == tool then
-		for _, d in ipairs(tool:GetDescendants()) do
-			if d:IsA("BasePart") and d.LocalTransparencyModifier ~= 0 then
-				d.LocalTransparencyModifier = 0
-			end
+	local value = (first and fade > 0.01) and fade or 0
+	for _, d in ipairs(tool:GetDescendants()) do
+		if d:IsA("BasePart") and d.LocalTransparencyModifier ~= value then
+			d.LocalTransparencyModifier = value
 		end
 	end
 end
@@ -1857,25 +1948,24 @@ function CameraController.Init()
 		return
 	end
 	applyMode()
+	updateHint()
 	player.CharacterAdded:Connect(applyMode)
 
+	UI.OnMenuChanged(function()
+		updateHint()
+		setCameraFrozen(wantFirst and UI.IsMenuOpen())
+	end)
+
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or UserInputService:GetFocusedTextBox() then
+		if UserInputService:GetFocusedTextBox() then
 			return
 		end
-		if input.KeyCode == TOGGLE_KEY then
+		if input.KeyCode == FREE_CURSOR_KEY and wantFirst then
+			-- Alt toggles; DigController drops held input on the change, so mining needs a fresh click.
+			UI.SetCursorFree(not UI.IsCursorFree())
+		elseif not processed and input.KeyCode == TOGGLE_KEY then
 			CameraController.Toggle()
-		elseif input.KeyCode == FREE_CURSOR_KEY and wantFirst then
-			UI.SetCursorFree(true)
 		end
-	end)
-	UserInputService.InputEnded:Connect(function(input)
-		if input.KeyCode == FREE_CURSOR_KEY then
-			UI.SetCursorFree(false)
-		end
-	end)
-	UserInputService.WindowFocusReleased:Connect(function()
-		UI.SetCursorFree(false)
 	end)
 
 	RunService.RenderStepped:Connect(function(dt)
@@ -1928,7 +2018,7 @@ local FEEL = {
 	SwingPitchSign = 1, -- flip to -1 if the shovel swings the wrong way
 	SwingWindup = 0.9, -- radians
 	SwingStrike = 0.7,
-	FirstPersonRayPadding = 6, -- studs beyond the reach limit that first person still reports a target
+	FirstPersonRayPadding = 3, -- studs beyond tool reach for the ray (camera sits above the HumanoidRootPart)
 }
 
 local TOUCH = UserInputService.TouchEnabled
@@ -1988,8 +2078,8 @@ local function castDig(origin: Vector3, dir: Vector3): Target?
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	local inReach = false
 	if hrp then
-		-- exactly the server's rule (Defs.DigReachLimit, HRP -> cell centre)
-		inReach = ((hrp :: BasePart).Position - Grid.CellCenter(x, y, z)).Magnitude <= Defs.DigReachLimit(State.Tool())
+		-- the server's rule (Defs.CellInReach), without the server's latency tolerance
+		inReach = Defs.CellInReach(State.Tool(), (hrp :: BasePart).Position, x, y, z, 0)
 	end
 	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach }
 end
@@ -2003,7 +2093,7 @@ end
 local function aimCenter(): Target?
 	local cam = Workspace.CurrentCamera
 	local c = cam.ViewportSize / 2
-	return aimScreen(c, Defs.DigReachLimit(State.Tool()) + FEEL.FirstPersonRayPadding)
+	return aimScreen(c, State.Tool().Reach + FEEL.FirstPersonRayPadding)
 end
 
 -- Touch DIG button: forward-down from the character, then straight down.
@@ -2810,6 +2900,7 @@ end
 
 -- Rolling cash display ---------------------------------------------------------------------
 local shownCash, targetCash = 0, 0
+local returnReadyAt = 0
 
 local function toast(text: string, color: Color3)
 	local l = refs.notify
@@ -2927,6 +3018,14 @@ function UI.IsMenuOpen(): boolean
 	return shopOpen or cursorFree
 end
 
+function UI.IsShopOpen(): boolean
+	return shopOpen
+end
+
+function UI.IsCursorFree(): boolean
+	return cursorFree
+end
+
 function UI.OnMenuChanged(cb: () -> ())
 	table.insert(menuCallbacks, cb)
 end
@@ -2941,6 +3040,16 @@ function UI.SetCursorFree(free: boolean)
 		refs.cursorFree.Visible = free
 	end
 	menuChanged()
+end
+
+-- The single Return-to-Camp action: the button (Activated) and the R key both come through here.
+-- The server owns the cooldown and answers with ReturnResult.
+function UI.RequestReturnToCamp()
+	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	Audio.Play("UI")
+	Remotes.Get("ReturnToCamp"):FireServer()
 end
 
 function UI.OpenShop()
@@ -3080,10 +3189,10 @@ local function build()
 	refs.soldSub = label(refs.sold, "", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 88) })
 
 	-- Return to camp
-	local ret = button(gui, "TO CAMP", UDim2.fromOffset(120, 46), UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
-	ret.MouseButton1Click:Connect(function()
-		Audio.Play("UI")
-		Remotes.Get("ReturnToCamp"):FireServer()
+	local ret = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(150, 46),
+		UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
+	ret.Activated:Connect(function()
+		UI.RequestReturnToCamp()
 	end)
 	refs.returnBtn = ret
 	if not Config.ReturnToCamp.Enabled then
@@ -3134,6 +3243,25 @@ function UI.Init()
 	end)
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
+	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number)
+		returnReadyAt = os.clock() + math.max(seconds, 0)
+		if ok then
+			toast("Back at Base Camp", P.Teal)
+			Audio.Play("Buy")
+		else
+			toast(("Return to Camp ready in %ds"):format(math.max(1, math.ceil(seconds))), P.Danger)
+			Audio.Play("Error")
+		end
+	end)
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or input.KeyCode ~= Enum.KeyCode.R then
+			return
+		end
+		if UserInputService:GetFocusedTextBox() or shopOpen then
+			return
+		end
+		UI.RequestReturnToCamp()
+	end)
 	Remotes.Get("Notify").OnClientEvent:Connect(function(text, kind)
 		local c = kind == "Danger" and P.Danger or (kind == "Good" and P.Teal or P.Cream)
 		toast(text, c)
@@ -3164,6 +3292,16 @@ function UI.Init()
 			if shopOpen and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
 				UI.CloseShop()
 			end
+		end
+		-- return-to-camp cooldown readout
+		local left = returnReadyAt - os.clock()
+		local idle = TOUCH and "TO CAMP" or "TO CAMP [R]"
+		if left > 0 then
+			refs.returnBtn.Text = ("CAMP  %ds"):format(math.ceil(left))
+			refs.returnBtn.BackgroundColor3 = Color3.fromHex("B9B2A0")
+		elseif refs.returnBtn.Text ~= idle then
+			refs.returnBtn.Text = idle
+			refs.returnBtn.BackgroundColor3 = P.Cream
 		end
 		-- pulse the bar when full
 		if State.Data.Count >= State.Data.Capacity then

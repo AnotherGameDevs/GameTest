@@ -3,6 +3,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -15,10 +16,12 @@ local player = Players.LocalPlayer
 local CameraController = {}
 
 local TOGGLE_KEY = Enum.KeyCode.V -- temporary comparison toggle
-local FREE_CURSOR_KEY = Enum.KeyCode.LeftAlt -- hold to release the cursor in first person (e.g. click TO CAMP)
+local FREE_CURSOR_KEY = Enum.KeyCode.LeftAlt -- press to toggle MINING mode <-> FREE-CURSOR mode (first person)
 local START_FIRST_PERSON = true
 local THIRD_PERSON_DISTANCE = 12
-local SHOVEL_FADE = 0.8 -- LocalTransparencyModifier applied only while the shovel covers the crosshair
+local SHOVEL_FADE = 0.85 -- LocalTransparencyModifier applied while the shovel covers the crosshair / mining face
+local SHOVEL_FP_SCALE = 0.5 -- the held shovel is drawn this fraction of its size in first person (local only)
+local CLEARANCE_RADIUS = 0.06 -- of viewport height: how far around the crosshair must stay clear
 
 local desktop = not UserInputService.TouchEnabled
 local wantFirst = START_FIRST_PERSON
@@ -61,16 +64,48 @@ local function applyMode()
 			player.CameraMinZoomDistance = 0.5
 		end)
 	end
-	if hint then
-		hint.Text = wantFirst and "FIRST PERSON  -  V: switch view  -  hold ALT: free cursor"
-			or "THIRD PERSON  -  V: switch view"
+end
+
+local function updateHint()
+	if not hint then
+		return
+	end
+	if not wantFirst then
+		hint.Text = "THIRD PERSON  -  V: switch view  -  R: return to camp"
+	elseif UI.IsCursorFree() then
+		hint.Text = "FREE CURSOR  -  ALT: back to mining  -  V: switch view"
+	else
+		hint.Text = "MINING  -  ALT: free cursor  -  V: switch view  -  R: return to camp"
+	end
+end
+
+-- Pauses camera rotation (mouse-look, right-drag, wheel zoom) by sinking those inputs ahead of the default
+-- camera scripts. Only used while a menu / free-cursor mode owns the pointer.
+local frozen = false
+local function setCameraFrozen(freeze: boolean)
+	if freeze == frozen then
+		return
+	end
+	frozen = freeze
+	if freeze then
+		ContextActionService:BindActionAtPriority("DigFreezeCamera", function()
+			return Enum.ContextActionResult.Sink
+		end, false, Enum.ContextActionPriority.High.Value + 100,
+			Enum.UserInputType.MouseMovement, Enum.UserInputType.MouseButton2, Enum.UserInputType.MouseWheel)
+	else
+		ContextActionService:UnbindAction("DigFreezeCamera")
 	end
 end
 
 function CameraController.Toggle()
 	if desktop then
 		wantFirst = not wantFirst
+		if not wantFirst then
+			UI.SetCursorFree(false) -- third person always has a free pointer; leave the mode flag clean
+		end
 		applyMode()
+		updateHint()
+		setCameraFrozen(wantFirst and UI.IsMenuOpen())
 	end
 end
 
@@ -115,35 +150,70 @@ local function buildHud()
 	hint.Parent = crossGui
 end
 
--- Fades the held shovel only while it would sit on top of the crosshair (one extra ray; no art changes).
+-- Local-only first-person shovel shrink. Scales every part, weld offset and the grip about the hand so the
+-- model keeps its proportions. Tracked per tool instance in a local attribute, and undone in third person.
+local function setToolScale(tool: Instance, scale: number)
+	local current = tool:GetAttribute("FPScale") or 1
+	if math.abs(current - scale) < 1e-3 then
+		return
+	end
+	local ratio = scale / current
+	for _, d in ipairs(tool:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Size *= ratio
+		elseif d:IsA("Weld") then
+			local c0 = d.C0
+			d.C0 = CFrame.new(c0.Position * ratio) * (c0 - c0.Position)
+		end
+	end
+	if tool:IsA("Tool") then
+		local g = tool.Grip
+		tool.Grip = CFrame.new(g.Position * ratio) * (g - g.Position)
+		local base = tool:FindFirstChild("BaseGripValue")
+		if base and base:IsA("CFrameValue") then
+			base.Value = tool.Grip
+		end
+	end
+	tool:SetAttribute("FPScale", scale)
+end
+
+local CLEARANCE_OFFSETS = {
+	Vector2.new(0, 0), Vector2.new(1, 0), Vector2.new(-1, 0), Vector2.new(0, 1), Vector2.new(0, -1),
+}
+
+-- Shrinks the held shovel in first person and fades it only while it sits over the crosshair or the
+-- area right around it (the face being mined). Five rays per frame; no art changes.
 local function updateToolClearance(dt: number)
 	local char = player.Character
 	local tool = char and char:FindFirstChild("Shovel")
+	if not tool then
+		return
+	end
+	local first = CameraController.IsFirstPerson()
+	setToolScale(tool, first and SHOVEL_FP_SCALE or 1)
+
 	local target = 0
-	if tool and CameraController.IsFirstPerson() and not UI.IsMenuOpen() then
+	if first and not UI.IsMenuOpen() then
 		if tool ~= lastTool then
 			lastTool = tool
 			toolParams.FilterDescendantsInstances = { tool }
 		end
 		local cam = Workspace.CurrentCamera
-		local vp = cam.ViewportSize / 2
-		local ray = cam:ViewportPointToRay(vp.X, vp.Y)
-		if Workspace:Raycast(ray.Origin, ray.Direction * 40, toolParams) then
-			target = SHOVEL_FADE
+		local c = cam.ViewportSize / 2
+		local r = cam.ViewportSize.Y * CLEARANCE_RADIUS
+		for _, o in ipairs(CLEARANCE_OFFSETS) do
+			local ray = cam:ViewportPointToRay(c.X + o.X * r, c.Y + o.Y * r)
+			if Workspace:Raycast(ray.Origin, ray.Direction * 40, toolParams) then
+				target = SHOVEL_FADE
+				break
+			end
 		end
 	end
 	fade += (target - fade) * math.min(1, dt * 14)
-	if tool and (fade > 0.01 or target > 0) then
-		for _, d in ipairs(tool:GetDescendants()) do
-			if d:IsA("BasePart") then
-				d.LocalTransparencyModifier = fade
-			end
-		end
-	elseif tool and fade <= 0.01 and lastTool == tool then
-		for _, d in ipairs(tool:GetDescendants()) do
-			if d:IsA("BasePart") and d.LocalTransparencyModifier ~= 0 then
-				d.LocalTransparencyModifier = 0
-			end
+	local value = (first and fade > 0.01) and fade or 0
+	for _, d in ipairs(tool:GetDescendants()) do
+		if d:IsA("BasePart") and d.LocalTransparencyModifier ~= value then
+			d.LocalTransparencyModifier = value
 		end
 	end
 end
@@ -154,25 +224,24 @@ function CameraController.Init()
 		return
 	end
 	applyMode()
+	updateHint()
 	player.CharacterAdded:Connect(applyMode)
 
+	UI.OnMenuChanged(function()
+		updateHint()
+		setCameraFrozen(wantFirst and UI.IsMenuOpen())
+	end)
+
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or UserInputService:GetFocusedTextBox() then
+		if UserInputService:GetFocusedTextBox() then
 			return
 		end
-		if input.KeyCode == TOGGLE_KEY then
+		if input.KeyCode == FREE_CURSOR_KEY and wantFirst then
+			-- Alt toggles; DigController drops held input on the change, so mining needs a fresh click.
+			UI.SetCursorFree(not UI.IsCursorFree())
+		elseif not processed and input.KeyCode == TOGGLE_KEY then
 			CameraController.Toggle()
-		elseif input.KeyCode == FREE_CURSOR_KEY and wantFirst then
-			UI.SetCursorFree(true)
 		end
-	end)
-	UserInputService.InputEnded:Connect(function(input)
-		if input.KeyCode == FREE_CURSOR_KEY then
-			UI.SetCursorFree(false)
-		end
-	end)
-	UserInputService.WindowFocusReleased:Connect(function()
-		UI.SetCursorFree(false)
 	end)
 
 	RunService.RenderStepped:Connect(function(dt)

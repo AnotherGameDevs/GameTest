@@ -84,6 +84,7 @@ end
 
 -- Rolling cash display ---------------------------------------------------------------------
 local shownCash, targetCash = 0, 0
+local returnReadyAt = 0
 
 local function toast(text: string, color: Color3)
 	local l = refs.notify
@@ -201,6 +202,14 @@ function UI.IsMenuOpen(): boolean
 	return shopOpen or cursorFree
 end
 
+function UI.IsShopOpen(): boolean
+	return shopOpen
+end
+
+function UI.IsCursorFree(): boolean
+	return cursorFree
+end
+
 function UI.OnMenuChanged(cb: () -> ())
 	table.insert(menuCallbacks, cb)
 end
@@ -215,6 +224,16 @@ function UI.SetCursorFree(free: boolean)
 		refs.cursorFree.Visible = free
 	end
 	menuChanged()
+end
+
+-- The single Return-to-Camp action: the button (Activated) and the R key both come through here.
+-- The server owns the cooldown and answers with ReturnResult.
+function UI.RequestReturnToCamp()
+	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	Audio.Play("UI")
+	Remotes.Get("ReturnToCamp"):FireServer()
 end
 
 function UI.OpenShop()
@@ -354,10 +373,10 @@ local function build()
 	refs.soldSub = label(refs.sold, "", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 88) })
 
 	-- Return to camp
-	local ret = button(gui, "TO CAMP", UDim2.fromOffset(120, 46), UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
-	ret.MouseButton1Click:Connect(function()
-		Audio.Play("UI")
-		Remotes.Get("ReturnToCamp"):FireServer()
+	local ret = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(150, 46),
+		UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
+	ret.Activated:Connect(function()
+		UI.RequestReturnToCamp()
 	end)
 	refs.returnBtn = ret
 	if not Config.ReturnToCamp.Enabled then
@@ -408,6 +427,25 @@ function UI.Init()
 	end)
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
+	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number)
+		returnReadyAt = os.clock() + math.max(seconds, 0)
+		if ok then
+			toast("Back at Base Camp", P.Teal)
+			Audio.Play("Buy")
+		else
+			toast(("Return to Camp ready in %ds"):format(math.max(1, math.ceil(seconds))), P.Danger)
+			Audio.Play("Error")
+		end
+	end)
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or input.KeyCode ~= Enum.KeyCode.R then
+			return
+		end
+		if UserInputService:GetFocusedTextBox() or shopOpen then
+			return
+		end
+		UI.RequestReturnToCamp()
+	end)
 	Remotes.Get("Notify").OnClientEvent:Connect(function(text, kind)
 		local c = kind == "Danger" and P.Danger or (kind == "Good" and P.Teal or P.Cream)
 		toast(text, c)
@@ -438,6 +476,16 @@ function UI.Init()
 			if shopOpen and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
 				UI.CloseShop()
 			end
+		end
+		-- return-to-camp cooldown readout
+		local left = returnReadyAt - os.clock()
+		local idle = TOUCH and "TO CAMP" or "TO CAMP [R]"
+		if left > 0 then
+			refs.returnBtn.Text = ("CAMP  %ds"):format(math.ceil(left))
+			refs.returnBtn.BackgroundColor3 = Color3.fromHex("B9B2A0")
+		elseif refs.returnBtn.Text ~= idle then
+			refs.returnBtn.Text = idle
+			refs.returnBtn.BackgroundColor3 = P.Cream
 		end
 		-- pulse the bar when full
 		if State.Data.Count >= State.Data.Capacity then

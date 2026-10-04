@@ -1,5 +1,6 @@
 -- Data-driven definitions: tools, backpacks, treasure, rarity.
 local Config = require(script.Parent.Config)
+local Grid = require(script.Parent.Grid)
 local P = Config.Palette
 
 local Defs = {}
@@ -17,12 +18,12 @@ Defs.Rarity = {
 -- (this is what makes better shovels *behave* differently, not only hit harder).
 Defs.Tools = {
 	rusty_shovel = {
-		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 14,
+		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 8,
 		Price = 0, RequiredReputation = 0, Order = 1, Color = Color3.fromHex("8A6A55"), Scale = 1.0,
 		Blurb = "Slow. One block at a time.",
 	},
 	digging_shovel = {
-		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 16,
+		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 10,
 		Price = 180, RequiredReputation = 0, Order = 2, Color = P.Teal, Scale = 1.35,
 		Blurb = "Faster, harder, and smashes neighbouring blocks too!",
 	},
@@ -47,10 +48,17 @@ Defs.Treasure = {
 	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
 }
 
--- The ONE reach rule. Server validates with it; the client reach indicator uses the same function.
--- Distance is measured from the character's HumanoidRootPart to the dig cell's centre.
-function Defs.DigReachLimit(tool): number
-	return tool.Reach + Config.Dig.ReachPadding + Config.Site.CellSize
+-- The ONE reach rule, used by server validation and the client reach indicator.
+-- tool.Reach is the literal distance in studs from the character's HumanoidRootPart to the NEAREST POINT of the
+-- target cell (so a block's face 8 studs away is in reach of an 8-stud tool; no cell-size allowance).
+-- `tolerance` is extra slack: the server passes Config.Dig.ReachTolerance, the client passes 0.
+function Defs.CellInReach(tool, from: Vector3, x: number, y: number, z: number, tolerance: number?): boolean
+	local c = Grid.CellCenter(x, y, z)
+	local h = Grid.CellSize / 2
+	local dx = math.max(math.abs(from.X - c.X) - h, 0)
+	local dy = math.max(math.abs(from.Y - c.Y) - h, 0)
+	local dz = math.max(math.abs(from.Z - c.Z) - h, 0)
+	return math.sqrt(dx * dx + dy * dy + dz * dz) <= tool.Reach + (tolerance or 0)
 end
 
 function Defs.LayerAtCell(y: number)

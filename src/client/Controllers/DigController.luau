@@ -30,7 +30,7 @@ local FEEL = {
 	SwingPitchSign = 1, -- flip to -1 if the shovel swings the wrong way
 	SwingWindup = 0.9, -- radians
 	SwingStrike = 0.7,
-	FirstPersonRayPadding = 6, -- studs beyond the reach limit that first person still reports a target
+	FirstPersonRayPadding = 3, -- studs beyond tool reach for the ray (camera sits above the HumanoidRootPart)
 }
 
 local TOUCH = UserInputService.TouchEnabled
@@ -90,8 +90,8 @@ local function castDig(origin: Vector3, dir: Vector3): Target?
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	local inReach = false
 	if hrp then
-		-- exactly the server's rule (Defs.DigReachLimit, HRP -> cell centre)
-		inReach = ((hrp :: BasePart).Position - Grid.CellCenter(x, y, z)).Magnitude <= Defs.DigReachLimit(State.Tool())
+		-- the server's rule (Defs.CellInReach), without the server's latency tolerance
+		inReach = Defs.CellInReach(State.Tool(), (hrp :: BasePart).Position, x, y, z, 0)
 	end
 	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach }
 end
@@ -105,7 +105,7 @@ end
 local function aimCenter(): Target?
 	local cam = Workspace.CurrentCamera
 	local c = cam.ViewportSize / 2
-	return aimScreen(c, Defs.DigReachLimit(State.Tool()) + FEEL.FirstPersonRayPadding)
+	return aimScreen(c, State.Tool().Reach + FEEL.FirstPersonRayPadding)
 end
 
 -- Touch DIG button: forward-down from the character, then straight down.

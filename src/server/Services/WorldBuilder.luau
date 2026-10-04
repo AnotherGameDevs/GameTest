@@ -106,6 +106,10 @@ function WorldBuilder.Build()
 
 	-- Rim posts around the pit so the site reads from afar
 	for i = 0, 7 do
+		-- RimPost2 stood at (0, 72): dead centre of the straight spawn -> dig site route, so it is not built.
+		if i == 2 then
+			continue
+		end
 		local ang = i / 8 * math.pi * 2
 		local r = math.max(half, halfZ) * 1.5
 		part(world, "RimPost" .. i, Vector3.new(2, Config.Site.BorderHeight, 2),
