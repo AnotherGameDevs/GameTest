@@ -34,4 +34,15 @@ it every session starts fresh (expected, a warning is printed). **Do not enable 
 | 25 | Reset with two players | A carries an artifact inside the mine, B has placed one down inside; 60 s warning shows on both (late joiner C sees the right countdown); at the deadline mining/pickup stop, both are moved out, both artifacts appear in ARTIFACT RECOVERY, nothing sold/deposited; each owner can pick up ONLY their own and must carry it to the receiving table | untested |
 | 26 | Post-reset state | elevator at the surface and working, new terrain, old requests ignored (hold click through the reset), no old reveal effects, instance count back to baseline | untested |
 | 27 | Mesh artifacts | after importing the OBJs (docs/ARTIFACT_MESHES.md): reveal, carry (1st/3rd person), journal, shelf and buried tell for the seven mesh artifacts | not possible yet |
+| 28 | Relic discovery | dig to the Ruins until the Sun Mask block breaks (or temporarily raise its chance): no tell/outline beforehand; on break: announcement with name+discoverer to BOTH players, relic marker, HUD panel | untested |
+| 29 | Carrier restrictions (server) | carrier: click does nothing, G does nothing, R/To Camp refused, tool equip refused (try a hand-fired remote), can walk/jump/use the elevator/place it down; relic visibly held | untested |
+| 30 | Attacks and shove | other player: F within 7 studs hits (meter drops 25), through a wall does not, out of range does not, cooldown 1 s; carrier F shoves an attacker (not an unrelated bystander); knockback bounded, nobody flung into the void | untested |
+| 31 | Drop + transfer + protection | 4 hits drop it; B takes it (prompt), control restored, A cannot immediately re-hit B for 3 s; A can take it back later; same relic id/state throughout | untested |
+| 32 | Elevator pursuit | carrier rides the elevator with B chasing; relic/carry state survives; no stuck car, nobody trapped | untested |
+| 33 | Safe zone / deposit / stalling | PvP stops at the gold line; deposit at the table pays once and registers the collection entry for the depositor only; standing in camp without depositing returns it to the entrance after 20 s | untested |
+| 34 | Death / reset character / disconnect | each drops the relic at a recoverable spot (never in camp, never banked/exclusive) and the shovel returns to the carrier | untested |
+| 35 | Inaccessible placement | try to place it through a wall / on the elevator car / outside the map: refused or returned to the entrance point | untested |
+| 36 | Simultaneous requests | two players press the pickup prompt together; two players press deposit (only the carrier can): exactly one winner / one payout | untested |
+| 37 | Mine reset during an event | reset countdown ends while carried: reset waits up to 90 s, then relic expires with the announcement, no reward, nothing moved into camp; stale requests ignored | untested |
+| 38 | Peaceful loop intact | with no relic event: mining, selling, personal artifacts unchanged; F key and STRIKE button absent | untested |
 

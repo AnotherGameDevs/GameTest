@@ -20,6 +20,7 @@ local SettingsService = require(Services.SettingsService)
 local ElevatorService = require(Services.ElevatorService)
 local CollectionService = require(Services.CollectionService)
 local MineShiftService = require(Services.MineShiftService)
+local RelicService = require(Services.RelicService)
 
 WorldBuilder.Build()
 SiteService.Generate() -- fresh server-only loot seed (never the constant Config.Site.Seed)
@@ -36,6 +37,7 @@ for name, init in pairs({
 	Elevator = ElevatorService.Init,
 	Collection = CollectionService.Init,
 	MineShift = MineShiftService.Init,
+	Relic = RelicService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then

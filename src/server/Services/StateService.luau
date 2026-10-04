@@ -4,6 +4,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
+local Workspace = game:GetService("Workspace")
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
@@ -18,7 +19,8 @@ function StateService.Snapshot(player: Player)
 	end
 	local carried = CarryRegistry.Get(player)
 	return {
-		Carrying = carried and { Id = carried.Id, Name = Defs.Treasure[carried.TreasureId].Name, Value = carried.Value } or nil,
+		Carrying = carried and { Id = carried.Id, Name = Defs.Treasure[carried.TreasureId].Name, Value = carried.Value }
+			or (CarryRegistry.CarriesRelic(player) and { Id = "relic", Name = Workspace:GetAttribute("RelicName") or "Relic", Value = 0, Relic = true }) or nil,
 		Cash = data.Cash,
 		Reputation = data.Reputation,
 		Consumables = data.Consumables,

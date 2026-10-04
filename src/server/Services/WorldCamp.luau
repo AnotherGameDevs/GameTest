@@ -280,6 +280,23 @@ local function buildAppraisal(camp: Folder)
 	end
 end
 
+-- Safe-zone boundary: PvP over the contested relic stops at this line (Config.Relic.SafeBoundaryZ). A gold stripe across the whole camp
+-- floor plus two signed posts at the route sides (outside the spawn-to-gate sightline). Nothing here blocks walking. ------------------
+local function buildSafeBoundary(camp: Folder)
+	local folder = Instance.new("Folder")
+	folder.Name = "SafeZoneBoundary"
+	folder.Parent = camp
+	local z = Config.Relic.SafeBoundaryZ
+	local c = Config.Camp
+	deco(box(folder, "BoundaryStripe", V(c.Size.X, 0.06, 0.5), V(c.Position.X, 0.53, z), C.Gold, Enum.Material.SmoothPlastic))
+	for _, x in ipairs({ -12, 12 }) do
+		box(folder, "BoundaryPost", V(0.5, 4.6, 0.5), V(x, 2.8, z), C.TimberDark, Enum.Material.Wood)
+		local board = box(folder, "BoundarySign", V(4.2, 1.3, 0.2), V(x, 4.2, z), C.Iron, Enum.Material.Metal)
+		sign(board, Enum.NormalId.Front, "SAFE ZONE", C.Iron, C.Gold)
+		sign(board, Enum.NormalId.Back, "SAFE ZONE", C.Iron, C.Gold)
+	end
+end
+
 -- Artifact recovery area: where artifacts found in a mine that was reset are held for their owners. A roped pad beside the
 -- mine entrance gate; it is NOT a deposit point (the receiving table is far away) - owners pick their artifact up here and
 -- carry it to the receiving table themselves. -------------------------------------------------------------------------------
@@ -381,6 +398,7 @@ function WorldCamp.Build(world: Folder, ex)
 	buildAppraisal(camp)
 	buildReceiving(camp)
 	buildRecovery(camp)
+	buildSafeBoundary(camp)
 end
 
 return WorldCamp

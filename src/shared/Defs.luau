@@ -102,8 +102,20 @@ Defs.Treasure = {
 	ruin_tablet = { Name = "Ruin Tablet", Rarity = "Rare", Value = 260, Layers = { Stone = 1, Ruins = 6 }, Category = "Ruins", Color = P.Sandstone, Shape = "Block", Model = "tablet" },
 	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 2 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "claw", RequiresCarry = true },
 	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 1 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
-	sun_mask = { Name = "Sun Pharaoh Mask", Rarity = "Legendary", Value = 3500, Layers = { Ruins = 0.5 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "mask", RequiresCarry = true },
+	sun_mask = { Name = "Sun Pharaoh Mask", Rarity = "Legendary", Value = 3500, Layers = { Ruins = 0.5 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "mask", RequiresCarry = true,
+		Relic = true } -- the SERVER RELIC: contested carry-home PvP (Config.Relic). Only explicitly flagged treasures are relics.,
 }
+
+-- Which of the three artifact types a treasure is. Relic status is explicit: it is never inferred from rarity or value.
+--   "Ordinary" = backpack + selling; "Personal" = claimed carry-home recovery; "Relic" = contested carry-home PvP.
+function Defs.KindOf(def): string
+	if def.Relic then
+		return "Relic"
+	elseif def.RequiresCarry then
+		return "Personal"
+	end
+	return "Ordinary"
+end
 
 -- The ONE reach rule, used by server validation and the client reach indicator.
 -- tool.Reach is the literal distance in studs from the character's HumanoidRootPart to the NEAREST POINT of the

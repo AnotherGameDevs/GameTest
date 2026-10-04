@@ -36,6 +36,7 @@ overlapping HUD on narrow windows, shop not scale-to-fit, MetricsService printin
 | S9 | UI unification, number formatting | 🟡 | `UIKit.Tokens`/`flatButton`/`fit`; shop/menu/journal scale-to-fit; HUD centre text constrained |
 | S5b | Mine variation, buried remnants, discovery pockets | 🟡 | `docs/MINE_DETAIL.md`; 269 offline checks; needs Studio |
 | S6b | Artifact models (one source for reveal/carry/journal/shelf) | 🟡 | 4 primitive models final-pending-review; **7 artifacts UNFINISHED: meshes generated (`docs/ARTIFACT_MESHES.md`), not imported (needs Studio)** |
+| S6c | Server relic contested PvP (`docs/RELIC_PVP.md`) | 🟡 | implemented; behaviour unit-tested offline (63 checks); NOT tested in Studio / with two players |
 | S9 | Audio | 🟡 | **built-in Roblox placeholder sounds** – replacement needed before release |
 | S10 | Persistence + migrations + failed-load safety | 🟡 | v3 migration (unit-tested); UpdateAsync + session lock; failed load kicks in production; BindToClose waits for all saves |
 | S10 | Two-player / performance testing | ❌ (blocked) | needs Studio/server; see playtest plan |

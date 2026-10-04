@@ -244,6 +244,10 @@ function ArtifactService.Pickup(player: Player, recId: any)
 		say(player, "The mine is resetting - pickups resume in a moment.", "Danger")
 		return
 	end
+	if CarryRegistry.CarriesRelic(player) then
+		say(player, "You are carrying the contested relic - deliver or put it down first.", "Danger")
+		return
+	end
 	local rec = store:Get(recId)
 	local model = worldModels[recId]
 	local character = player.Character
@@ -294,6 +298,9 @@ local function placeDown(player: Player)
 	if not RateLimiter.Check(player, "PlaceArtifact") then
 		return
 	end
+	if CarryRegistry.CarriesRelic(player) then
+		return -- the contested relic has its own place-down (RelicService)
+	end
 	if not MineState.Accepting() then
 		say(player, "The mine is resetting - you can put it down once it reopens.", "Danger")
 		return
@@ -334,6 +341,9 @@ end
 
 -- Deposit ---------------------------------------------------------------------------------------------------------
 function ArtifactService.Deposit(player: Player)
+	if CarryRegistry.CarriesRelic(player) then
+		return -- the contested relic is banked by RelicService, never through the personal-artifact path
+	end
 	local rec = CarryRegistry.Get(player)
 	local data = DataService.Get(player)
 	local character = player.Character
@@ -482,6 +492,13 @@ local function onLoss(player: Player, reason: string)
 	end
 	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
 end
+
+-- Shared helpers for RelicService (the contested relic reuses the same placement / carry-tool code).
+ArtifactService.BuildCarryTool = buildCarryTool
+ArtifactService.FindResting = findResting
+ArtifactService.RingAround = ringAround
+ArtifactService.ArtifactSize = artifactSize
+ArtifactService.QueryParams = queryParams
 
 function ArtifactService.Init()
 	folder = Workspace:FindFirstChild("Artifacts") or Instance.new("Folder")

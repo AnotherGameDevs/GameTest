@@ -22,6 +22,8 @@ local EVENTS = {
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)
 	"GuideDone", -- C->S  (hintId) the player finished/dismissed a first-time hint
+	"RelicAttack", -- C->S  strike the relic carrier (or, if you ARE the carrier, shove): a dedicated action, never a mining click
+	"RelicFx", -- S->C  (kind, userId, position) hit / shove feedback
 	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed

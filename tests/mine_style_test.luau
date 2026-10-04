@@ -112,7 +112,7 @@ do
 	check("ambient cells never claim to be rewards", ambientTell == 0)
 	check("a tell always names the cell's own reward", wrongTell == 0)
 	for _, tid in ipairs(ids) do
-		local want = Config.Mine.TellChance[Defs.Treasure[tid].Rarity]
+		local want = Defs.Treasure[tid].Relic and 0 or Config.Mine.TellChance[Defs.Treasure[tid].Rarity]
 		local got = (tellRate[tid] or 0) / tellTrials[tid]
 		check("tell chance follows rarity: " .. tid, math.abs(got - want) < 0.06, ("%.2f vs %.2f"):format(got, want))
 	end
@@ -156,7 +156,7 @@ do
 	-- tells: the REAL artifact, partly out of the wall, never fully buried, never wider than the cell face
 	local shown, protrudes, onFace = true, true, true
 	for tid, def in pairs(Defs.Treasure) do
-		for variant = 0, 3 do
+		for variant = 0, (def.Relic and -1 or 3) do
 			local specs = MineDetailSpecs.Tell(tid, def, variant)
 			if #specs < 1 then shown = false end
 			local maxZ = -1e9

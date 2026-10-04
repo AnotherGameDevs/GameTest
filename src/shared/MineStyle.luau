@@ -107,8 +107,8 @@ function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed
 	local faceRot = math.floor(hash(x, y, z, seed, 15) * 6)
 	if lootId then
 		local def = Defs.Treasure[lootId]
-		if not def then
-			return nil
+		if not def or def.Relic then
+			return nil -- the contested server relic stays fully concealed until its block breaks: no tell, no remnant
 		end
 		local chance = Config.Mine.TellChance[def.Rarity] or 0.4
 		if pocketKind then

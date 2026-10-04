@@ -22,7 +22,7 @@ Source of truth is the Rojo project (`default.project.json`, `src/`). Rebuild:
 
 ## Docs
 `COMPLETION_CHECKLIST` (requirement map) · `PLAYTEST_PLAN` (in-engine tests still to run) · `RELEASE_CANDIDATE` (description,
-devices, publish checklist, limitations) · `TOOL_TIERS` · `MINE_RESET` · `LOOT` · `ARTIFACT_MESHES` · `MINE_DETAIL` · `TUTORIAL` · `COLLECTION` · `ARTIFACT_RECOVERY` · `ART_STANDARD` ·
+devices, publish checklist, limitations) · `TOOL_TIERS` · `MINE_RESET` · `RELIC_PVP` · `LOOT` · `ARTIFACT_MESHES` · `MINE_DETAIL` · `TUTORIAL` · `COLLECTION` · `ARTIFACT_RECOVERY` · `ART_STANDARD` ·
 `CAMERA_SETTINGS_WORLD` · `CAMP_SPACING_AND_SAND`.
 
 ## Layout

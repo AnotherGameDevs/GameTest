@@ -10,6 +10,7 @@ local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local AnalyticsService = require(script.Parent.AnalyticsService)
 local ArtifactService = require(script.Parent.ArtifactService)
+local RelicService = require(script.Parent.RelicService)
 
 local LootService = {}
 local treasureRemote = Remotes.Get("TreasureFound")
@@ -25,6 +26,14 @@ function LootService.Award(player: Player, treasureId: string, cellIndex: number
 		return false
 	end
 	local x, y, z = Grid.FromIndex(cellIndex)
+
+	-- The server relic (Defs Relic = true) starts the contested PvP event instead. If one is already active the caller falls
+	-- through to the ordinary personal-artifact flow, so only one contested relic ever exists per server.
+	if def.Relic and RelicService.Discover(player, treasureId, Grid.CellCenter(x, y, z)) then
+		treasureRemote:FireClient(player, { Id = treasureId, Position = Grid.CellCenter(x, y, z), Stored = false, Carry = true, Relic = true,
+			IsNew = data.Collection[treasureId] == nil })
+		return true
+	end
 
 	-- Important artifacts are never auto-collected: they appear physically and must be carried to camp.
 	-- No backpack slot, no cash and no collection credit until a successful deposit.

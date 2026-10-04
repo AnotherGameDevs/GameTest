@@ -169,7 +169,7 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?, carry: bo
 	if big then
 		label(card, def.Name:upper(), 24, P.Cream, { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(10, 4),
 			TextXAlignment = Enum.TextXAlignment.Left })
-		local sub = carry and ("IMPORTANT  -  CARRY IT TO CAMP  -  " .. Util.FormatCash(def.Value))
+		local sub = carry and (def.Relic and ("CONTESTED RELIC  -  " .. Util.FormatCash(def.Value)) or ("IMPORTANT  -  CARRY IT TO CAMP  -  " .. Util.FormatCash(def.Value)))
 			or ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value))
 		label(card, sub, carry and 15 or 20, rar.Color, {
 			Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(10, 38), TextXAlignment = Enum.TextXAlignment.Left })
@@ -347,6 +347,15 @@ function UI.StepMineStatus(dt: number)
 	local banner = refs.shift
 	if state == "Warning" then
 		local left = math.max((Workspace:GetAttribute("MineEndsAt") or now) - now, 0)
+		if Workspace:GetAttribute("MineHold") then
+			refs.mineTitle.Text = "MINE RESET"
+			refs.mineTime.Text = "WAITING"
+			refs.mineTime.TextColor3 = P.Gold
+			banner.Text = "Reset waiting for the contested relic - deliver it or it expires"
+			banner.TextColor3 = P.Gold
+			banner.Visible = true
+			return
+		end
 		local final = left <= Config.Reset.FinalCountdownSeconds
 		refs.mineTitle.Text = "MINE RESETS IN"
 		refs.mineTime.Text = clock(left)

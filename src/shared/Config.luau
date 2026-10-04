@@ -96,6 +96,31 @@ Config.Artifacts = {
 	DisplaySeconds = 3, -- how long a deposited artifact sits on the receiving table
 }
 
+-- Server relic: the ONE contested, carry-home PvP event (docs/RELIC_PVP.md). Only treasures flagged `Relic = true` in Defs take
+-- part; ordinary loot and personal important artifacts keep their peaceful rules. All values are provisional until multiplayer
+-- playtests. Combat strength never depends on tool stats.
+Config.Relic = {
+	Enabled = true,
+	MaxControl = 100, -- the carrier's relic-control meter; at 0 the relic drops
+	ControlPerHit = 25, -- control lost per validated hit (4 hits)
+	AttackRange = 7, -- studs, attacker to carrier
+	AttackCooldown = 1.0, -- seconds between a player's strikes
+	StrikeKnockback = 9, -- studs/s pushed onto the carrier by a hit (one clamped velocity set, never stacked)
+	ShoveRange = 7, -- the carrier's defensive shove
+	ShoveCooldown = 4.0,
+	ShoveKnockback = 20,
+	ShoveEngageSeconds = 12, -- only players who struck at the carrier this recently can be shoved (no unrelated targets)
+	MaxKnockbackH = 24, -- hard caps on any knockback, studs/s
+	MaxKnockbackUp = 7,
+	PickupProtection = 3.0, -- seconds a new carrier cannot lose control (short, so it never covers the escape route)
+	PickupReach = 14,
+	PlaceReach = 8,
+	SafeBoundaryZ = 64, -- the camp's safe zone starts at this z (camp side); PvP and control loss stop there
+	CampGraceSeconds = 20, -- inside the safe zone without depositing for this long -> the relic returns to the recovery point
+	RecoveryPoint = Vector3.new(0, 0, 53), -- on the entrance boardwalk, inside the contested area, outside the safe zone
+	UnreachableBelowY = -90, -- a dropped relic below this (or outside the map) is returned to the recovery point
+}
+
 -- Fixed physical exit from the mine: a ladder shaft outside the destructible grid, on the camp (south) edge.
 Config.Exit = {
 	Enabled = true,
@@ -141,6 +166,7 @@ Config.Reset = {
 	FinalCountdownSeconds = 10,
 	EvacuateSeconds = 3, -- pause between "stop accepting requests" and the new mine (players are moved, artifacts recovered)
 	CheckInterval = 1,
+	RelicHoldSeconds = 90, -- a reset waits at most this long (after the countdown) for an active relic event to finish, then expires it
 }
 
 -- Buried loot (docs/LOOT.md). Placement is rolled ONCE per mine generation from a fresh server-only seed.
@@ -190,6 +216,9 @@ Config.RateLimits = { -- { max calls, per seconds }
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
+	RelicAttack = { 6, 2 },
+	RelicPickup = { 4, 3 },
+	RelicPlace = { 3, 3 },
 	ArtifactPickup = { 4, 3 },
 	GuideDone = { 10, 5 },
 	GuideControl = { 3, 5 },

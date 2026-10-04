@@ -16,6 +16,7 @@ function MineLifecycle.new(policy, now: number)
 		endsAt = 0, -- when the current Warning / Evacuating phase ends
 		lastTick = now,
 		resets = 0,
+		heldSeconds = 0, -- time the Warning has been held open for an active relic event
 	}, MineLifecycle)
 end
 
@@ -56,7 +57,7 @@ end
 --   "Warn"       a reset was just decided (reason via :Reason()); begin the countdown UI
 --   "Evacuate"   the warning ended: stop accepting requests, recover artifacts, move players
 -- `depletion` = fraction of diggable cells removed (0..1); `players` = players currently online.
-function MineLifecycle:Update(now: number, depletion: number, players: number): string?
+function MineLifecycle:Update(now: number, depletion: number, players: number, holdWanted: boolean?): string?
 	local dt = math.max(now - self.lastTick, 0)
 	self.lastTick = now
 	local p = self.policy
@@ -78,6 +79,11 @@ function MineLifecycle:Update(now: number, depletion: number, players: number): 
 			return "Warn"
 		end
 	elseif self.state == "Warning" then
+		if now >= self.endsAt and holdWanted and self.heldSeconds < (p.RelicHoldSeconds or 0) then
+			-- an active relic event may finish first, for a bounded time only
+			self.heldSeconds += dt
+			return nil
+		end
 		if now >= self.endsAt then
 			self.state = "Evacuating"
 			self.endsAt = now + p.EvacuateSeconds
@@ -85,6 +91,10 @@ function MineLifecycle:Update(now: number, depletion: number, players: number): 
 		end
 	end
 	return nil
+end
+
+function MineLifecycle:IsHolding(now: number): boolean
+	return self.state == "Warning" and now >= self.endsAt and self.heldSeconds < (self.policy.RelicHoldSeconds or 0)
 end
 
 -- Evacuation + artifact recovery finished -> the old mine may be torn down.
@@ -106,6 +116,7 @@ function MineLifecycle:FinishRegeneration(now: number): boolean
 	self.activeSeconds = 0
 	self.reason = nil
 	self.endsAt = 0
+	self.heldSeconds = 0
 	self.lastTick = now
 	return true
 end

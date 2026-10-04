@@ -38,6 +38,7 @@ function MineState.Publish(info)
 	Workspace:SetAttribute("MineResetAt", info.ResetAt or 0)
 	Workspace:SetAttribute("MineReason", info.Reason or "")
 	Workspace:SetAttribute("MineDug", info.DugPercent or 0)
+	Workspace:SetAttribute("MineHold", info.Hold == true) -- the reset is waiting (bounded) for an active relic event
 end
 
 return MineState

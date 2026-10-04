@@ -19,6 +19,7 @@ local MineState = require(script.Parent.MineState)
 local SiteService = require(script.Parent.SiteService)
 local ArtifactService = require(script.Parent.ArtifactService)
 local ElevatorService = require(script.Parent.ElevatorService)
+local RelicService = require(script.Parent.RelicService)
 local DataService = require(script.Parent.DataService)
 local StateService = require(script.Parent.StateService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
@@ -53,12 +54,13 @@ local function publish(dugFraction: number)
 	local endsAt = (state == "Warning" or state == "Evacuating") and serverTime(lifecycle:EndsAt()) or 0
 	local resetAt = scheduled and (Workspace:GetServerTimeNow() + scheduled) or 0
 	-- only touch the replicated attributes when something visible changed (state, generation, reason, whole-percent dug)
-	local key = ("%s|%d|%s|%d|%d"):format(state, SiteService.Generation(), lifecycle:Reason() or "", math.floor(dugFraction * 100), math.floor(resetAt / 5))
+	local holding = lifecycle:IsHolding(os.clock())
+	local key = ("%s|%d|%s|%d|%d|%s"):format(state, SiteService.Generation(), lifecycle:Reason() or "", math.floor(dugFraction * 100), math.floor(resetAt / 5), tostring(holding))
 	if key == lastPublished then
 		return
 	end
 	lastPublished = key
-	MineState.Publish({ EndsAt = endsAt, ResetAt = resetAt, Reason = lifecycle:Reason(), DugPercent = math.floor(dugFraction * 100) })
+	MineState.Publish({ EndsAt = endsAt, ResetAt = resetAt, Reason = lifecycle:Reason(), DugPercent = math.floor(dugFraction * 100), Hold = holding })
 end
 
 local function tellEveryone(text: string, kind: string)
@@ -91,6 +93,8 @@ local function runReset()
 	jobRunning = true
 	local ok, err = pcall(function()
 		publish(0)
+		-- an active contested relic expires with NO reward and is never moved into camp (checked before anyone is evacuated)
+		RelicService.ExpireForReset()
 		ArtifactService.RecoverForReset()
 		evacuatePlayers()
 		task.wait(Config.Reset.EvacuateSeconds)
@@ -132,10 +136,11 @@ function MineShiftService.Init()
 	end
 	task.spawn(function()
 		local warned30 = false
+		local holdTold = false
 		while true do
 			task.wait(Config.Reset.CheckInterval)
 			local dep = SiteService.Depletion(bestToolTier())
-			local event = lifecycle:Update(os.clock(), dep.Diggable, #Players:GetPlayers())
+			local event = lifecycle:Update(os.clock(), dep.Diggable, #Players:GetPlayers(), RelicService.IsActive())
 			if event == "Warn" then
 				warned30 = false
 				tellEveryone(("The mine resets in %d seconds. Leave through the ELEVATOR - it is the way out. Carry artifacts out yourself."):format(Config.Reset.WarningSeconds), "Danger")
@@ -144,6 +149,12 @@ function MineShiftService.Init()
 			elseif lifecycle:State() == "Warning" and not warned30 and lifecycle:EndsAt() - os.clock() <= 30 then
 				warned30 = true
 				tellEveryone("30 seconds until the mine resets - head for the ELEVATOR.", "Danger")
+			end
+			if lifecycle:IsHolding(os.clock()) and not holdTold then
+				holdTold = true
+				tellEveryone(("The mine reset is waiting for the contested relic (at most %d s), then it expires."):format(Config.Reset.RelicHoldSeconds), "Danger")
+			elseif lifecycle:State() ~= "Warning" then
+				holdTold = false
 			end
 			publish(dep.Diggable)
 		end

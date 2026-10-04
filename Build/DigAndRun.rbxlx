@@ -317,6 +317,31 @@ Config.Artifacts = {
 	DisplaySeconds = 3, -- how long a deposited artifact sits on the receiving table
 }
 
+-- Server relic: the ONE contested, carry-home PvP event (docs/RELIC_PVP.md). Only treasures flagged `Relic = true` in Defs take
+-- part; ordinary loot and personal important artifacts keep their peaceful rules. All values are provisional until multiplayer
+-- playtests. Combat strength never depends on tool stats.
+Config.Relic = {
+	Enabled = true,
+	MaxControl = 100, -- the carrier's relic-control meter; at 0 the relic drops
+	ControlPerHit = 25, -- control lost per validated hit (4 hits)
+	AttackRange = 7, -- studs, attacker to carrier
+	AttackCooldown = 1.0, -- seconds between a player's strikes
+	StrikeKnockback = 9, -- studs/s pushed onto the carrier by a hit (one clamped velocity set, never stacked)
+	ShoveRange = 7, -- the carrier's defensive shove
+	ShoveCooldown = 4.0,
+	ShoveKnockback = 20,
+	ShoveEngageSeconds = 12, -- only players who struck at the carrier this recently can be shoved (no unrelated targets)
+	MaxKnockbackH = 24, -- hard caps on any knockback, studs/s
+	MaxKnockbackUp = 7,
+	PickupProtection = 3.0, -- seconds a new carrier cannot lose control (short, so it never covers the escape route)
+	PickupReach = 14,
+	PlaceReach = 8,
+	SafeBoundaryZ = 64, -- the camp's safe zone starts at this z (camp side); PvP and control loss stop there
+	CampGraceSeconds = 20, -- inside the safe zone without depositing for this long -> the relic returns to the recovery point
+	RecoveryPoint = Vector3.new(0, 0, 53), -- on the entrance boardwalk, inside the contested area, outside the safe zone
+	UnreachableBelowY = -90, -- a dropped relic below this (or outside the map) is returned to the recovery point
+}
+
 -- Fixed physical exit from the mine: a ladder shaft outside the destructible grid, on the camp (south) edge.
 Config.Exit = {
 	Enabled = true,
@@ -362,6 +387,7 @@ Config.Reset = {
 	FinalCountdownSeconds = 10,
 	EvacuateSeconds = 3, -- pause between "stop accepting requests" and the new mine (players are moved, artifacts recovered)
 	CheckInterval = 1,
+	RelicHoldSeconds = 90, -- a reset waits at most this long (after the countdown) for an active relic event to finish, then expires it
 }
 
 -- Buried loot (docs/LOOT.md). Placement is rolled ONCE per mine generation from a fresh server-only seed.
@@ -411,6 +437,9 @@ Config.RateLimits = { -- { max calls, per seconds }
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
+	RelicAttack = { 6, 2 },
+	RelicPickup = { 4, 3 },
+	RelicPlace = { 3, 3 },
 	ArtifactPickup = { 4, 3 },
 	GuideDone = { 10, 5 },
 	GuideControl = { 3, 5 },
@@ -528,8 +557,20 @@ Defs.Treasure = {
 	ruin_tablet = { Name = "Ruin Tablet", Rarity = "Rare", Value = 260, Layers = { Stone = 1, Ruins = 6 }, Category = "Ruins", Color = P.Sandstone, Shape = "Block", Model = "tablet" },
 	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 2 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "claw", RequiresCarry = true },
 	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 1 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
-	sun_mask = { Name = "Sun Pharaoh Mask", Rarity = "Legendary", Value = 3500, Layers = { Ruins = 0.5 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "mask", RequiresCarry = true },
+	sun_mask = { Name = "Sun Pharaoh Mask", Rarity = "Legendary", Value = 3500, Layers = { Ruins = 0.5 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "mask", RequiresCarry = true,
+		Relic = true } -- the SERVER RELIC: contested carry-home PvP (Config.Relic). Only explicitly flagged treasures are relics.,
 }
+
+-- Which of the three artifact types a treasure is. Relic status is explicit: it is never inferred from rarity or value.
+--   "Ordinary" = backpack + selling; "Personal" = claimed carry-home recovery; "Relic" = contested carry-home PvP.
+function Defs.KindOf(def): string
+	if def.Relic then
+		return "Relic"
+	elseif def.RequiresCarry then
+		return "Personal"
+	end
+	return "Ordinary"
+end
 
 -- The ONE reach rule, used by server validation and the client reach indicator.
 -- tool.Reach is the literal distance in studs from the character's HumanoidRootPart to the NEAREST POINT of the
@@ -1418,8 +1459,8 @@ function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed
 	local faceRot = math.floor(hash(x, y, z, seed, 15) * 6)
 	if lootId then
 		local def = Defs.Treasure[lootId]
-		if not def then
-			return nil
+		if not def or def.Relic then
+			return nil -- the contested server relic stays fully concealed until its block breaks: no tell, no remnant
 		end
 		local chance = Config.Mine.TellChance[def.Rarity] or 0.4
 		if pocketKind then
@@ -1771,6 +1812,100 @@ return PackModels
       </Item>
       <Item class="ModuleScript" referent="15">
         <Properties>
+          <string name="Name">RelicRules</string>
+          <string name="Source"><![CDATA[-- Pure rules for the contested relic (no Roblox instances; tests/relic_test.luau). The server feeds these the measured facts
+-- (distances, line of sight, clock) and only acts when they say yes.
+local Config = require(script.Parent.Config)
+
+local RelicRules = {}
+
+-- The camp's safe zone: the camp floor from SafeBoundaryZ to its far edge, within its width, at ground height.
+function RelicRules.InSafeZone(x: number, y: number, z: number): boolean
+	local camp, r = Config.Camp, Config.Relic
+	local halfX = camp.Size.X / 2
+	local farZ = camp.Position.Z + camp.Size.Z / 2
+	return z >= r.SafeBoundaryZ and z <= farZ + 4 and math.abs(x - camp.Position.X) <= halfX + 4 and y < 14
+end
+
+-- May `attacker` strike the carrier right now? ctx = { EventState, AttackerId, CarrierId, Distance, LineOfSight,
+-- Now, LastAttack, ProtectedUntil, AttackerAlive, CarrierAlive, AttackerCarrying, AttackerInSafe, CarrierInSafe }
+function RelicRules.CheckStrike(ctx): (boolean, string?)
+	local r = Config.Relic
+	if ctx.EventState ~= "Carried" then
+		return false, "NoCarrier"
+	end
+	if ctx.AttackerId == ctx.CarrierId then
+		return false, "Self"
+	end
+	if not ctx.AttackerAlive or not ctx.CarrierAlive then
+		return false, "Dead"
+	end
+	if ctx.AttackerCarrying then
+		return false, "AttackerBusy"
+	end
+	if ctx.AttackerInSafe or ctx.CarrierInSafe then
+		return false, "SafeZone"
+	end
+	if ctx.Now - (ctx.LastAttack or -1e9) < r.AttackCooldown then
+		return false, "Cooldown"
+	end
+	if ctx.Distance > r.AttackRange then
+		return false, "Range"
+	end
+	if not ctx.LineOfSight then
+		return false, "Blocked"
+	end
+	return true
+end
+
+-- May the carrier shove `targetId` right now? ctx = { EventState, CarrierId, TargetId, Distance, LineOfSight, Now, LastShove,
+-- LastTargetAttack (when that player last struck at the carrier), CarrierAlive, TargetAlive, TargetInSafe, CarrierInSafe }
+function RelicRules.CheckShove(ctx): (boolean, string?)
+	local r = Config.Relic
+	if ctx.EventState ~= "Carried" then
+		return false, "NoCarrier"
+	end
+	if ctx.TargetId == ctx.CarrierId then
+		return false, "Self"
+	end
+	if not ctx.CarrierAlive or not ctx.TargetAlive then
+		return false, "Dead"
+	end
+	if ctx.TargetInSafe or ctx.CarrierInSafe then
+		return false, "SafeZone"
+	end
+	if ctx.Now - (ctx.LastShove or -1e9) < r.ShoveCooldown then
+		return false, "Cooldown"
+	end
+	if ctx.Now - (ctx.LastTargetAttack or -1e9) > r.ShoveEngageSeconds then
+		return false, "Unrelated" -- only players who are actually attacking the carrier can be shoved
+	end
+	if ctx.Distance > r.ShoveRange then
+		return false, "Range"
+	end
+	if not ctx.LineOfSight then
+		return false, "Blocked"
+	end
+	return true
+end
+
+-- Bounded knockback: horizontal speed and upward speed are both capped. Returns (vx, vy, vz).
+function RelicRules.ClampKnockback(dx: number, dz: number, speed: number, up: number): (number, number, number)
+	local r = Config.Relic
+	local len = math.sqrt(dx * dx + dz * dz)
+	if len < 1e-6 then
+		return 0, 0, 0
+	end
+	local h = math.min(math.max(speed, 0), r.MaxKnockbackH)
+	return dx / len * h, math.min(math.max(up, 0), r.MaxKnockbackUp), dz / len * h
+end
+
+return RelicRules
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="16">
+        <Properties>
           <string name="Name">Remotes</string>
           <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
 local RunService = game:GetService("RunService")
@@ -1796,6 +1931,8 @@ local EVENTS = {
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)
 	"GuideDone", -- C->S  (hintId) the player finished/dismissed a first-time hint
+	"RelicAttack", -- C->S  strike the relic carrier (or, if you ARE the carrier, shove): a dedicated action, never a mining click
+	"RelicFx", -- S->C  (kind, userId, position) hit / shove feedback
 	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
@@ -1825,7 +1962,7 @@ return Remotes
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="16">
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">SettingsSpec</string>
           <string name="Source"><![CDATA[-- Player settings: one definition used by the client (UI + clamping) and the server (validation before saving).
@@ -1888,7 +2025,7 @@ return SettingsSpec
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="17">
+      <Item class="ModuleScript" referent="18">
         <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
@@ -2252,7 +2389,7 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="18">
+      <Item class="ModuleScript" referent="19">
         <Properties>
           <string name="Name">TreasureModels</string>
           <string name="Source"><![CDATA[-- Artifact models. ONE source of truth: these part specs drive the discovery reveal, the carried artifact (world and
@@ -2642,7 +2779,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="19">
+      <Item class="ModuleScript" referent="20">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -2692,7 +2829,7 @@ return Util
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="20">
+      <Item class="ModuleScript" referent="21">
         <Properties>
           <string name="Name">ViewmodelMath</string>
           <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
@@ -2769,15 +2906,15 @@ return ViewmodelMath
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="21">
+  <Item class="ServerScriptService" referent="22">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="22">
+    <Item class="Folder" referent="23">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="23">
+      <Item class="Script" referent="24">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -2803,6 +2940,7 @@ local SettingsService = require(Services.SettingsService)
 local ElevatorService = require(Services.ElevatorService)
 local CollectionService = require(Services.CollectionService)
 local MineShiftService = require(Services.MineShiftService)
+local RelicService = require(Services.RelicService)
 
 WorldBuilder.Build()
 SiteService.Generate() -- fresh server-only loot seed (never the constant Config.Site.Seed)
@@ -2819,6 +2957,7 @@ for name, init in pairs({
 	Elevator = ElevatorService.Init,
 	Collection = CollectionService.Init,
 	MineShift = MineShiftService.Init,
+	Relic = RelicService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then
@@ -2840,11 +2979,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="24">
+      <Item class="Folder" referent="25">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -2862,7 +3001,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -3015,7 +3154,7 @@ return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -3264,6 +3403,10 @@ function ArtifactService.Pickup(player: Player, recId: any)
 		say(player, "The mine is resetting - pickups resume in a moment.", "Danger")
 		return
 	end
+	if CarryRegistry.CarriesRelic(player) then
+		say(player, "You are carrying the contested relic - deliver or put it down first.", "Danger")
+		return
+	end
 	local rec = store:Get(recId)
 	local model = worldModels[recId]
 	local character = player.Character
@@ -3314,6 +3457,9 @@ local function placeDown(player: Player)
 	if not RateLimiter.Check(player, "PlaceArtifact") then
 		return
 	end
+	if CarryRegistry.CarriesRelic(player) then
+		return -- the contested relic has its own place-down (RelicService)
+	end
 	if not MineState.Accepting() then
 		say(player, "The mine is resetting - you can put it down once it reopens.", "Danger")
 		return
@@ -3354,6 +3500,9 @@ end
 
 -- Deposit ---------------------------------------------------------------------------------------------------------
 function ArtifactService.Deposit(player: Player)
+	if CarryRegistry.CarriesRelic(player) then
+		return -- the contested relic is banked by RelicService, never through the personal-artifact path
+	end
 	local rec = CarryRegistry.Get(player)
 	local data = DataService.Get(player)
 	local character = player.Character
@@ -3503,6 +3652,13 @@ local function onLoss(player: Player, reason: string)
 	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
 end
 
+-- Shared helpers for RelicService (the contested relic reuses the same placement / carry-tool code).
+ArtifactService.BuildCarryTool = buildCarryTool
+ArtifactService.FindResting = findResting
+ArtifactService.RingAround = ringAround
+ArtifactService.ArtifactSize = artifactSize
+ArtifactService.QueryParams = queryParams
+
 function ArtifactService.Init()
 	folder = Workspace:FindFirstChild("Artifacts") or Instance.new("Folder")
 	folder.Name = "Artifacts"
@@ -3571,7 +3727,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -3590,15 +3746,31 @@ function CarryRegistry.Get(player: Player)
 	return CarryRegistry.Store:CarriedBy(player.UserId)
 end
 
+-- The contested server relic carrier (at most one in the whole server; RelicService owns it). The relic counts as "carrying" for
+-- EVERY gate (mining, throwing, equipping, return-to-camp), exactly like a personal artifact.
+local relicCarrier: number? = nil
+
+function CarryRegistry.SetRelicCarrier(userId: number?)
+	relicCarrier = userId
+end
+
+function CarryRegistry.GetRelicCarrierId(): number?
+	return relicCarrier
+end
+
+function CarryRegistry.CarriesRelic(player: Player): boolean
+	return relicCarrier ~= nil and relicCarrier == player.UserId
+end
+
 function CarryRegistry.IsCarrying(player: Player): boolean
-	return CarryRegistry.Store:CarriedBy(player.UserId) ~= nil
+	return CarryRegistry.Store:CarriedBy(player.UserId) ~= nil or CarryRegistry.CarriesRelic(player)
 end
 
 return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">CollectionService</string>
             <string name="Source"><![CDATA[-- Player-facing progress that is just saved flags: the camp-shelf selection and first-time hint progress. The server
@@ -3686,7 +3858,7 @@ return CollectionService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -3816,7 +3988,7 @@ return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -4111,7 +4283,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -4258,7 +4430,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -4425,7 +4597,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -4657,7 +4829,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="35">
+        <Item class="ModuleScript" referent="36">
           <Properties>
             <string name="Name">ElevatorService</string>
             <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
@@ -4834,7 +5006,7 @@ return ElevatorService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="37">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -4937,7 +5109,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="38">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -5004,7 +5176,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="39">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -5019,6 +5191,7 @@ local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local AnalyticsService = require(script.Parent.AnalyticsService)
 local ArtifactService = require(script.Parent.ArtifactService)
+local RelicService = require(script.Parent.RelicService)
 
 local LootService = {}
 local treasureRemote = Remotes.Get("TreasureFound")
@@ -5034,6 +5207,14 @@ function LootService.Award(player: Player, treasureId: string, cellIndex: number
 		return false
 	end
 	local x, y, z = Grid.FromIndex(cellIndex)
+
+	-- The server relic (Defs Relic = true) starts the contested PvP event instead. If one is already active the caller falls
+	-- through to the ordinary personal-artifact flow, so only one contested relic ever exists per server.
+	if def.Relic and RelicService.Discover(player, treasureId, Grid.CellCenter(x, y, z)) then
+		treasureRemote:FireClient(player, { Id = treasureId, Position = Grid.CellCenter(x, y, z), Stored = false, Carry = true, Relic = true,
+			IsNew = data.Collection[treasureId] == nil })
+		return true
+	end
 
 	-- Important artifacts are never auto-collected: they appear physically and must be carried to camp.
 	-- No backpack slot, no cash and no collection credit until a successful deposit.
@@ -5088,7 +5269,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="40">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -5185,7 +5366,7 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">MineDetails</string>
             <string name="Source"><![CDATA[-- Builds the small remnants on a mine cell's exposed face. Every detail part is a CHILD of the cell's own Part, so when
@@ -5241,7 +5422,7 @@ return MineDetails
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">MineLifecycle</string>
             <string name="Source"><![CDATA[-- The mine's reset lifecycle as a pure state machine (no Roblox APIs; tests/loot_reset_test.luau).
@@ -5262,6 +5443,7 @@ function MineLifecycle.new(policy, now: number)
 		endsAt = 0, -- when the current Warning / Evacuating phase ends
 		lastTick = now,
 		resets = 0,
+		heldSeconds = 0, -- time the Warning has been held open for an active relic event
 	}, MineLifecycle)
 end
 
@@ -5302,7 +5484,7 @@ end
 --   "Warn"       a reset was just decided (reason via :Reason()); begin the countdown UI
 --   "Evacuate"   the warning ended: stop accepting requests, recover artifacts, move players
 -- `depletion` = fraction of diggable cells removed (0..1); `players` = players currently online.
-function MineLifecycle:Update(now: number, depletion: number, players: number): string?
+function MineLifecycle:Update(now: number, depletion: number, players: number, holdWanted: boolean?): string?
 	local dt = math.max(now - self.lastTick, 0)
 	self.lastTick = now
 	local p = self.policy
@@ -5324,6 +5506,11 @@ function MineLifecycle:Update(now: number, depletion: number, players: number): 
 			return "Warn"
 		end
 	elseif self.state == "Warning" then
+		if now >= self.endsAt and holdWanted and self.heldSeconds < (p.RelicHoldSeconds or 0) then
+			-- an active relic event may finish first, for a bounded time only
+			self.heldSeconds += dt
+			return nil
+		end
 		if now >= self.endsAt then
 			self.state = "Evacuating"
 			self.endsAt = now + p.EvacuateSeconds
@@ -5331,6 +5518,10 @@ function MineLifecycle:Update(now: number, depletion: number, players: number): 
 		end
 	end
 	return nil
+end
+
+function MineLifecycle:IsHolding(now: number): boolean
+	return self.state == "Warning" and now >= self.endsAt and self.heldSeconds < (self.policy.RelicHoldSeconds or 0)
 end
 
 -- Evacuation + artifact recovery finished -> the old mine may be torn down.
@@ -5352,6 +5543,7 @@ function MineLifecycle:FinishRegeneration(now: number): boolean
 	self.activeSeconds = 0
 	self.reason = nil
 	self.endsAt = 0
+	self.heldSeconds = 0
 	self.lastTick = now
 	return true
 end
@@ -5360,7 +5552,7 @@ return MineLifecycle
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="42">
+        <Item class="ModuleScript" referent="43">
           <Properties>
             <string name="Name">MineShiftService</string>
             <string name="Source"><![CDATA[-- The mine reset ("Fresh Dig"), docs/MINE_RESET.md. Extends the earlier refresh; there is exactly one reset system.
@@ -5384,6 +5576,7 @@ local MineState = require(script.Parent.MineState)
 local SiteService = require(script.Parent.SiteService)
 local ArtifactService = require(script.Parent.ArtifactService)
 local ElevatorService = require(script.Parent.ElevatorService)
+local RelicService = require(script.Parent.RelicService)
 local DataService = require(script.Parent.DataService)
 local StateService = require(script.Parent.StateService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
@@ -5418,12 +5611,13 @@ local function publish(dugFraction: number)
 	local endsAt = (state == "Warning" or state == "Evacuating") and serverTime(lifecycle:EndsAt()) or 0
 	local resetAt = scheduled and (Workspace:GetServerTimeNow() + scheduled) or 0
 	-- only touch the replicated attributes when something visible changed (state, generation, reason, whole-percent dug)
-	local key = ("%s|%d|%s|%d|%d"):format(state, SiteService.Generation(), lifecycle:Reason() or "", math.floor(dugFraction * 100), math.floor(resetAt / 5))
+	local holding = lifecycle:IsHolding(os.clock())
+	local key = ("%s|%d|%s|%d|%d|%s"):format(state, SiteService.Generation(), lifecycle:Reason() or "", math.floor(dugFraction * 100), math.floor(resetAt / 5), tostring(holding))
 	if key == lastPublished then
 		return
 	end
 	lastPublished = key
-	MineState.Publish({ EndsAt = endsAt, ResetAt = resetAt, Reason = lifecycle:Reason(), DugPercent = math.floor(dugFraction * 100) })
+	MineState.Publish({ EndsAt = endsAt, ResetAt = resetAt, Reason = lifecycle:Reason(), DugPercent = math.floor(dugFraction * 100), Hold = holding })
 end
 
 local function tellEveryone(text: string, kind: string)
@@ -5456,6 +5650,8 @@ local function runReset()
 	jobRunning = true
 	local ok, err = pcall(function()
 		publish(0)
+		-- an active contested relic expires with NO reward and is never moved into camp (checked before anyone is evacuated)
+		RelicService.ExpireForReset()
 		ArtifactService.RecoverForReset()
 		evacuatePlayers()
 		task.wait(Config.Reset.EvacuateSeconds)
@@ -5497,10 +5693,11 @@ function MineShiftService.Init()
 	end
 	task.spawn(function()
 		local warned30 = false
+		local holdTold = false
 		while true do
 			task.wait(Config.Reset.CheckInterval)
 			local dep = SiteService.Depletion(bestToolTier())
-			local event = lifecycle:Update(os.clock(), dep.Diggable, #Players:GetPlayers())
+			local event = lifecycle:Update(os.clock(), dep.Diggable, #Players:GetPlayers(), RelicService.IsActive())
 			if event == "Warn" then
 				warned30 = false
 				tellEveryone(("The mine resets in %d seconds. Leave through the ELEVATOR - it is the way out. Carry artifacts out yourself."):format(Config.Reset.WarningSeconds), "Danger")
@@ -5509,6 +5706,12 @@ function MineShiftService.Init()
 			elseif lifecycle:State() == "Warning" and not warned30 and lifecycle:EndsAt() - os.clock() <= 30 then
 				warned30 = true
 				tellEveryone("30 seconds until the mine resets - head for the ELEVATOR.", "Danger")
+			end
+			if lifecycle:IsHolding(os.clock()) and not holdTold then
+				holdTold = true
+				tellEveryone(("The mine reset is waiting for the contested relic (at most %d s), then it expires."):format(Config.Reset.RelicHoldSeconds), "Danger")
+			elseif lifecycle:State() ~= "Warning" then
+				holdTold = false
 			end
 			publish(dep.Diggable)
 		end
@@ -5519,7 +5722,7 @@ return MineShiftService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="43">
+        <Item class="ModuleScript" referent="44">
           <Properties>
             <string name="Name">MineState</string>
             <string name="Source"><![CDATA[-- Tiny shared holder of the mine's lifecycle state, so DigService / ArtifactService / DynamiteService can ask
@@ -5562,13 +5765,14 @@ function MineState.Publish(info)
 	Workspace:SetAttribute("MineResetAt", info.ResetAt or 0)
 	Workspace:SetAttribute("MineReason", info.Reason or "")
 	Workspace:SetAttribute("MineDug", info.DugPercent or 0)
+	Workspace:SetAttribute("MineHold", info.Hold == true) -- the reset is waiting (bounded) for an active relic event
 end
 
 return MineState
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="44">
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -5617,7 +5821,752 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="45">
+        <Item class="ModuleScript" referent="46">
+          <Properties>
+            <string name="Name">RelicEvent</string>
+            <string name="Source"><![CDATA[-- The contested server relic as a pure state machine (no Roblox APIs; tests/relic_test.luau).
+--   Hidden (a cell holding it; not an event yet) -> Discovered -> Carried <-> Dropped -> Secured | Expired
+-- Every transition is one synchronous check-and-set, so two simultaneous pickups or deposits can never both succeed.
+-- A dropped relic is UNCLAIMED: ownership changes only through a validated Pickup. Secured and Expired are terminal: every later
+-- pickup, attack or deposit request on that event fails.
+local RelicEvent = {}
+RelicEvent.__index = RelicEvent
+
+function RelicEvent.new(id: string, treasureId: string, value: number, discovererId: number, position, generation: number, policy, now: number)
+	return setmetatable({
+		Id = id, TreasureId = treasureId, Value = value, DiscovererId = discovererId, Position = position, Generation = generation,
+		State = "Discovered", CarrierId = nil, Control = policy.MaxControl, ProtectedUntil = 0, InCampSince = nil :: number?,
+		Transfers = 0, DiscoveredAt = now, policy = policy,
+	}, RelicEvent)
+end
+
+function RelicEvent:IsActive(): boolean
+	return self.State == "Discovered" or self.State == "Carried" or self.State == "Dropped"
+end
+
+-- Atomic: the first valid pickup wins. Anyone may pick up (no ownership) while the relic is on the ground.
+function RelicEvent:Pickup(userId: number, now: number): (boolean, string?)
+	if not self:IsActive() then
+		return false, "Over"
+	end
+	if self.State == "Carried" then
+		return false, "AlreadyCarried"
+	end
+	self.State = "Carried"
+	self.CarrierId = userId
+	self.Control = self.policy.MaxControl -- a new carrier starts with full control...
+	self.ProtectedUntil = now + self.policy.PickupProtection -- ...and a SHORT protection window
+	self.InCampSince = nil
+	self.Transfers += 1
+	return true
+end
+
+-- Voluntary placement or any forced drop. The relic becomes unclaimed at `position`.
+function RelicEvent:Drop(position, now: number): boolean
+	if self.State ~= "Carried" then
+		return false
+	end
+	self.State = "Dropped"
+	self.CarrierId = nil
+	self.Position = position
+	self.InCampSince = nil
+	self.ProtectedUntil = 0
+	return true
+end
+
+-- A validated hit. Returns (applied, dropped). Hits during protection or on a non-carried relic do nothing.
+function RelicEvent:Hit(attackerId: number, amount: number, now: number): (boolean, boolean)
+	if self.State ~= "Carried" or attackerId == self.CarrierId or now < self.ProtectedUntil then
+		return false, false
+	end
+	self.Control = math.max(self.Control - amount, 0)
+	if self.Control <= 0 then
+		return true, true
+	end
+	return true, false
+end
+
+-- Exactly once: only the current carrier can bank it.
+function RelicEvent:Deposit(userId: number): (boolean, any)
+	if self.State ~= "Carried" or self.CarrierId ~= userId then
+		return false, "NotCarrying"
+	end
+	self.State = "Secured"
+	self.CarrierId = nil
+	return true, self.Value
+end
+
+-- Reset (or any server decision) ends the event with NO reward.
+function RelicEvent:Expire(): boolean
+	if not self:IsActive() then
+		return false
+	end
+	self.State = "Expired"
+	self.CarrierId = nil
+	return true
+end
+
+-- Camp safe-zone grace: tracks how long the carrier has been inside the safe zone. Returns true once the grace has run out.
+function RelicEvent:TrackCamp(inSafeZone: boolean, now: number): boolean
+	if self.State ~= "Carried" or not inSafeZone then
+		self.InCampSince = nil
+		return false
+	end
+	if not self.InCampSince then
+		self.InCampSince = now
+	end
+	return now - self.InCampSince >= self.policy.CampGraceSeconds
+end
+
+return RelicEvent
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="47">
+          <Properties>
+            <string name="Name">RelicService</string>
+            <string name="Source"><![CDATA[-- The contested server relic (docs/RELIC_PVP.md): a single, explicit PvP carry-home event.
+--   Discovery  -> Announce (name + discoverer), mark the relic. Never reveals an undiscovered relic.
+--   Pickup     -> anyone eligible; the carrier is visibly holding it and is under every personal-artifact restriction
+--                 (no mining, no tool switching, no To Camp, no dynamite) but may walk, jump, use the elevator, or place it down.
+--   Combat     -> a dedicated action (RelicAttack): outside the camp safe zone anyone not carrying may strike the carrier; the
+--                 carrier may shove players who are attacking. A relic-control meter, NOT mining tool stats, decides when it drops.
+--   Drop       -> unclaimed, same event identity; ownership changes only through a validated pickup.
+--   Deposit    -> only the carrier, only at the receiving station, exactly once; the safe zone gives a short grace, never a bank.
+--   Reset      -> an active event gets a bounded hold, then EXPIRES with no reward before the safety evacuation.
+-- Everything is validated on the server; the client only sends "I pressed the action".
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
+local RelicRules = require(ReplicatedStorage.Shared.RelicRules)
+
+local RelicEvent = require(script.Parent.RelicEvent)
+local CarryRegistry = require(script.Parent.CarryRegistry)
+local DataService = require(script.Parent.DataService)
+local StateService = require(script.Parent.StateService)
+local EquipmentService = require(script.Parent.EquipmentService)
+local ArtifactService = require(script.Parent.ArtifactService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+local MineState = require(script.Parent.MineState)
+local RateLimiter = require(script.Parent.RateLimiter)
+local AnalyticsService = require(script.Parent.AnalyticsService)
+
+local RelicService = {}
+
+local R = Config.Relic
+local notifyRemote = Remotes.Get("Notify")
+local fxRemote = Remotes.Get("RelicFx")
+local depositedRemote = Remotes.Get("ArtifactDeposited")
+local setRemote = Remotes.Get("SetCompleted")
+
+local event: any = nil -- the current / most recent RelicEvent (terminal ones stay only so stale requests are rejected)
+local folder: Folder
+local worldModel: Model? = nil
+local carryTool: Tool? = nil
+local lastAttack: { [number]: number } = {} -- userId -> last strike (cooldown)
+local engagedAt: { [number]: number } = {} -- userId -> last time they struck at / reached for the carrier (shove eligibility)
+local lastShove = -1e9
+local lastSafe: { [number]: Vector3 } = {}
+local lastAnnounce = -1e9
+local warnedGrace = false
+
+local function say(player: Player, text: string, kind: string?)
+	if player.Parent then
+		notifyRemote:FireClient(player, text, kind or "Info")
+	end
+end
+
+local function announce(text: string, kind: string)
+	for _, p in ipairs(Players:GetPlayers()) do
+		notifyRemote:FireClient(p, text, kind)
+	end
+end
+
+local function nameOf(userId: number?): string
+	local p = userId and Players:GetPlayerByUserId(userId)
+	return p and p.DisplayName or "someone"
+end
+
+local function relicName(): string
+	return event and Defs.Treasure[event.TreasureId].Name or "Relic"
+end
+
+-- Replicated state (Workspace attributes): ONLY facts about an already-discovered relic. Undiscovered relics have no entry.
+local function publish()
+	local active = event and event:IsActive()
+	Workspace:SetAttribute("RelicState", active and event.State or "None")
+	Workspace:SetAttribute("RelicName", active and relicName() or "")
+	Workspace:SetAttribute("RelicDiscoverer", active and nameOf(event.DiscovererId) or "")
+	Workspace:SetAttribute("RelicCarrierId", active and event.CarrierId or 0)
+	Workspace:SetAttribute("RelicControl", active and event.Control or 0)
+	Workspace:SetAttribute("RelicMaxControl", R.MaxControl)
+	Workspace:SetAttribute("RelicId", active and event.Id or "")
+end
+
+local function character(player: Player?)
+	local char = player and player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local hum = char and char:FindFirstChildOfClass("Humanoid") :: Humanoid?
+	if hrp and hum and hum.Health > 0 then
+		return char, hrp, hum
+	end
+	return nil, nil, nil
+end
+
+local function carrierPlayer(): Player?
+	return event and event.CarrierId and Players:GetPlayerByUserId(event.CarrierId) or nil
+end
+
+-- Spot selection -------------------------------------------------------------------------------------------------------------
+local function supportedSpot(candidates: { Vector3 }, size: Vector3, accept: ((Vector3) -> boolean)?): CFrame?
+	local rp, op = ArtifactService.QueryParams()
+	for _, c in ipairs(candidates) do
+		local hit = Workspace:Raycast(c + Vector3.new(0, 1.5, 0), Vector3.new(0, -16, 0), rp)
+		-- never rest on the moving elevator car (an anchored relic would be left hanging in mid-air when it moves)
+		if hit and hit.Normal.Y > 0.7 and hit.Instance.Name ~= "Car" then
+			local center = hit.Position + Vector3.new(0, size.Y / 2 + 0.05, 0)
+			if not accept or accept(center) then
+				local box = Vector3.new(size.X, math.max(size.Y - 0.4, 0.2), size.Z)
+				if #Workspace:GetPartBoundsInBox(CFrame.new(center + Vector3.new(0, 0.15, 0)), box, op) == 0 then
+					return CFrame.new(center)
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function recoveryCFrame(size: Vector3): Vector3
+	local p = R.RecoveryPoint
+	return Vector3.new(p.X, 0.45 + size.Y / 2 + 0.05, p.Z)
+end
+
+-- A drop position that is recoverable: supported, clear, inside the contested area (never the camp safe zone) and on the map.
+local function validDrop(center: Vector3): boolean
+	if RelicRules.InSafeZone(center.X, center.Y, center.Z) then
+		return false
+	end
+	local ext = Config.World.BoundaryExtent
+	return center.Y > R.UnreachableBelowY and math.abs(center.X) < ext and math.abs(center.Z) < ext
+end
+
+local function pickDropPosition(origin: Vector3?, size: Vector3): Vector3
+	if origin then
+		local cf = supportedSpot(ArtifactService.RingAround(origin, Vector3.new(0, 0, -1), 2.5), size, validDrop)
+		if cf then
+			return cf.Position
+		end
+	end
+	return recoveryCFrame(size)
+end
+
+-- World model ----------------------------------------------------------------------------------------------------------------
+local function destroyModel()
+	if worldModel then
+		worldModel:Destroy()
+		worldModel = nil
+	end
+end
+
+local function spawnModel()
+	destroyModel()
+	if not event or not (event.State == "Discovered" or event.State == "Dropped") then
+		return
+	end
+	local def = Defs.Treasure[event.TreasureId]
+	local id = event.Id
+	local model = TreasureModels.BuildAny(event.TreasureId, def)
+	model:PivotTo(CFrame.new(event.Position))
+	model:SetAttribute("RelicId", id)
+	local root = model.PrimaryPart :: BasePart
+	local hl = Instance.new("Highlight")
+	hl.FillColor = Defs.Rarity[def.Rarity].Color
+	hl.OutlineColor = Color3.new(1, 1, 1)
+	hl.FillTransparency = 0.92
+	hl.DepthMode = Enum.HighlightDepthMode.Occluded -- never visible through walls
+	hl.Parent = model
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "RelicPickupPrompt"
+	prompt.ObjectText = def.Name
+	prompt.ActionText = "Take the relic (contested!)"
+	prompt.HoldDuration = 0.5
+	prompt.MaxActivationDistance = R.PickupReach - 2
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = root
+	prompt.Triggered:Connect(function(player)
+		RelicService.Pickup(player, id)
+	end)
+	model.Parent = folder
+	worldModel = model
+end
+
+local function removeCarryTool(player: Player?)
+	if carryTool then
+		carryTool:Destroy()
+		carryTool = nil
+	end
+	CarryRegistry.SetRelicCarrier(nil)
+	if player and player.Parent then
+		StateService.Push(player)
+		task.spawn(EquipmentService.Refresh, player) -- the shovel comes back
+	end
+end
+
+-- Discovery -------------------------------------------------------------------------------------------------------------------
+-- Called by LootService when the block holding a relic breaks. Returns true if a contested event started; false means the caller
+-- must fall back (an event is already active - only one contested relic per server).
+function RelicService.Discover(player: Player, treasureId: string, position: Vector3): boolean
+	local def = Defs.Treasure[treasureId]
+	if not R.Enabled or not def or not def.Relic or not DataService.Get(player) then
+		return false
+	end
+	if event and event:IsActive() then
+		return false
+	end
+	local size = ArtifactService.ArtifactSize(treasureId)
+	local cf = supportedSpot({ position, position + Vector3.new(1, 0, 0), position - Vector3.new(1, 0, 0),
+		position + Vector3.new(0, 0, 1), position - Vector3.new(0, 0, 1) }, size)
+	local spot = cf and cf.Position or (position + Vector3.new(0, size.Y / 2 - 2 + 0.05, 0))
+	event = RelicEvent.new(HttpService:GenerateGUID(false), treasureId, def.Value, player.UserId, spot, MineState.Generation(), R, os.clock())
+	table.clear(lastAttack)
+	table.clear(engagedAt)
+	warnedGrace = false
+	publish()
+	task.delay(Config.Artifacts.SpawnDelay, function()
+		if event and event.State == "Discovered" then
+			spawnModel()
+		end
+	end)
+	announce(("CONTESTED RELIC! %s uncovered the %s. Carry it to camp. The carrier can be attacked."):format(player.DisplayName, def.Name), "Danger")
+	AnalyticsService.Log(player, "RelicDiscovered", { id = event.Id })
+	return true
+end
+
+-- Pickup ----------------------------------------------------------------------------------------------------------------------
+function RelicService.Pickup(player: Player, relicId: any)
+	if type(relicId) ~= "string" or not RateLimiter.Check(player, "RelicPickup") then
+		return
+	end
+	if not event or event.Id ~= relicId or not event:IsActive() or not MineState.Accepting() then
+		return -- stale request: a different, finished or expired event
+	end
+	local char, hrp, hum = character(player)
+	if not char or not hrp or not hum then
+		return
+	end
+	if (hrp.Position - event.Position).Magnitude > R.PickupReach then
+		return
+	end
+	if CarryRegistry.IsCarrying(player) then
+		say(player, "Put down what you are carrying first.", "Danger")
+		return
+	end
+	local ok = event:Pickup(player.UserId, os.clock()) -- atomic: simultaneous pickups: exactly one succeeds
+	if not ok then
+		return
+	end
+	destroyModel()
+	local tool = ArtifactService.BuildCarryTool({ Id = event.Id, TreasureId = event.TreasureId })
+	tool.Name = "CarriedRelic"
+	carryTool = tool
+	CarryRegistry.SetRelicCarrier(player.UserId)
+	tool.Parent = player:FindFirstChildOfClass("Backpack")
+	hum:UnequipTools() -- stows the shovel
+	hum:EquipTool(tool)
+	lastSafe[player.UserId] = hrp.Position
+	tool.Unequipped:Connect(function()
+		task.defer(function()
+			local _, _, h = character(player)
+			if h and event and event.State == "Carried" and event.CarrierId == player.UserId and carryTool == tool
+				and tool.Parent == player:FindFirstChildOfClass("Backpack") then
+				h:EquipTool(tool)
+			end
+		end)
+	end)
+	table.clear(engagedAt)
+	warnedGrace = false
+	publish()
+	StateService.Push(player)
+	say(player, "You have the relic! Take it to the RECEIVING TABLE at camp. Others can attack you outside the safe zone. [F] shoves attackers.", "Good")
+	if os.clock() - lastAnnounce > 2 then
+		lastAnnounce = os.clock()
+		announce(("%s picked up the %s!"):format(player.DisplayName, relicName()), "Info")
+	end
+	AnalyticsService.Log(player, "RelicPickedUp", { id = event.Id, n = event.Transfers })
+end
+
+-- Dropping ------------------------------------------------------------------------------------------------------------------------
+-- Common exit from "Carried": the relic becomes unclaimed at a recoverable spot and the carrier gets the shovel back.
+local function dropAt(position: Vector3, text: string?)
+	if not event or event.State ~= "Carried" then
+		return
+	end
+	local carrier = carrierPlayer()
+	if not event:Drop(position, os.clock()) then
+		return
+	end
+	removeCarryTool(carrier)
+	spawnModel()
+	publish()
+	if text then
+		announce(text, "Danger")
+	end
+end
+
+local function dropFor(player: Player?, why: string)
+	if not event or event.State ~= "Carried" then
+		return
+	end
+	local _, hrp = character(player)
+	local origin = (hrp and hrp.Position) or (player and lastSafe[player.UserId])
+	local size = ArtifactService.ArtifactSize(event.TreasureId)
+	local pos = pickDropPosition(origin or lastSafe[event.CarrierId], size)
+	local who = player and player.DisplayName or "The carrier"
+	dropAt(pos, ("%s dropped the %s (%s). It is up for grabs!"):format(who, relicName(), why))
+end
+
+local function returnToRecovery(text: string)
+	if not event or not event:IsActive() then
+		return
+	end
+	local size = ArtifactService.ArtifactSize(event.TreasureId)
+	local pos = recoveryCFrame(size)
+	if event.State == "Carried" then
+		dropAt(pos, text)
+	else
+		event.Position = pos
+		spawnModel()
+		publish()
+		announce(text, "Info")
+	end
+end
+
+-- Voluntary place-down: only onto a supported, clear, reachable spot (no walls in the way), never in the safe zone.
+function RelicService.Place(player: Player)
+	if not RateLimiter.Check(player, "RelicPlace") then
+		return
+	end
+	if not event or event.State ~= "Carried" or event.CarrierId ~= player.UserId then
+		return
+	end
+	local _, hrp = character(player)
+	if not hrp then
+		return
+	end
+	local look = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+	look = look.Magnitude > 0.01 and look.Unit or Vector3.new(0, 0, -1)
+	local base = hrp.Position
+	local size = ArtifactService.ArtifactSize(event.TreasureId)
+	local rp = ArtifactService.QueryParams()
+	local cf = supportedSpot(ArtifactService.RingAround(base, look, 3.5), size, function(center: Vector3)
+		local flat = Vector3.new(center.X - base.X, 0, center.Z - base.Z).Magnitude
+		if flat > R.PlaceReach or math.abs(center.Y - base.Y) > 6 or not validDrop(center) then
+			return false
+		end
+		-- no placing through walls: the straight line from the carrier to the spot must be clear
+		return Workspace:Raycast(base + Vector3.new(0, 1, 0), (center - base) - Vector3.new(0, 1, 0), rp) == nil
+	end)
+	if not cf then
+		say(player, "No safe spot to put it down here. Find open, flat ground outside the camp.", "Danger")
+		return
+	end
+	dropAt(cf.Position, ("%s put the %s down. Anyone can take it!"):format(player.DisplayName, relicName()))
+end
+
+-- Combat ----------------------------------------------------------------------------------------------------------------------
+-- Everything that must not count as an obstacle: both characters, the relic's own model and carried tool.
+local function ignoreFor(a: Player, b: Player): { Instance }
+	local out: { Instance } = { folder }
+	for _, inst in ipairs({ a.Character, b.Character, carryTool }) do
+		if inst then
+			table.insert(out, inst)
+		end
+	end
+	return out
+end
+
+local function lineOfSight(a: BasePart, b: BasePart, ignore: { Instance }): boolean
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = ignore
+	rp.RespectCanCollide = false
+	local from, to = a.Position + Vector3.new(0, 1.2, 0), b.Position + Vector3.new(0, 0.8, 0)
+	return Workspace:Raycast(from, to - from, rp) == nil -- anything solid between them (cells, walls, structures) blocks the hit
+end
+
+local function pushOnClient(target: Player, from: Vector3, to: Vector3, speed: number, up: number, kind: string)
+	-- Knockback is applied ONCE by the target's own client (it owns its character), bounded by RelicRules.ClampKnockback.
+	local vx, vy, vz = RelicRules.ClampKnockback(to.X - from.X, to.Z - from.Z, speed, up)
+	fxRemote:FireClient(target, "Knock", target.UserId, Vector3.new(vx, vy, vz))
+	for _, p in ipairs(Players:GetPlayers()) do
+		fxRemote:FireClient(p, kind, target.UserId, to)
+	end
+end
+
+local function strike(attacker: Player, carrier: Player)
+	local _, aHrp = character(attacker)
+	local _, cHrp = character(carrier)
+	local now = os.clock()
+	local aAlive, cAlive = aHrp ~= nil, cHrp ~= nil
+	local distance = (aHrp and cHrp) and (aHrp.Position - cHrp.Position).Magnitude or 1e9
+	if distance <= R.AttackRange * 1.5 then
+		engagedAt[attacker.UserId] = now -- reaching for the carrier makes you a legitimate shove target
+	end
+	local los = false
+	if aHrp and cHrp and distance <= R.AttackRange * 1.5 then
+		los = lineOfSight(aHrp, cHrp, ignoreFor(attacker, carrier))
+	end
+	local ok, why = RelicRules.CheckStrike({
+		EventState = event.State, AttackerId = attacker.UserId, CarrierId = event.CarrierId, Distance = distance, LineOfSight = los,
+		Now = now, LastAttack = lastAttack[attacker.UserId], ProtectedUntil = event.ProtectedUntil, AttackerAlive = aAlive,
+		CarrierAlive = cAlive, AttackerCarrying = CarryRegistry.IsCarrying(attacker),
+		AttackerInSafe = aHrp ~= nil and RelicRules.InSafeZone(aHrp.Position.X, aHrp.Position.Y, aHrp.Position.Z),
+		CarrierInSafe = cHrp ~= nil and RelicRules.InSafeZone(cHrp.Position.X, cHrp.Position.Y, cHrp.Position.Z),
+	})
+	if not ok then
+		if why == "SafeZone" then
+			say(attacker, "The camp is a safe zone.", "Info")
+		elseif why == "Blocked" then
+			say(attacker, "Something is in the way.", "Info")
+		end
+		return
+	end
+	lastAttack[attacker.UserId] = now
+	local applied, dropped = event:Hit(attacker.UserId, R.ControlPerHit, now)
+	if not applied then
+		say(attacker, "The carrier just picked it up - they are protected for a moment.", "Info")
+		return
+	end
+	pushOnClient(carrier, (aHrp :: BasePart).Position, (cHrp :: BasePart).Position, R.StrikeKnockback, 3, "Hit")
+	publish()
+	if dropped then
+		dropFor(carrier, ("%s knocked it loose"):format(attacker.DisplayName))
+	end
+end
+
+local function shove(carrier: Player)
+	local _, cHrp = character(carrier)
+	if not cHrp then
+		return
+	end
+	local now = os.clock()
+	local best, bestD
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= carrier then
+			local _, tHrp = character(p)
+			if tHrp then
+				local d = (tHrp.Position - cHrp.Position).Magnitude
+				if d <= R.ShoveRange and (not bestD or d < bestD) then
+					local los = lineOfSight(cHrp, tHrp, ignoreFor(carrier, p))
+					local ok = RelicRules.CheckShove({
+						EventState = event.State, CarrierId = event.CarrierId, TargetId = p.UserId, Distance = d, LineOfSight = los, Now = now,
+						LastShove = lastShove, LastTargetAttack = engagedAt[p.UserId], CarrierAlive = true, TargetAlive = true,
+						TargetInSafe = RelicRules.InSafeZone(tHrp.Position.X, tHrp.Position.Y, tHrp.Position.Z),
+						CarrierInSafe = RelicRules.InSafeZone(cHrp.Position.X, cHrp.Position.Y, cHrp.Position.Z),
+					})
+					if ok then
+						best, bestD = p, d
+					end
+				end
+			end
+		end
+	end
+	if not best then
+		return -- nobody eligible: no cooldown spent
+	end
+	lastShove = now
+	local _, tHrp = character(best)
+	pushOnClient(best, cHrp.Position, (tHrp :: BasePart).Position, R.ShoveKnockback, 4, "Shove")
+end
+
+local function onAttackRequest(player: Player)
+	if not RateLimiter.Check(player, "RelicAttack") then
+		return
+	end
+	if not event or event.State ~= "Carried" then
+		return
+	end
+	if event.CarrierId == player.UserId then
+		shove(player)
+		return
+	end
+	local carrier = carrierPlayer()
+	if carrier then
+		strike(player, carrier)
+	end
+end
+
+-- Deposit -----------------------------------------------------------------------------------------------------------------------
+function RelicService.Deposit(player: Player)
+	if not event or event.State ~= "Carried" or event.CarrierId ~= player.UserId then
+		return
+	end
+	local _, hrp = character(player)
+	local data = DataService.Get(player)
+	if not hrp or not data then
+		return
+	end
+	if (hrp.Position - WorldBuilder.ReceivingCenter).Magnitude > Config.Artifacts.DepositReach then
+		return
+	end
+	local ok, value = event:Deposit(player.UserId) -- exactly once; a second request (or another player's) fails here
+	if not ok then
+		return
+	end
+	local def = Defs.Treasure[event.TreasureId]
+	data.Cash += value
+	data.Stats.CashEarned += value
+	data.Stats.TreasureFound += 1
+	data.Stats.RelicsExtracted += 1
+	local _, completed = CollectionSpec.Register(data.Collection, event.TreasureId, os.time())
+	if completed then
+		setRemote:FireClient(player, completed, Defs.LayerName(completed))
+	end
+	DataService.MarkDirty(player)
+	removeCarryTool(player)
+	depositedRemote:FireClient(player, def.Name, value, true)
+	ArtifactService.ShowOnTable(event.TreasureId)
+	destroyModel()
+	publish() -- the event is over: every indicator is removed
+	announce(("%s secured the %s!"):format(player.DisplayName, def.Name), "Good")
+	AnalyticsService.Log(player, "RelicSecured", { id = event.Id, value = value })
+end
+
+-- Reset ----------------------------------------------------------------------------------------------------------------------------
+function RelicService.IsActive(): boolean
+	return event ~= nil and event:IsActive()
+end
+
+-- Called once before the safety evacuation. Ends the event with NO reward and removes everything; nothing is moved into camp.
+function RelicService.ExpireForReset(): boolean
+	if not event or not event:IsActive() then
+		return false
+	end
+	local carrier = carrierPlayer()
+	local name = relicName()
+	event:Expire()
+	destroyModel()
+	if carrier then
+		removeCarryTool(carrier)
+	else
+		CarryRegistry.SetRelicCarrier(nil)
+	end
+	publish()
+	announce(("The contested %s expired with the mine reset. No reward."):format(name), "Danger")
+	return true
+end
+
+-- Wiring ------------------------------------------------------------------------------------------------------------------------
+function RelicService.Init()
+	folder = Workspace:FindFirstChild("RelicEvent") or Instance.new("Folder")
+	folder.Name = "RelicEvent"
+	folder.Parent = Workspace
+	publish()
+
+	Remotes.Get("RelicAttack").OnServerEvent:Connect(onAttackRequest)
+	Remotes.Get("PlaceArtifact").OnServerEvent:Connect(function(player)
+		if CarryRegistry.CarriesRelic(player) then
+			RelicService.Place(player)
+		end
+	end)
+	local world = Workspace:FindFirstChild("World")
+	local prompt = world and world:FindFirstChild("DepositPrompt", true)
+	if prompt then
+		prompt.Triggered:Connect(RelicService.Deposit)
+	else
+		warn("[RelicService] Deposit prompt not found.")
+	end
+
+	local function watch(player: Player)
+		player.CharacterRemoving:Connect(function()
+			if event and event.State == "Carried" and event.CarrierId == player.UserId then
+				dropFor(player, "reset character")
+			end
+		end)
+		local function onChar(char: Model)
+			local hum = char:WaitForChild("Humanoid", 10)
+			if hum then
+				(hum :: Humanoid).Died:Connect(function()
+					if event and event.State == "Carried" and event.CarrierId == player.UserId then
+						dropFor(player, "defeated")
+					end
+				end)
+			end
+		end
+		player.CharacterAdded:Connect(onChar)
+		if player.Character then
+			task.spawn(onChar, player.Character)
+		end
+	end
+	Players.PlayerAdded:Connect(watch)
+	for _, p in ipairs(Players:GetPlayers()) do
+		watch(p)
+	end
+	Players.PlayerRemoving:Connect(function(player)
+		if event and event.State == "Carried" and event.CarrierId == player.UserId then
+			dropFor(player, "disconnected") -- never banked, never kept exclusively
+		end
+		lastSafe[player.UserId] = nil
+		lastAttack[player.UserId] = nil
+		engagedAt[player.UserId] = nil
+	end)
+
+	-- Watcher: safe-zone grace, last safe position, unreachable relics.
+	local acc = 0
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.25 then
+			return
+		end
+		acc = 0
+		if not event or not event:IsActive() then
+			return
+		end
+		local now = os.clock()
+		if event.State == "Carried" then
+			local carrier = carrierPlayer()
+			local _, hrp, hum = character(carrier)
+			if hrp and hum then
+				if hum.FloorMaterial ~= Enum.Material.Air and not RelicRules.InSafeZone(hrp.Position.X, hrp.Position.Y, hrp.Position.Z) then
+					lastSafe[event.CarrierId] = hrp.Position
+				end
+				local inSafe = RelicRules.InSafeZone(hrp.Position.X, hrp.Position.Y, hrp.Position.Z)
+				if inSafe and not event.InCampSince and not warnedGrace and carrier then
+					warnedGrace = true
+					say(carrier, ("Deposit the relic at the receiving table within %d seconds!"):format(R.CampGraceSeconds), "Danger")
+				end
+				if not inSafe then
+					warnedGrace = false
+				end
+				if event:TrackCamp(inSafe, now) then
+					returnToRecovery(("%s did not deposit the %s in time - it returned to the mine entrance."):format(carrier and carrier.DisplayName or "The carrier", relicName()))
+				end
+			end
+		elseif event.State == "Dropped" or event.State == "Discovered" then
+			local m = worldModel
+			local pos = event.Position
+			local lost = (m ~= nil and (not m.Parent or m:GetPivot().Position.Y < R.UnreachableBelowY)) or pos.Y < R.UnreachableBelowY
+				or not validDrop(pos) and event.State == "Dropped"
+			if lost then
+				returnToRecovery(("The %s became unreachable and returned to the mine entrance."):format(relicName()))
+			end
+		end
+	end)
+end
+
+return RelicService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="48">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -5653,7 +6602,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="46">
+        <Item class="ModuleScript" referent="49">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -6009,7 +6958,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="47">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -6018,6 +6967,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
+local Workspace = game:GetService("Workspace")
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
@@ -6032,7 +6982,8 @@ function StateService.Snapshot(player: Player)
 	end
 	local carried = CarryRegistry.Get(player)
 	return {
-		Carrying = carried and { Id = carried.Id, Name = Defs.Treasure[carried.TreasureId].Name, Value = carried.Value } or nil,
+		Carrying = carried and { Id = carried.Id, Name = Defs.Treasure[carried.TreasureId].Name, Value = carried.Value }
+			or (CarryRegistry.CarriesRelic(player) and { Id = "relic", Name = Workspace:GetAttribute("RelicName") or "Relic", Value = 0, Relic = true }) or nil,
 		Cash = data.Cash,
 		Reputation = data.Reputation,
 		Consumables = data.Consumables,
@@ -6073,7 +7024,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="48">
+        <Item class="ModuleScript" referent="51">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -6135,7 +7086,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="49">
+        <Item class="ModuleScript" referent="52">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -6241,7 +7192,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="50">
+        <Item class="ModuleScript" referent="53">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -6526,6 +7477,23 @@ local function buildAppraisal(camp: Folder)
 	end
 end
 
+-- Safe-zone boundary: PvP over the contested relic stops at this line (Config.Relic.SafeBoundaryZ). A gold stripe across the whole camp
+-- floor plus two signed posts at the route sides (outside the spawn-to-gate sightline). Nothing here blocks walking. ------------------
+local function buildSafeBoundary(camp: Folder)
+	local folder = Instance.new("Folder")
+	folder.Name = "SafeZoneBoundary"
+	folder.Parent = camp
+	local z = Config.Relic.SafeBoundaryZ
+	local c = Config.Camp
+	deco(box(folder, "BoundaryStripe", V(c.Size.X, 0.06, 0.5), V(c.Position.X, 0.53, z), C.Gold, Enum.Material.SmoothPlastic))
+	for _, x in ipairs({ -12, 12 }) do
+		box(folder, "BoundaryPost", V(0.5, 4.6, 0.5), V(x, 2.8, z), C.TimberDark, Enum.Material.Wood)
+		local board = box(folder, "BoundarySign", V(4.2, 1.3, 0.2), V(x, 4.2, z), C.Iron, Enum.Material.Metal)
+		sign(board, Enum.NormalId.Front, "SAFE ZONE", C.Iron, C.Gold)
+		sign(board, Enum.NormalId.Back, "SAFE ZONE", C.Iron, C.Gold)
+	end
+end
+
 -- Artifact recovery area: where artifacts found in a mine that was reset are held for their owners. A roped pad beside the
 -- mine entrance gate; it is NOT a deposit point (the receiving table is far away) - owners pick their artifact up here and
 -- carry it to the receiving table themselves. -------------------------------------------------------------------------------
@@ -6627,13 +7595,14 @@ function WorldCamp.Build(world: Folder, ex)
 	buildAppraisal(camp)
 	buildReceiving(camp)
 	buildRecovery(camp)
+	buildSafeBoundary(camp)
 end
 
 return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="51">
+        <Item class="ModuleScript" referent="54">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -6870,7 +7839,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="52">
+        <Item class="ModuleScript" referent="55">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -6973,7 +7942,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="53">
+        <Item class="ModuleScript" referent="56">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -7104,23 +8073,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="54">
+  <Item class="StarterPlayer" referent="57">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="55">
+    <Item class="StarterPlayerScripts" referent="58">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="56">
+      <Item class="Folder" referent="59">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="57">
+        <Item class="Folder" referent="60">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="58">
+          <Item class="ModuleScript" referent="61">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -7228,7 +8197,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="59">
+          <Item class="ModuleScript" referent="62">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -7244,6 +8213,7 @@ Bindings.PlaceArtifact = Enum.KeyCode.X
 Bindings.ThrowDynamite = Enum.KeyCode.G
 Bindings.Menu = Enum.KeyCode.P
 Bindings.Journal = Enum.KeyCode.J
+Bindings.RelicStrike = Enum.KeyCode.F -- contested relic only: strike the carrier / shove attackers (never a mining click)
 
 function Bindings.Name(keyCode: Enum.KeyCode): string
 	local ok, name = pcall(function()
@@ -7259,7 +8229,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="60">
+          <Item class="ModuleScript" referent="63">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -7567,7 +8537,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="61">
+          <Item class="ModuleScript" referent="64">
             <Properties>
               <string name="Name">CampShelf</string>
               <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
@@ -7702,7 +8672,7 @@ return CampShelf
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="62">
+          <Item class="ModuleScript" referent="65">
             <Properties>
               <string name="Name">CollectionUI</string>
               <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
@@ -7815,7 +8785,7 @@ local function render()
 		if entry then
 			sub = ("Found x%d  -  worth %s"):format(entry.Count, Util.FormatCash(e.Def.Value))
 		elseif e.Def.RequiresCarry then
-			sub = "Carry one home to unlock"
+			sub = e.Def.Relic and "Win the contested relic" or "Carry one home to unlock"
 		else
 			sub = ("Found in the %s"):format(Defs.LayerName(e.Layer):lower())
 		end
@@ -7924,7 +8894,7 @@ return CollectionUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="63">
+          <Item class="ModuleScript" referent="66">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -8355,7 +9325,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="64">
+          <Item class="ModuleScript" referent="67">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -8798,7 +9768,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="65">
+          <Item class="ModuleScript" referent="68">
             <Properties>
               <string name="Name">GuideController</string>
               <string name="Source"><![CDATA[-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
@@ -8986,7 +9956,7 @@ return GuideController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="66">
+          <Item class="ModuleScript" referent="69">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -9062,7 +10032,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="67">
+          <Item class="ModuleScript" referent="70">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -9144,7 +10114,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="68">
+          <Item class="ModuleScript" referent="71">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -9450,7 +10420,365 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="69">
+          <Item class="ModuleScript" referent="72">
+            <Properties>
+              <string name="Name">RelicController</string>
+              <string name="Source"><![CDATA[-- Client side of the contested relic (docs/RELIC_PVP.md). Everything shown here is read from server-published Workspace attributes
+-- (RelicState / Name / Discoverer / CarrierId / Control): the client never learns where an UNDISCOVERED relic is, and it can only
+-- *ask* for an attack with the dedicated action (RelicStrike key / button) - the server decides everything.
+--   * HUD panel: relic name, who has it, the carrier's control meter, instructions.
+--   * Markers: the discovered relic, then its carrier (readable, one at a time); a "deliver here" marker for the carrier.
+--   * Strike / shove button (visible only while a carried relic exists and you are outside the safe zone) + key; never a mining click.
+--   * Feedback: hit / shove bursts, a brief flash on the target, a single bounded knockback applied to the local character.
+local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local RelicRules = require(ReplicatedStorage.Shared.RelicRules)
+
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
+local Audio = require(script.Parent.AudioController)
+local K = require(script.Parent.UIKit)
+
+local P = Config.Palette
+local T = K.Tokens
+local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
+local player = Players.LocalPlayer
+local R = Config.Relic
+
+local RelicController = {}
+
+local panel: Frame, titleLabel: TextLabel, statusLabel: TextLabel, barFill: Frame, hintLabel: TextLabel
+local announce: TextLabel
+local strikeBtn: TextButton
+local relicMarker: BillboardGui?, carrierMarker: BillboardGui?, depositMarker: BillboardGui?
+local lastState = "None"
+local lastPress = -1e9
+local announceToken = 0
+local initialized = false
+local acc = 0
+
+local function localHrp(): BasePart?
+	local char = player.Character
+	return char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+local function marker(text: string, color: Color3, size: UDim2): BillboardGui
+	local b = Instance.new("BillboardGui")
+	b.Name = "RelicMarker"
+	b.AlwaysOnTop = true -- the relic has been discovered, so its position is public information
+	b.Size = size
+	b.StudsOffset = Vector3.new(0, 3.2, 0)
+	b.MaxDistance = 600
+	b.ResetOnSpawn = false
+	local l = Instance.new("TextLabel")
+	l.Name = "Text"
+	l.Size = UDim2.fromScale(1, 1)
+	l.BackgroundTransparency = 1
+	l.Font = K.Font
+	l.TextScaled = true
+	l.TextColor3 = color
+	l.TextStrokeTransparency = 0.2
+	l.TextStrokeColor3 = P.Dark
+	l.Text = text
+	l.Parent = b
+	return b
+end
+
+local function clearMarkers()
+	for _, m in ipairs({ relicMarker, carrierMarker, depositMarker }) do
+		if m then
+			m:Destroy()
+		end
+	end
+	relicMarker, carrierMarker, depositMarker = nil, nil, nil
+end
+
+local function relicModel(): Model?
+	local f = Workspace:FindFirstChild("RelicEvent")
+	return f and f:FindFirstChildOfClass("Model") or nil
+end
+
+local function carrierHead(): BasePart?
+	local id = Workspace:GetAttribute("RelicCarrierId") or 0
+	local p = id ~= 0 and Players:GetPlayerByUserId(id) or nil
+	local char = p and p.Character
+	return char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")) :: BasePart? or nil
+end
+
+local function showAnnouncement(text: string, color: Color3)
+	announceToken += 1
+	local token = announceToken
+	announce.Text = text
+	announce.TextColor3 = color
+	announce.Visible = true
+	task.delay(7, function()
+		if announceToken == token then
+			announce.Visible = false
+		end
+	end)
+end
+
+local function refresh()
+	local state = Workspace:GetAttribute("RelicState") or "None"
+	local name = Workspace:GetAttribute("RelicName") or ""
+	local carrierId = Workspace:GetAttribute("RelicCarrierId") or 0
+	local control = Workspace:GetAttribute("RelicControl") or 0
+	local maxControl = math.max(Workspace:GetAttribute("RelicMaxControl") or R.MaxControl, 1)
+	local active = state ~= "None"
+	local iCarry = active and carrierId == player.UserId
+	panel.Visible = active
+
+	if state ~= lastState then
+		if state == "Discovered" then
+			showAnnouncement(("CONTESTED RELIC!  %s uncovered the %s.  Carry it to camp - the carrier can be attacked."):format(
+				Workspace:GetAttribute("RelicDiscoverer") or "Someone", name), P.Danger)
+		elseif state == "None" and lastState ~= "None" then
+			clearMarkers()
+		end
+		lastState = state
+	end
+	if not active then
+		strikeBtn.Visible = false
+		return
+	end
+
+	titleLabel.Text = ("CONTESTED RELIC: %s"):format(name:upper())
+	local barBack = barFill.Parent :: Frame
+	barBack.Visible = state == "Carried"
+	barFill.Size = UDim2.fromScale(math.clamp(control / maxControl, 0, 1), 1)
+	barFill.BackgroundColor3 = control / maxControl > 0.5 and P.Teal or (control / maxControl > 0.25 and P.Gold or P.Danger)
+	if state == "Carried" then
+		local carrier = Players:GetPlayerByUserId(carrierId)
+		if iCarry then
+			statusLabel.Text = "YOU have it - control " .. tostring(math.ceil(control))
+			hintLabel.Text = ("Deliver it to the RECEIVING TABLE. Attackers can hit you outside the gold SAFE ZONE line. [%s] shoves attackers."):format(Bindings.Name(Bindings.RelicStrike))
+		else
+			statusLabel.Text = ("%s carries it - control %d"):format(carrier and carrier.DisplayName or "Someone", math.ceil(control))
+			hintLabel.Text = ("Hit the carrier with [%s] to make them drop it. No attacks inside the safe zone."):format(Bindings.Name(Bindings.RelicStrike))
+		end
+	else
+		statusLabel.Text = state == "Dropped" and "On the ground - anyone can take it!" or "Just uncovered - take it!"
+		hintLabel.Text = "Find it and use the pickup prompt. It is marked on your screen."
+	end
+
+	-- markers: the relic while it is on the ground, then its carrier
+	if state ~= "Carried" then
+		if carrierMarker then
+			carrierMarker:Destroy()
+			carrierMarker = nil
+		end
+		local m = relicModel()
+		local root = m and m.PrimaryPart
+		if root then
+			local rm = relicMarker or marker(("RELIC: %s"):format(name), P.Gold, UDim2.fromOffset(180, 34))
+			relicMarker = rm
+			rm.Adornee = root
+			rm.Parent = root
+		elseif relicMarker then
+			relicMarker:Destroy()
+			relicMarker = nil
+		end
+	else
+		if relicMarker then
+			relicMarker:Destroy()
+			relicMarker = nil
+		end
+		local head = carrierHead()
+		if head and not iCarry then
+			local cm = carrierMarker or marker("RELIC CARRIER", P.Danger, UDim2.fromOffset(170, 30))
+			carrierMarker = cm
+			cm.Adornee = head
+			cm.Parent = head
+		elseif carrierMarker then
+			carrierMarker:Destroy()
+			carrierMarker = nil
+		end
+	end
+	-- the carrier also sees where to deliver
+	if iCarry then
+		if not depositMarker then
+			local world = Workspace:FindFirstChild("World")
+			local anchor = world and world:FindFirstChild("DepositAnchor", true)
+			if anchor and anchor:IsA("BasePart") then
+				local dm = marker("DELIVER HERE", P.Teal, UDim2.fromOffset(180, 34))
+				dm.StudsOffset = Vector3.new(0, 4, 0)
+				dm.Adornee = anchor
+				dm.Parent = anchor
+				depositMarker = dm
+			end
+		end
+	elseif depositMarker then
+		depositMarker:Destroy()
+		depositMarker = nil
+	end
+
+	-- the dedicated action: only while a carried relic exists and the local player is outside the safe zone
+	local hrp = localHrp()
+	local inSafe = hrp ~= nil and RelicRules.InSafeZone(hrp.Position.X, hrp.Position.Y, hrp.Position.Z)
+	strikeBtn.Visible = state == "Carried" and not inSafe
+	if strikeBtn.Visible then
+		local left = lastPress + (iCarry and R.ShoveCooldown or R.AttackCooldown) - os.clock()
+		local verb = iCarry and "SHOVE" or "STRIKE"
+		strikeBtn.Text = left > 0 and ("%s  %.1fs"):format(verb, left) or ("%s [%s]"):format(verb, Bindings.Name(Bindings.RelicStrike))
+		strikeBtn.BackgroundColor3 = left > 0 and T.Disabled or P.Danger
+	end
+end
+
+-- Effects ------------------------------------------------------------------------------------------------------------------------
+local function burst(position: Vector3, color: Color3)
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Shape = Enum.PartType.Ball
+	p.Material = Enum.Material.Neon
+	p.Color = color
+	p.Transparency = 0.3
+	p.Size = Vector3.one * 1.5
+	p.Position = position + Vector3.new(0, 1, 0)
+	p.Parent = Workspace
+	TweenService:Create(p, TweenInfo.new(0.25), { Size = Vector3.one * 5, Transparency = 1 }):Play()
+	Debris:AddItem(p, 0.4)
+end
+
+local function flash(userId: number)
+	local p = Players:GetPlayerByUserId(userId)
+	local char = p and p.Character
+	if not char then
+		return
+	end
+	local h = Instance.new("Highlight")
+	h.FillColor = P.Danger
+	h.FillTransparency = 0.5
+	h.OutlineTransparency = 1
+	h.Parent = char
+	Debris:AddItem(h, 0.25)
+end
+
+-- A short procedural arm swing (no animation assets are used).
+local function swingArm()
+	local char = player.Character
+	local shoulder = char and char:FindFirstChild("RightShoulder", true)
+	if shoulder and shoulder:IsA("Motor6D") then
+		local c0 = shoulder.C0
+		local out = TweenService:Create(shoulder, TweenInfo.new(0.1), { C0 = c0 * CFrame.Angles(math.rad(-80), 0, 0) })
+		out:Play()
+		out.Completed:Once(function()
+			TweenService:Create(shoulder, TweenInfo.new(0.16), { C0 = c0 }):Play()
+		end)
+	end
+end
+
+local function press()
+	if not Workspace:GetAttribute("RelicState") or Workspace:GetAttribute("RelicState") ~= "Carried" then
+		return
+	end
+	if InputMode.IsMenuOpen() or UserInputService:GetFocusedTextBox() then
+		return
+	end
+	local hrp = localHrp()
+	if hrp and RelicRules.InSafeZone(hrp.Position.X, hrp.Position.Y, hrp.Position.Z) then
+		return
+	end
+	if os.clock() - lastPress < 0.35 then
+		return -- local debounce only; the server enforces the real cooldowns
+	end
+	lastPress = os.clock()
+	Remotes.Get("RelicAttack"):FireServer()
+	swingArm()
+	Audio.Play("Impact", 1.2, 0.8)
+end
+
+function RelicController.Build(gui: ScreenGui)
+	if panel then
+		return
+	end
+	panel = mk("Frame", { Name = "RelicPanel", Size = UDim2.fromOffset(250, 92), Position = UDim2.fromOffset(10, 160), BackgroundColor3 = T.Panel,
+		BackgroundTransparency = 0.1, Visible = false }, gui)
+	corner(panel, 10)
+	stroke(panel, P.Danger, 2)
+	titleLabel = label(panel, "", 15, P.Gold, { Size = UDim2.new(1, -12, 0, 20), Position = UDim2.fromOffset(8, 4), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd })
+	statusLabel = label(panel, "", 14, P.Cream, { Size = UDim2.new(1, -12, 0, 18), Position = UDim2.fromOffset(8, 24), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd })
+	local bar = mk("Frame", { Size = UDim2.new(1, -16, 0, 10), Position = UDim2.fromOffset(8, 46), BackgroundColor3 = Color3.fromHex("3A3F47") }, panel)
+	corner(bar, 5)
+	barFill = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = P.Teal }, bar)
+	corner(barFill, 5)
+	hintLabel = label(panel, "", 12, K.Muted, { Size = UDim2.new(1, -12, 0, 32), Position = UDim2.fromOffset(8, 58), TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
+
+	announce = label(gui, "", 20, P.Danger, { Name = "RelicAnnounce", Size = UDim2.new(1, -540, 0, 52), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 128), Visible = false, TextScaled = true, TextWrapped = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 11 }, announce)
+
+	strikeBtn = K.button(gui, "STRIKE", UDim2.fromOffset(170, 46), UDim2.new(1, -182, 1, -112), P.Danger)
+	strikeBtn.Name = "RelicStrikeButton"
+	strikeBtn.TextSize = 18
+	strikeBtn.Visible = false
+	strikeBtn.Activated:Connect(press)
+end
+
+function RelicController.Init()
+	if initialized then
+		return
+	end
+	initialized = true
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then
+			return
+		end
+		if input.KeyCode == Bindings.RelicStrike then
+			press()
+		end
+	end)
+	Remotes.Get("RelicFx").OnClientEvent:Connect(function(kind: string, userId: number, payload: any)
+		if kind == "Knock" then
+			-- one bounded velocity set on OUR character (the server computed it from validated facts; we clamp it again)
+			local hrp = localHrp()
+			if hrp and typeof(payload) == "Vector3" then
+				local h = Vector3.new(payload.X, 0, payload.Z)
+				if h.Magnitude > R.MaxKnockbackH then
+					h = h.Unit * R.MaxKnockbackH
+				end
+				hrp.AssemblyLinearVelocity = Vector3.new(h.X, math.clamp(payload.Y, 0, R.MaxKnockbackUp), h.Z)
+			end
+		elseif kind == "Hit" or kind == "Shove" then
+			if typeof(payload) == "Vector3" then
+				burst(payload, kind == "Hit" and P.Danger or P.Gold)
+			end
+			flash(userId)
+			Audio.Play("Break", kind == "Hit" and 0.7 or 1.1, 0.7)
+		end
+	end)
+	Workspace:GetAttributeChangedSignal("RelicState"):Connect(refresh)
+	Workspace:GetAttributeChangedSignal("RelicCarrierId"):Connect(refresh)
+	Workspace:GetAttributeChangedSignal("RelicControl"):Connect(refresh)
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.2 then
+			return
+		end
+		acc = 0
+		refresh() -- also keeps markers attached when models/characters appear later, and drives the cooldown readout
+	end)
+	refresh()
+end
+
+return RelicController
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="73">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -9523,7 +10851,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="70">
+          <Item class="ModuleScript" referent="74">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -9640,7 +10968,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="71">
+          <Item class="ModuleScript" referent="75">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
@@ -10157,7 +11485,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="72">
+          <Item class="ModuleScript" referent="76">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -10203,7 +11531,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="73">
+          <Item class="ModuleScript" referent="77">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -10279,7 +11607,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="74">
+          <Item class="ModuleScript" referent="78">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -10453,7 +11781,7 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?, carry: bo
 	if big then
 		label(card, def.Name:upper(), 24, P.Cream, { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(10, 4),
 			TextXAlignment = Enum.TextXAlignment.Left })
-		local sub = carry and ("IMPORTANT  -  CARRY IT TO CAMP  -  " .. Util.FormatCash(def.Value))
+		local sub = carry and (def.Relic and ("CONTESTED RELIC  -  " .. Util.FormatCash(def.Value)) or ("IMPORTANT  -  CARRY IT TO CAMP  -  " .. Util.FormatCash(def.Value)))
 			or ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value))
 		label(card, sub, carry and 15 or 20, rar.Color, {
 			Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(10, 38), TextXAlignment = Enum.TextXAlignment.Left })
@@ -10631,6 +11959,15 @@ function UI.StepMineStatus(dt: number)
 	local banner = refs.shift
 	if state == "Warning" then
 		local left = math.max((Workspace:GetAttribute("MineEndsAt") or now) - now, 0)
+		if Workspace:GetAttribute("MineHold") then
+			refs.mineTitle.Text = "MINE RESET"
+			refs.mineTime.Text = "WAITING"
+			refs.mineTime.TextColor3 = P.Gold
+			banner.Text = "Reset waiting for the contested relic - deliver it or it expires"
+			banner.TextColor3 = P.Gold
+			banner.Visible = true
+			return
+		end
 		local final = left <= Config.Reset.FinalCountdownSeconds
 		refs.mineTitle.Text = "MINE RESETS IN"
 		refs.mineTime.Text = clock(left)
@@ -10800,7 +12137,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="75">
+          <Item class="ModuleScript" referent="79">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -10914,7 +12251,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="76">
+          <Item class="ModuleScript" referent="80">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -11059,7 +12396,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="77">
+        <Item class="LocalScript" referent="81">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
@@ -11079,6 +12416,7 @@ local Interaction = require(Controllers.InteractionController)
 local Throw = require(Controllers.ThrowController)
 local Guide = require(Controllers.GuideController)
 local CampShelf = require(Controllers.CampShelf)
+local Relic = require(Controllers.RelicController)
 
 State.Init()
 InputMode.Init()
@@ -11086,6 +12424,8 @@ State.Connect(function(d)
 	Settings.Load(d.Settings) -- adopt saved settings once
 end)
 UI.Init()
+Relic.Build(UI.GetGui())
+Relic.Init()
 Camera.Init()
 Viewmodel.Init()
 Effects.Init()

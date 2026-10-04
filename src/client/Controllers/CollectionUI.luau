@@ -108,7 +108,7 @@ local function render()
 		if entry then
 			sub = ("Found x%d  -  worth %s"):format(entry.Count, Util.FormatCash(e.Def.Value))
 		elseif e.Def.RequiresCarry then
-			sub = "Carry one home to unlock"
+			sub = e.Def.Relic and "Win the contested relic" or "Carry one home to unlock"
 		else
 			sub = ("Found in the %s"):format(Defs.LayerName(e.Layer):lower())
 		end
