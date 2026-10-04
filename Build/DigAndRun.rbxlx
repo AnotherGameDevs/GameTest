@@ -9,6 +9,45 @@
       </Properties>
       <Item class="ModuleScript" referent="2">
         <Properties>
+          <string name="Name">Appearances</string>
+          <string name="Source"><![CDATA[-- Tool APPEARANCE is separate from tool STATS. A tool def (Defs.Tools) names a default Appearance id; a
+-- cosmetic skin (later) can override it per player without touching balance. Models are built from these ids by
+-- ToolModels, for both the held tool (server) and the shop preview (client), so they always match.
+local Appearances = {}
+
+-- Builder = which ToolModels builder draws it. Entries using "placeholder" are unfinished art (colour-coded
+-- silhouettes) waiting for the polish pass.
+Appearances.List = {
+	shovel_rusty = { Builder = "rusty" }, -- family A: wooden-shaft hand tools (tiers 1-3)
+	shovel_digging = { Builder = "digging" },
+	shovel_heavy = { Builder = "heavy" },
+	shovel_power = { Builder = "power" }, -- family B: reinforced excavation tools (tiers 4-6)
+	jackhammer = { Builder = "jackhammer" },
+	drill = { Builder = "drill" },
+	drill_industrial = { Builder = "industrial" }, -- family C: manufactured industrial equipment (tiers 7-8)
+	dynamite = { Builder = "dynamite" },
+}
+
+-- Cosmetic skins (none yet): [skinId] = { ToolType = "Shovel", Appearance = "<id in List>" }.
+Appearances.Skins = {}
+
+-- Resolves which appearance to draw: a valid owned-skin override, else the tool's default.
+function Appearances.Resolve(toolDef, skinId: string?): string
+	if skinId then
+		local skin = Appearances.Skins[skinId]
+		if skin and skin.ToolType == toolDef.ToolType and Appearances.List[skin.Appearance] then
+			return skin.Appearance
+		end
+	end
+	return toolDef.Appearance
+end
+
+return Appearances
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
           <string name="Name">Config</string>
           <string name="Source"><![CDATA[-- All tunable balance/feel values live here. Nothing in the services should hardcode these.
 local Config = {}
@@ -50,7 +89,6 @@ Config.Layers = {
 Config.Dig = {
 	ReachTolerance = 2, -- studs of slack the SERVER adds to tool Reach (movement/latency). Client indicator uses none.
 	CooldownTolerance = 0.80, -- server accepts hits at >= 80% of the tool's nominal interval
-	SplashFraction = 0.55, -- damage fraction applied to neighbours when tool DigRadius > 0
 	MaxBroadcastDistance = 220, -- only clients within this distance get hit feedback
 }
 
@@ -65,6 +103,36 @@ Config.Camp = {
 	SellZoneOffset = Vector3.new(-14, 0, 0),
 	ShopOffset = Vector3.new(14, 0, -4),
 	SellZoneRadius = 9,
+}
+
+-- "Important" artifacts (Defs.Treasure[...].RequiresCarry = true) must be physically carried to camp.
+Config.Artifacts = {
+	SpawnDelay = 1.3, -- seconds after discovery before the physical artifact appears (lets the reveal play first)
+	PickupReach = 14, -- studs from player to artifact for a pickup
+	DepositReach = 16, -- studs from player to the receiving table for a deposit
+	PlaceReach = 8, -- max horizontal distance a placed artifact may land from the player
+	CarryScale = 0.7, -- the held model is drawn at this fraction of its world size
+	CarryRotation = Vector3.new(90, 0, 0), -- degrees applied to the held model (tune after seeing the pose)
+	CarryGrip = CFrame.new(0, -0.8, 0), -- Tool.Grip for the held artifact
+	DisplaySeconds = 3, -- how long a deposited artifact sits on the receiving table
+}
+
+-- Fixed physical exit from the mine: a ladder shaft outside the destructible grid, on the camp (south) edge.
+Config.Exit = {
+	Enabled = true,
+	CenterX = -26, -- world X of the shaft centre (edges should land on cell boundaries: 4-stud multiples)
+	Width = 12,
+	Run = 8, -- studs the shaft extends south from the grid edge
+}
+
+Config.Shop = {
+	SequentialTools = true, -- a tool tier can only be bought once the previous tier is owned
+}
+
+-- Server-side balance telemetry (printed to the server Output). Used to measure blocks/min and cash/min.
+Config.Metrics = {
+	Enabled = true,
+	PrintInterval = 60, -- seconds per reporting window
 }
 
 Config.ReturnToCamp = {
@@ -82,7 +150,7 @@ Config.Data = {
 	Enabled = true, -- false = never touch DataStore (everything in memory)
 	StoreName = "DigAndRun_PlayerData_v1",
 	AutosaveInterval = 60,
-	CurrentVersion = 1,
+	CurrentVersion = 2, -- v2: eight-tier tool progression (see DataMigrations)
 }
 
 Config.RateLimits = { -- { max calls, per seconds }
@@ -90,13 +158,16 @@ Config.RateLimits = { -- { max calls, per seconds }
 	RequestPurchase = { 5, 2 },
 	ReturnToCamp = { 2, 5 },
 	ClientReady = { 3, 5 },
+	RequestEquip = { 5, 2 },
+	PlaceArtifact = { 3, 3 },
+	ThrowDynamite = { 4, 3 },
 }
 
 return Config
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="3">
+      <Item class="ModuleScript" referent="4">
         <Properties>
           <string name="Name">Defs</string>
           <string name="Source"><![CDATA[-- Data-driven definitions: tools, backpacks, treasure, rarity.
@@ -115,18 +186,64 @@ Defs.Rarity = {
 	Mythic = { Order = 6, Color = P.Danger, Reveal = true },
 }
 
--- Tools. Power = damage per hit, Rate = hits/second, DigRadius = extra cells hit around the target
--- (this is what makes better shovels *behave* differently, not only hit harder).
+-- Tools: STATS ONLY. How a tool looks lives in Appearances.luau / ToolModels.luau, so skins can change
+-- appearance without touching balance.
+--   Power  = damage per hit            Rate  = swings per second
+--   Reach  = studs from the character to the NEAREST POINT of the target block (see Defs.CellInReach)
+--   Splash = optional { Radius, MaxExtra, Fraction }: up to MaxExtra nearby exposed blocks also take
+--            Fraction of Power per swing. Deliberately capped; most tiers are single-block.
+--   Family = which construction family it belongs to (drives art + the shop's grouping).
+-- No tier raises damage, rate, reach and area all at once. Prices are PROVISIONAL (docs/TOOL_TIERS.md,
+-- tools/economy_sim.py). Tier 8 (Dynamite) is a throwable consumable: see Defs.Consumables.
 Defs.Tools = {
 	rusty_shovel = {
-		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 8,
-		Price = 0, RequiredReputation = 0, Order = 1, Color = Color3.fromHex("8A6A55"), Scale = 1.0,
-		Blurb = "Slow. One block at a time.",
+		DisplayName = "Rusty Shovel", Tier = 1, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_rusty",
+		Power = 8, Rate = 2.0, Reach = 8, Price = 0, RequiredReputation = 0,
+		Blurb = "Small and basic. Gets the job done.",
 	},
 	digging_shovel = {
-		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 10,
-		Price = 180, RequiredReputation = 0, Order = 2, Color = P.Teal, Scale = 1.35,
-		Blurb = "Faster, harder, and smashes neighbouring blocks too!",
+		DisplayName = "Digging Shovel", Tier = 2, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_digging",
+		Power = 12, Rate = 2.2, Reach = 8, Price = 300, RequiredReputation = 0,
+		Blurb = "Faster and stronger than the rusty shovel.",
+	},
+	heavy_shovel = {
+		DisplayName = "Heavy Shovel", Tier = 3, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_heavy",
+		Power = 36, Rate = 1.5, Reach = 8, Price = 1500, RequiredReputation = 0,
+		Blurb = "Bigger scoop. Heavy swings break soft ground in one hit.",
+	},
+	power_shovel = {
+		DisplayName = "Power Shovel", Tier = 4, Family = "Excavation", ToolType = "Shovel", Appearance = "shovel_power",
+		Power = 36, Rate = 1.5, Reach = 8, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
+		Price = 2800, RequiredReputation = 0,
+		Blurb = "Reinforced design. Each swing also chips 2 neighbouring blocks.",
+	},
+	jackhammer = {
+		DisplayName = "Jackhammer", Tier = 5, Family = "Excavation", ToolType = "Jackhammer", Appearance = "jackhammer",
+		Power = 22, Rate = 4.5, Reach = 8, Price = 5000, RequiredReputation = 0,
+		Blurb = "Rapid digging. Chips through hard material.",
+	},
+	drill = {
+		DisplayName = "Drill", Tier = 6, Family = "Excavation", ToolType = "Drill", Appearance = "drill",
+		Power = 22, Rate = 5.5, Reach = 11, Price = 7500, RequiredReputation = 0,
+		Blurb = "Cuts a tunnel. Faster, and reaches deeper from where you stand.",
+	},
+	industrial_drill = {
+		DisplayName = "Industrial Drill", Tier = 7, Family = "Industrial", ToolType = "Drill", Appearance = "drill_industrial",
+		Power = 22, Rate = 5.5, Reach = 11, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
+		Price = 11500, RequiredReputation = 0,
+		Blurb = "Massive digging power. Clears neighbouring blocks as it goes.",
+	},
+}
+
+-- Tier 8: a throwable, single-use item (buy one, throw it, it is gone). Counts are saved per player.
+-- The blast breaks the nearest MaxCells blocks within Radius cells of where it lands (a tightly capped area).
+Defs.Consumables = {
+	dynamite = {
+		DisplayName = "Dynamite", Tier = 8, Family = "Industrial", Appearance = "dynamite",
+		Price = 400, MaxCarry = 3, Cooldown = 1.0, MaxActive = 3,
+		FuseSeconds = 2.5, ThrowSpeed = 42, ThrowLift = 14,
+		Blast = { Radius = 1, MaxCells = 14 },
+		Blurb = "Throwable. Destroys a cluster of blocks. One use, then it is gone.",
 	},
 }
 
@@ -143,10 +260,10 @@ Defs.Treasure = {
 	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring" },
 	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block" },
 	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
-	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring" },
-	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem" },
-	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
-	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
+	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring", Model = "necklace" },
+	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem", Model = "gem" },
+	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block", RequiresCarry = true },
+	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
 }
 
 -- The ONE reach rule, used by server validation and the client reach indicator.
@@ -206,25 +323,59 @@ function Defs.PickTreasure(layerId: string, rng: Random): string?
 	return w.List[#w.List].Id
 end
 
--- Shop catalogue, sorted. Items: { Kind = "Tool"|"Backpack", Id, Def }
+-- Swings needed to break one block of a layer with this tool (pure; used by the shop comparison UI).
+function Defs.HitsToBreak(tool, layer): number
+	return math.ceil(layer.Health / tool.Power)
+end
+
+-- Tool ids ordered by tier.
+local toolsByTier = {}
+for id, def in pairs(Defs.Tools) do
+	table.insert(toolsByTier, id)
+end
+table.sort(toolsByTier, function(a, b)
+	return Defs.Tools[a].Tier < Defs.Tools[b].Tier
+end)
+Defs.ToolsByTier = toolsByTier
+
+-- The tier directly below `toolId` (nil for tier 1). Used for sequential unlocking.
+function Defs.PreviousTool(toolId: string): string?
+	local def = Defs.Tools[toolId]
+	if not def then
+		return nil
+	end
+	for _, id in ipairs(toolsByTier) do
+		if Defs.Tools[id].Tier == def.Tier - 1 then
+			return id
+		end
+	end
+	return nil
+end
+
+-- Shop catalogue. Tools tab: the seven equippable tiers then the tier-8 consumable. Backpacks tab: purchasable packs.
 function Defs.ShopItems()
 	local items = {}
-	for id, def in pairs(Defs.Tools) do
-		if def.Price > 0 then
-			table.insert(items, { Kind = "Tool", Id = id, Def = def })
-		end
+	for _, id in ipairs(toolsByTier) do
+		table.insert(items, { Kind = "Tool", Id = id, Def = Defs.Tools[id] })
 	end
+	for id, def in pairs(Defs.Consumables) do
+		table.insert(items, { Kind = "Consumable", Id = id, Def = def })
+	end
+	local packs = {}
 	for id, def in pairs(Defs.Backpacks) do
 		if def.Price > 0 then
-			table.insert(items, { Kind = "Backpack", Id = id, Def = def })
+			table.insert(packs, { Kind = "Backpack", Id = id, Def = def })
 		end
 	end
-	table.sort(items, function(a, b)
+	table.sort(packs, function(a, b)
 		if a.Def.Price ~= b.Def.Price then
 			return a.Def.Price < b.Def.Price
 		end
 		return a.Id < b.Id
 	end)
+	for _, it in ipairs(packs) do
+		table.insert(items, it)
+	end
 	return items
 end
 
@@ -232,7 +383,7 @@ return Defs
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="4">
+      <Item class="ModuleScript" referent="5">
         <Properties>
           <string name="Name">Grid</string>
           <string name="Source"><![CDATA[-- Pure grid math shared by server and client. Cell coordinates are 0-based integers (x, y, z);
@@ -290,7 +441,123 @@ return Grid
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="5">
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">ModelKit</string>
+          <string name="Source"><![CDATA[-- Tiny parts-only modelling kit for the "chunky dig-site" look. A model is a list of part specs positioned
+-- relative to its origin; the same spec list can become an anchored preview/FX Model or a welded Tool.
+local Kit = {}
+
+local function rotFromDegrees(rot: Vector3?): CFrame
+	if not rot then
+		return CFrame.identity
+	end
+	return CFrame.Angles(math.rad(rot.X), math.rad(rot.Y), math.rad(rot.Z))
+end
+
+local function spec(name: string, shape: string, size: Vector3, pos: Vector3, rot: Vector3?, color: Color3, material: Enum.Material?)
+	return {
+		Name = name,
+		Shape = shape, -- "Block" | "Ball" | "Cylinder" | "Ellipsoid"
+		Size = size,
+		Offset = CFrame.new(pos) * rotFromDegrees(rot),
+		Color = color,
+		Material = material or Enum.Material.SmoothPlastic,
+	}
+end
+
+function Kit.block(name: string, size: Vector3, pos: Vector3, color: Color3, material: Enum.Material?, rot: Vector3?)
+	return spec(name, "Block", size, pos, rot, color, material)
+end
+
+function Kit.ball(name: string, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?)
+	return spec(name, "Ball", Vector3.one * diameter, pos, nil, color, material)
+end
+
+-- Soft stretched sphere (body of a scarab etc.): a block-sized part rendered with a sphere mesh.
+function Kit.ellipsoid(name: string, size: Vector3, pos: Vector3, color: Color3, material: Enum.Material?, rot: Vector3?)
+	return spec(name, "Ellipsoid", size, pos, rot, color, material)
+end
+
+-- Cylinder along "X", "Y" or "Z". (Roblox cylinders run along the part's own X axis.)
+function Kit.cyl(name: string, axis: string, length: number, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?)
+	local rot = nil
+	if axis == "Y" then
+		rot = Vector3.new(0, 0, 90)
+	elseif axis == "Z" then
+		rot = Vector3.new(0, 90, 0)
+	end
+	return spec(name, "Cylinder", Vector3.new(length, diameter, diameter), pos, rot, color, material)
+end
+
+-- Creates the Part for a spec (unanchored, no collision). Caller positions/welds it.
+function Kit.make(s): Part
+	local p = Instance.new("Part")
+	p.Name = s.Name
+	p.Size = s.Size
+	p.Color = s.Color
+	p.Material = s.Material
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.CanCollide = false
+	p.CanTouch = false
+	if s.Shape == "Ball" then
+		p.Shape = Enum.PartType.Ball
+	elseif s.Shape == "Cylinder" then
+		p.Shape = Enum.PartType.Cylinder
+	elseif s.Shape == "Ellipsoid" then
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.Sphere
+		mesh.Parent = p
+	end
+	return p
+end
+
+-- Anchored, non-colliding Model for previews and FX. A tiny invisible "Root" at the origin is the PrimaryPart so
+-- PivotTo / ScaleTo / spinning all happen around the model's origin.
+function Kit.BuildModel(specs, name: string?): Model
+	local model = Instance.new("Model")
+	model.Name = name or "Model"
+	local root = Instance.new("Part")
+	root.Name = "Root"
+	root.Size = Vector3.one * 0.1
+	root.Transparency = 1
+	root.Anchored = true
+	root.CanCollide = false
+	root.CanQuery = false
+	root.CanTouch = false
+	root.Parent = model
+	model.PrimaryPart = root
+	for _, s in ipairs(specs) do
+		local p = Kit.make(s)
+		p.Anchored = true
+		p.CanQuery = false
+		p.CFrame = s.Offset
+		p.Parent = model
+	end
+	return model
+end
+
+-- Returns a copy of `specs` uniformly scaled and rotated (degrees) about the origin.
+function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
+	local rot = rotFromDegrees(rotationDegrees)
+	local out = {}
+	for _, s in ipairs(specs) do
+		local pos = s.Offset.Position * scale
+		local r = s.Offset - s.Offset.Position
+		table.insert(out, {
+			Name = s.Name, Shape = s.Shape, Size = s.Size * scale, Color = s.Color, Material = s.Material,
+			Offset = rot * (CFrame.new(pos) * r),
+		})
+	end
+	return out
+end
+
+return Kit
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
         <Properties>
           <string name="Name">Remotes</string>
           <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
@@ -303,13 +570,18 @@ local EVENTS = {
 	"ClientReady", -- C->S  client finished loading, wants initial state
 	"DigHit", -- C->S  (x, y, z) request to hit a cell
 	"RequestPurchase", -- C->S  (kind, id)
+	"RequestEquip", -- C->S  (kind, id)  equip an already-owned tool
 	"ReturnToCamp", -- C->S
 	"PlayerState", -- S->C  full state snapshot
 	"DigResult", -- S->C  { hits = {...}, depth }
 	"TreasureFound", -- S->C  treasure reveal
 	"Sold", -- S->C  (amount, count)
 	"Notify", -- S->C  (text, kind)
-	"ReturnResult", -- S->C  (ok, secondsUntilReady)
+	"ReturnResult", -- S->C  (ok, secondsUntilReady, reason?)
+	"PlaceArtifact", -- C->S  put the carried artifact down
+	"ThrowDynamite", -- C->S  (dx, dy, dz) aim direction; the server decides everything else
+	"Explosion", -- S->C  (position) cosmetic blast feedback
+	"ArtifactDeposited", -- S->C  (name, value)
 }
 
 local folder: Folder
@@ -336,7 +608,470 @@ return Remotes
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="6">
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">ToolModels</string>
+          <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
+-- (client), so what you preview is exactly what you hold. See docs/ART_STANDARD.md for the rules these follow.
+local Kit = require(script.Parent.ModelKit)
+local Appearances = require(script.Parent.Appearances)
+local Config = require(script.Parent.Config)
+
+local ToolModels = {}
+
+local V = Vector3.new
+local function hex(s: string): Color3
+	return Color3.fromHex(s)
+end
+
+local P = Config.Palette
+local WOOD, WOOD_DARK, LACQUER = hex("B07A45"), hex("7A5230"), hex("6B4A2E")
+local RUST, RUST_DARK, RUST_LIGHT = hex("B5562F"), hex("7D3A22"), hex("D9803F")
+local STEEL, STEEL_DARK, STEEL_LIGHT = hex("A9B7C6"), hex("6F7F91"), hex("D3DDE8")
+local METAL = hex("9AA0A6")
+local AMBER = hex("E8A33D") -- family B shafts / housings
+local RUBBER = hex("23262B")
+local GUNMETAL, GUNMETAL_LIGHT = hex("4A5560"), hex("6B7783") -- family B/C steel
+local ORANGE, ORANGE_DARK = hex("E5602B"), hex("B84519") -- family C panels
+local BOLT = hex("C3C8CE")
+local DYNAMITE_RED, CREAM = hex("C23B2A"), P.Cream
+
+-- Coordinates: the tool's long axis runs along Y with the grip end at -Y and the working end at +Y (a held tool
+-- points forward along its own +Y). Origin = the "Handle" part. Studs. First-person draws tools at FPScale.
+local builders = {}
+
+local function add(list, ...)
+	for _, part in ipairs({ ... }) do
+		table.insert(list, part)
+	end
+end
+
+-- Closed D-grip (top bar, two posts, bottom bar, end caps) centred on x=0 at height y.
+local function dGrip(list, y: number, width: number, thickness: number, color: Color3, material: Enum.Material?)
+	local half = width / 2 - 0.1
+	add(list,
+		Kit.cyl("GripTop", "X", width, thickness, V(0, y, 0), color, material),
+		Kit.block("PostL", V(thickness * 0.7, 0.7, thickness * 0.7), V(-half, y - 0.35, 0), color, material),
+		Kit.block("PostR", V(thickness * 0.7, 0.7, thickness * 0.7), V(half, y - 0.35, 0), color, material),
+		Kit.cyl("GripBottom", "X", width, thickness, V(0, y - 0.7, 0), color, material),
+		Kit.ball("CapTL", thickness + 0.12, V(-half - 0.08, y, 0), color, material),
+		Kit.ball("CapTR", thickness + 0.12, V(half + 0.08, y, 0), color, material))
+end
+
+-- Rounded-tip spade blade (rectangle + disc) with a lighter bevel inset and a centre rib. width = full blade width.
+local function spadeBlade(list, y: number, width: number, h: number, thick: number, color: Color3, bevel: Color3, rib: Color3, material: Enum.Material?)
+	local tipY = y + h / 2 + width / 2 - 0.1
+	add(list,
+		Kit.block("BladeTop", V(width, h, thick), V(0, y, 0), color, material),
+		Kit.cyl("BladeTip", "Z", thick, width, V(0, y + h / 2, 0), color, material),
+		Kit.block("BevelTop", V(width * 0.78, h * 0.9, thick + 0.04), V(0, y, 0), bevel, material),
+		Kit.cyl("BevelTip", "Z", thick + 0.04, width * 0.78, V(0, y + h / 2, 0), bevel, material),
+		Kit.block("Rib", V(0.28, h + width * 0.5, thick + 0.16), V(0, y + (width * 0.5) / 2 - 0.1, 0), rib, material))
+	return tipY
+end
+
+------------------------------------------------------------------------------------------------------------------
+-- FAMILY A: wooden-shaft hand tools (tiers 1-3). Wood shaft, hand-forged blade, T-grip -> D-grip.
+------------------------------------------------------------------------------------------------------------------
+
+-- Tier 1: weathered, chunky, obviously a starter. Rust-orange blade, plain wood, T-grip.
+function builders.rusty(_)
+	return {
+		Grip = CFrame.new(0, -1.2, 0),
+		FPScale = 0.5,
+		Parts = {
+			Kit.cyl("Handle", "Y", 4.4, 0.55, V(0, 0, 0), WOOD, Enum.Material.Wood),
+			Kit.cyl("GripBar", "X", 1.5, 0.5, V(0, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
+			Kit.ball("GripCapL", 0.66, V(-0.78, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
+			Kit.ball("GripCapR", 0.66, V(0.78, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
+			Kit.cyl("Ferrule", "Y", 0.9, 0.85, V(0, 2.2, 0), RUST_DARK, Enum.Material.Metal),
+			Kit.block("BladeTop", V(1.9, 1.0, 0.28), V(0, 2.9, 0), RUST),
+			Kit.cyl("BladeTip", "Z", 0.28, 1.9, V(0, 3.4, 0), RUST),
+			Kit.block("Rib", V(0.32, 1.9, 0.42), V(0, 3.1, 0), RUST_DARK),
+			Kit.block("RustPatchA", V(0.5, 0.4, 0.32), V(0.5, 3.6, 0), RUST_LIGHT),
+			Kit.block("RustPatchB", V(0.35, 0.32, 0.32), V(-0.55, 3.95, 0), RUST_DARK),
+			Kit.ball("RivetL", 0.28, V(-0.6, 2.6, 0.16), METAL, Enum.Material.Metal),
+			Kit.ball("RivetR", 0.28, V(0.6, 2.6, 0.16), METAL, Enum.Material.Metal),
+		},
+	}
+end
+
+-- Tier 2: clean steel, teal collar + wraps, closed D-grip, bevelled two-tone blade. Same size, clearly "bought".
+function builders.digging(_)
+	local parts = {
+		Kit.cyl("Handle", "Y", 4.4, 0.55, V(0, 0, 0), LACQUER, Enum.Material.Wood),
+		Kit.cyl("WrapA", "Y", 0.45, 0.68, V(0, 0.9, 0), P.Teal),
+		Kit.cyl("WrapB", "Y", 0.3, 0.66, V(0, 0.2, 0), P.Teal),
+		Kit.cyl("Socket", "Y", 0.9, 0.82, V(0, 2.0, 0), STEEL_DARK, Enum.Material.Metal),
+		Kit.block("Collar", V(2.1, 0.4, 0.5), V(0, 2.4, 0), P.Teal),
+		Kit.ball("RivetL", 0.3, V(-0.8, 2.4, 0.27), P.Gold, Enum.Material.Metal),
+		Kit.ball("RivetR", 0.3, V(0.8, 2.4, 0.27), P.Gold, Enum.Material.Metal),
+	}
+	dGrip(parts, -2.2, 1.6, 0.5, WOOD_DARK, Enum.Material.Wood)
+	spadeBlade(parts, 2.95, 1.9, 1.0, 0.3, STEEL, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
+	return { Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
+end
+
+-- Tier 3: same wooden family and D-grip, but a thicker shaft, a bigger scooped blade with turned-up side lips, and
+-- strapped socket. Bigger scoop without being much longer.
+function builders.heavy(_)
+	local parts = {
+		Kit.cyl("Handle", "Y", 4.4, 0.68, V(0, 0, 0), LACQUER, Enum.Material.Wood),
+		Kit.cyl("Socket", "Y", 1.1, 1.0, V(0, 2.0, 0), STEEL_DARK, Enum.Material.Metal),
+		Kit.cyl("StrapA", "Y", 0.18, 1.1, V(0, 1.7, 0), STEEL_LIGHT, Enum.Material.Metal),
+		Kit.cyl("StrapB", "Y", 0.18, 1.1, V(0, 2.3, 0), STEEL_LIGHT, Enum.Material.Metal),
+		Kit.block("Collar", V(2.7, 0.45, 0.62), V(0, 2.55, 0), AMBER),
+		Kit.ball("BoltL", 0.3, V(-1.05, 2.55, 0.33), BOLT, Enum.Material.Metal),
+		Kit.ball("BoltR", 0.3, V(1.05, 2.55, 0.33), BOLT, Enum.Material.Metal),
+		Kit.block("LipL", V(0.24, 1.3, 0.62), V(-1.15, 3.2, 0.12), STEEL_DARK, Enum.Material.Metal),
+		Kit.block("LipR", V(0.24, 1.3, 0.62), V(1.15, 3.2, 0.12), STEEL_DARK, Enum.Material.Metal),
+	}
+	dGrip(parts, -2.2, 1.8, 0.6, WOOD_DARK, Enum.Material.Wood)
+	spadeBlade(parts, 3.1, 2.4, 1.1, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
+	return { Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
+end
+
+------------------------------------------------------------------------------------------------------------------
+-- FAMILY B: professional reinforced excavation tools (tiers 4-6). Amber fibreglass-style shafts, rubber grips,
+-- bolted steel housings and welded reinforcing ribs.
+------------------------------------------------------------------------------------------------------------------
+
+-- Tier 4: a shovel rebuilt as a professional tool: amber shaft, rubber D-grip + hand sleeve, bolted steel socket
+-- housing, welded ribs, and small side lugs that hint at its wider cut.
+function builders.power(_)
+	local parts = {
+		Kit.cyl("Handle", "Y", 4.4, 0.6, V(0, 0, 0), AMBER),
+		Kit.cyl("HandSleeve", "Y", 1.1, 0.74, V(0, -1.4, 0), RUBBER),
+		Kit.block("Housing", V(1.3, 1.1, 1.0), V(0, 2.0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("BandA", V(1.42, 0.18, 1.12), V(0, 1.6, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.block("BandB", V(1.42, 0.18, 1.12), V(0, 2.4, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.ball("BoltL", 0.26, V(-0.5, 2.0, 0.52), BOLT, Enum.Material.Metal),
+		Kit.ball("BoltR", 0.26, V(0.5, 2.0, 0.52), BOLT, Enum.Material.Metal),
+		Kit.block("CollarPlate", V(2.2, 0.4, 0.55), V(0, 2.65, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("LugL", V(0.35, 0.6, 0.5), V(-1.15, 3.1, 0), AMBER),
+		Kit.block("LugR", V(0.35, 0.6, 0.5), V(1.15, 3.1, 0), AMBER),
+		Kit.block("RibL", V(0.2, 2.1, 0.5), V(-0.62, 3.4, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("RibR", V(0.2, 2.1, 0.5), V(0.62, 3.4, 0), GUNMETAL, Enum.Material.Metal),
+	}
+	dGrip(parts, -2.2, 1.7, 0.55, RUBBER)
+	spadeBlade(parts, 3.2, 2.0, 1.0, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, GUNMETAL, Enum.Material.Metal)
+	return { Grip = CFrame.new(0, -1.4, 0), FPScale = 0.5, Parts = parts }
+end
+
+-- Tier 5: a chisel tool. Amber housing on a steel core, rubber cross-grip, steel chisel with a separate bolted edge.
+function builders.jackhammer(_)
+	return {
+		Grip = CFrame.new(0, -2.4, 0),
+		FPScale = 0.46,
+		Parts = {
+			Kit.cyl("Handle", "Y", 3.0, 0.9, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+			Kit.cyl("GripBar", "X", 2.4, 0.6, V(0, -2.4, 0), RUBBER),
+			Kit.ball("GripCapL", 0.82, V(-1.25, -2.4, 0), RUBBER),
+			Kit.ball("GripCapR", 0.82, V(1.25, -2.4, 0), RUBBER),
+			Kit.block("Neck", V(0.8, 0.8, 0.8), V(0, -1.9, 0), GUNMETAL, Enum.Material.Metal),
+			Kit.block("Housing", V(1.5, 2.4, 1.1), V(0, -0.5, 0), AMBER),
+			Kit.block("VentL", V(0.12, 1.4, 0.9), V(-0.78, -0.5, 0), GUNMETAL, Enum.Material.Metal),
+			Kit.block("VentR", V(0.12, 1.4, 0.9), V(0.78, -0.5, 0), GUNMETAL, Enum.Material.Metal),
+			Kit.block("BandTop", V(1.62, 0.2, 1.22), V(0, 0.55, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+			Kit.cyl("Collar", "Y", 0.5, 1.2, V(0, 0.95, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+			Kit.cyl("ChiselBar", "Y", 1.6, 0.55, V(0, 1.9, 0), STEEL, Enum.Material.Metal),
+			Kit.block("ChiselHead", V(1.4, 0.9, 0.28), V(0, 2.9, 0), STEEL_LIGHT, Enum.Material.Metal),
+			Kit.block("EdgePlate", V(1.4, 0.22, 0.36), V(0, 3.32, 0), BOLT, Enum.Material.Metal),
+			Kit.ball("EdgeBoltL", 0.2, V(-0.5, 3.32, 0.2), GUNMETAL, Enum.Material.Metal),
+			Kit.ball("EdgeBoltR", 0.2, V(0.5, 3.32, 0.2), GUNMETAL, Enum.Material.Metal),
+		},
+	}
+end
+
+-- Tier 6: a tunnelling tool. Amber body, rubber D-grip + side handle, and a stepped steel boring head with bolted
+-- carbide inserts. The head is a static stepped cone (no spiral, nothing that implies it spins).
+function builders.drill(_)
+	local parts = {
+		Kit.cyl("Handle", "Y", 3.2, 0.85, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("Body", V(1.4, 1.8, 1.2), V(0, 0.3, 0), AMBER),
+		Kit.block("StripeA", V(1.5, 0.2, 1.26), V(0, 0.95, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("StripeB", V(1.5, 0.2, 1.26), V(0, -0.35, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.cyl("SideHandle", "X", 1.0, 0.45, V(-1.15, -0.4, 0), RUBBER),
+		Kit.block("SideMount", V(0.5, 0.5, 0.5), V(-0.65, -0.4, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.ball("SideCap", 0.58, V(-1.7, -0.4, 0), RUBBER),
+		Kit.cyl("Collar", "Y", 0.5, 1.3, V(0, 1.45, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.cyl("HeadStep1", "Y", 0.8, 1.25, V(0, 2.1, 0), STEEL, Enum.Material.Metal),
+		Kit.cyl("HeadStep2", "Y", 0.7, 0.95, V(0, 2.85, 0), STEEL, Enum.Material.Metal),
+		Kit.cyl("HeadStep3", "Y", 0.6, 0.65, V(0, 3.5, 0), STEEL_LIGHT, Enum.Material.Metal),
+		Kit.ball("Tip", 0.45, V(0, 3.9, 0), BOLT, Enum.Material.Metal),
+		Kit.block("InsertN", V(0.3, 0.5, 0.3), V(0, 2.15, 0.64), BOLT, Enum.Material.Metal),
+		Kit.block("InsertS", V(0.3, 0.5, 0.3), V(0, 2.15, -0.64), BOLT, Enum.Material.Metal),
+		Kit.block("InsertE", V(0.3, 0.5, 0.3), V(0.64, 2.15, 0), BOLT, Enum.Material.Metal),
+		Kit.block("InsertW", V(0.3, 0.5, 0.3), V(-0.64, 2.15, 0), BOLT, Enum.Material.Metal),
+	}
+	dGrip(parts, -2.0, 1.7, 0.55, RUBBER)
+	return { Grip = CFrame.new(0, -1.9, 0), FPScale = 0.46, Parts = parts }
+end
+
+------------------------------------------------------------------------------------------------------------------
+-- FAMILY C: manufactured industrial equipment (tiers 7-8). Gunmetal housings with orange panels, reinforcing ribs,
+-- guarded grip assemblies and bolted, replaceable cutting edges. Nothing here implies drive belts, batteries or cables.
+------------------------------------------------------------------------------------------------------------------
+
+-- Tier 7: heavy housing with ribbed side panels, a two-grip assembly and a wide bolted cutting head + edge plate.
+function builders.industrial(_)
+	local parts = {
+		Kit.cyl("Handle", "Y", 3.4, 1.0, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("Housing", V(1.9, 2.6, 1.5), V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("PanelL", V(0.14, 2.0, 1.3), V(-1.0, 0, 0), ORANGE),
+		Kit.block("PanelR", V(0.14, 2.0, 1.3), V(1.0, 0, 0), ORANGE),
+		Kit.block("PanelFront", V(1.7, 2.0, 0.14), V(0, 0, -0.8), ORANGE_DARK),
+		Kit.block("PanelBack", V(1.7, 2.0, 0.14), V(0, 0, 0.8), ORANGE_DARK),
+		-- reinforcing ribs
+		Kit.block("RibL1", V(0.3, 0.28, 1.6), V(-1.05, -0.9, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.block("RibL2", V(0.3, 0.28, 1.6), V(-1.05, 0, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.block("RibL3", V(0.3, 0.28, 1.6), V(-1.05, 0.9, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.block("RibR1", V(0.3, 0.28, 1.6), V(1.05, -0.9, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.block("RibR2", V(0.3, 0.28, 1.6), V(1.05, 0, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.block("RibR3", V(0.3, 0.28, 1.6), V(1.05, 0.9, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		-- grip assembly: guarded rear cross-grip + a front hand grip
+		Kit.cyl("GripBar", "X", 2.6, 0.62, V(0, -2.2, 0), RUBBER),
+		Kit.block("GuardL", V(0.45, 0.9, 0.45), V(-1.05, -1.75, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("GuardR", V(0.45, 0.9, 0.45), V(1.05, -1.75, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("GuardMid", V(0.6, 0.9, 0.6), V(0, -1.75, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.ball("GripCapL", 0.8, V(-1.35, -2.2, 0), RUBBER),
+		Kit.ball("GripCapR", 0.8, V(1.35, -2.2, 0), RUBBER),
+		Kit.cyl("FrontGrip", "X", 2.2, 0.5, V(0, 0.95, -1.1), RUBBER),
+		Kit.block("FrontMountL", V(0.3, 0.3, 0.6), V(-0.7, 0.95, -0.85), GUNMETAL, Enum.Material.Metal),
+		Kit.block("FrontMountR", V(0.3, 0.3, 0.6), V(0.7, 0.95, -0.85), GUNMETAL, Enum.Material.Metal),
+		-- socket housing + replaceable cutting head
+		Kit.cyl("Socket", "Y", 1.0, 1.7, V(0, 1.75, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
+		Kit.cyl("SocketRing", "Y", 0.2, 1.9, V(0, 1.3, 0), ORANGE),
+		Kit.block("HeadBody", V(2.2, 1.1, 0.7), V(0, 2.6, 0), STEEL, Enum.Material.Metal),
+		Kit.block("EdgePlate", V(2.2, 0.35, 0.46), V(0, 3.25, 0), BOLT, Enum.Material.Metal),
+		Kit.block("ToothL", V(0.42, 0.4, 0.5), V(-0.7, 3.5, 0), STEEL_LIGHT, Enum.Material.Metal),
+		Kit.block("ToothM", V(0.42, 0.4, 0.5), V(0, 3.5, 0), STEEL_LIGHT, Enum.Material.Metal),
+		Kit.block("ToothR", V(0.42, 0.4, 0.5), V(0.7, 3.5, 0), STEEL_LIGHT, Enum.Material.Metal),
+		Kit.ball("EdgeBoltA", 0.26, V(-0.85, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
+		Kit.ball("EdgeBoltB", 0.26, V(-0.28, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
+		Kit.ball("EdgeBoltC", 0.26, V(0.28, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
+		Kit.ball("EdgeBoltD", 0.26, V(0.85, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
+	}
+	return { Grip = CFrame.new(0, -2.2, 0), FPScale = 0.4, Parts = parts }
+end
+
+-- Tier 8 (consumable): a bundle of three charges held with steel bands and a stencilled label; one fuse.
+function builders.dynamite(_)
+	local parts = {}
+	local centres = { V(0, 0, 0), V(0.86, 0, 0), V(0.43, 0, 0.75) }
+	for i, c in ipairs(centres) do
+		table.insert(parts, Kit.cyl(i == 1 and "Handle" or ("Stick" .. i), "Y", 3.0, 0.85, c, DYNAMITE_RED))
+		table.insert(parts, Kit.cyl("Label" .. i, "Y", 1.0, 0.89, c, CREAM))
+		table.insert(parts, Kit.cyl("BandLo" .. i, "Y", 0.22, 0.92, c + V(0, -1.05, 0), BOLT, Enum.Material.Metal))
+		table.insert(parts, Kit.cyl("BandHi" .. i, "Y", 0.22, 0.92, c + V(0, 1.05, 0), BOLT, Enum.Material.Metal))
+	end
+	add(parts,
+		Kit.cyl("Fuse", "Y", 0.7, 0.12, V(0.43, 1.85, 0.25), RUBBER),
+		Kit.ball("FuseTip", 0.22, V(0.43, 2.25, 0.25), ORANGE, Enum.Material.Neon))
+	return { Grip = CFrame.new(0, 0, 0), FPScale = 0.5, Parts = parts }
+end
+
+function ToolModels.GetSpec(appearanceId: string)
+	local ap = Appearances.List[appearanceId] or Appearances.List.shovel_rusty
+	local builder = builders[ap.Builder] or builders.rusty
+	return builder(ap)
+end
+
+-- The held Tool (server). Part named "Handle" is the root; everything else is welded to it.
+function ToolModels.BuildTool(appearanceId: string): Tool
+	local spec = ToolModels.GetSpec(appearanceId)
+	local tool = Instance.new("Tool")
+	tool.Name = "Shovel" -- stable internal name every script looks up, whatever the tool looks like
+	tool.CanBeDropped = false
+	tool.ManualActivationOnly = true
+	tool.RequiresHandle = true
+	tool.Grip = spec.Grip
+	tool:SetAttribute("ToolFPScale", spec.FPScale)
+
+	local handle
+	for _, ps in ipairs(spec.Parts) do
+		if ps.Name == "Handle" then
+			handle = Kit.make(ps)
+			handle.Massless = true
+			handle.Parent = tool
+		end
+	end
+	for _, ps in ipairs(spec.Parts) do
+		if ps.Name ~= "Handle" then
+			local p = Kit.make(ps)
+			p.Massless = true
+			p.Parent = tool
+			local w = Instance.new("Weld")
+			w.Part0 = handle
+			w.Part1 = p
+			w.C0 = ps.Offset
+			w.Parent = p
+		end
+	end
+	return tool
+end
+
+-- The same tool as an anchored Model for the shop's rotating preview.
+function ToolModels.BuildPreview(appearanceId: string): Model
+	local spec = ToolModels.GetSpec(appearanceId)
+	return Kit.BuildModel(spec.Parts, "ToolPreview")
+end
+
+-- A physics-ready copy for thrown items (dynamite): the "Handle" collides, everything else is welded and non-colliding.
+function ToolModels.BuildProjectile(appearanceId: string): Model
+	local spec = ToolModels.GetSpec(appearanceId)
+	local model = Instance.new("Model")
+	model.Name = "Projectile"
+	local handle
+	for _, ps in ipairs(spec.Parts) do
+		local p = Kit.make(ps)
+		if ps.Name == "Handle" then
+			handle = p
+			p.CanCollide = true
+			p.Parent = model
+			model.PrimaryPart = p
+		end
+	end
+	for _, ps in ipairs(spec.Parts) do
+		if ps.Name ~= "Handle" then
+			local p = Kit.make(ps)
+			p.Massless = true
+			p.Parent = model
+			local w = Instance.new("Weld")
+			w.Part0 = handle
+			w.Part1 = p
+			w.C0 = ps.Offset
+			w.Parent = p
+		end
+	end
+	return model
+end
+
+return ToolModels
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">TreasureModels</string>
+          <string name="Source"><![CDATA[-- Polished chunky models for notable artifacts. Treasures without a Model id keep the generic coin/ring/gem/block
+-- placeholder built by EffectsController. All models are ~2-2.8 studs across so reveal animations need no changes.
+local Kit = require(script.Parent.ModelKit)
+local Config = require(script.Parent.Config)
+
+local TreasureModels = {}
+
+local V = Vector3.new
+local function hex(s: string): Color3
+	return Color3.fromHex(s)
+end
+local P = Config.Palette
+local GOLD, GOLD_DARK = P.Gold, hex("C98A1E")
+local TEAL = P.Teal
+
+local builders = {}
+
+-- Epic. Golden scarab: stretched-sphere shell with a split wing line, six chunky legs, teal eyes and a teal sun gem.
+function builders.scarab()
+	local parts = {
+		Kit.ellipsoid("Shell", V(2.2, 1.3, 2.8), V(0, 0, 0.1), GOLD, Enum.Material.SmoothPlastic),
+		Kit.ellipsoid("Head", V(1.3, 0.8, 0.95), V(0, -0.05, -1.6), GOLD_DARK),
+		Kit.block("WingSplit", V(0.12, 0.14, 2.2), V(0, 0.64, 0.25), GOLD_DARK),
+		Kit.ball("SunGem", 0.6, V(0, 0.62, -0.55), TEAL, Enum.Material.Neon),
+		Kit.ball("EyeL", 0.3, V(-0.36, 0.08, -2.0), TEAL, Enum.Material.Neon),
+		Kit.ball("EyeR", 0.3, V(0.36, 0.08, -2.0), TEAL, Enum.Material.Neon),
+	}
+	for i, z in ipairs({ -0.7, 0.25, 1.15 }) do
+		for _, side in ipairs({ -1, 1 }) do
+			table.insert(parts, Kit.block(("Leg%d_%d"):format(i, side), V(0.9, 0.28, 0.34),
+				V(side * 1.35, -0.45, z), GOLD_DARK, Enum.Material.SmoothPlastic, V(0, side * (20 - i * 12), side * -12)))
+		end
+	end
+	return parts
+end
+
+-- Rare. Cut gemstone: stepped brilliant-cut (crown, table, pavilion, culet), turned 45 degrees so it reads as a
+-- diamond from any side.
+function builders.gem()
+	local crown, mid, deep = hex("7FE3FF"), hex("4DD2FF"), hex("2AA3D6")
+	local function layer(name: string, size: number, h: number, y: number, color: Color3)
+		return Kit.block(name, V(size, h, size), V(0, y, 0), color, Enum.Material.Neon, V(0, 45, 0))
+	end
+	return {
+		layer("Girdle", 1.9, 0.25, 0, mid),
+		layer("Crown1", 1.55, 0.3, 0.27, crown),
+		layer("Crown2", 1.1, 0.3, 0.55, crown),
+		layer("Table", 0.65, 0.2, 0.78, hex("D9F6FF")),
+		layer("Pav1", 1.55, 0.3, -0.27, mid),
+		layer("Pav2", 1.1, 0.3, -0.55, deep),
+		layer("Pav3", 0.7, 0.3, -0.83, deep),
+		layer("Culet", 0.3, 0.2, -1.05, deep),
+	}
+end
+
+-- Rare. Ancient necklace: gold bead loop with a teal pendant in a gold frame. Faces +/-Z.
+function builders.necklace()
+	local parts = {}
+	local r = 1.05
+	local n = 0
+	for deg = 0, 360, 24 do
+		-- phi measured from the top going round; leave a gap at the bottom for the pendant
+		if deg <= 148 or deg >= 212 then
+			n += 1
+			local phi = math.rad(deg)
+			local accent = (n % 3 == 0)
+			table.insert(parts, Kit.ball("Bead" .. n, accent and 0.5 or 0.4, V(math.sin(phi) * r, math.cos(phi) * r, 0),
+				accent and GOLD_DARK or GOLD))
+		end
+	end
+	table.insert(parts, Kit.block("Frame", V(0.95, 0.95, 0.3), V(0, -1.3, 0), GOLD, Enum.Material.SmoothPlastic, V(0, 0, 45)))
+	table.insert(parts, Kit.block("PendantGem", V(0.6, 0.6, 0.36), V(0, -1.3, 0), TEAL, Enum.Material.Neon, V(0, 0, 45)))
+	table.insert(parts, Kit.ball("Hook", 0.36, V(0, 1.2, 0), GOLD_DARK))
+	return parts
+end
+
+-- Generic stand-ins for treasures that do not have a polished model yet.
+local function genericSpecs(def)
+	local c = def.Color
+	if def.Shape == "Coin" then
+		return { Kit.cyl("Body", "X", 0.5, 2.4, V(0, 0, 0), c) }
+	elseif def.Shape == "Ring" then
+		return { Kit.cyl("Body", "X", 0.8, 2.4, V(0, 0, 0), c) }
+	elseif def.Shape == "Gem" then
+		return { Kit.block("Body", V(1.8, 1.8, 1.8), V(0, 0, 0), c, Enum.Material.Neon) }
+	end
+	return { Kit.block("Body", V(2.2, 1.6, 1.8), V(0, 0, 0), c) }
+end
+
+-- Part specs (origin-centred) for a treasure id, polished or generic. `Defs` is passed in to avoid a require
+-- cycle (Defs does not depend on this module, but callers already hold it).
+function TreasureModels.Specs(treasureId: string, def)
+	local builder = def.Model and builders[def.Model]
+	if builder then
+		return builder()
+	end
+	return genericSpecs(def)
+end
+
+-- Anchored, ready-to-animate Model (PrimaryPart "Root" at the origin). Always succeeds.
+function TreasureModels.BuildAny(treasureId: string, def): Model
+	return Kit.BuildModel(TreasureModels.Specs(treasureId, def), treasureId)
+end
+
+-- Kept for callers that only want polished models.
+function TreasureModels.Build(modelId: string?): Model?
+	local builder = modelId and builders[modelId]
+	if not builder then
+		return nil
+	end
+	return Kit.BuildModel(builder(), modelId)
+end
+
+return TreasureModels
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -388,15 +1123,15 @@ return Util
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="7">
+  <Item class="ServerScriptService" referent="11">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="8">
+    <Item class="Folder" referent="12">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="9">
+      <Item class="Script" referent="13">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -415,6 +1150,9 @@ local EquipmentService = require(Services.EquipmentService)
 local DigService = require(Services.DigService)
 local EconomyService = require(Services.EconomyService)
 local RateLimiter = require(Services.RateLimiter)
+local MetricsService = require(Services.MetricsService)
+local ArtifactService = require(Services.ArtifactService)
+local DynamiteService = require(Services.DynamiteService)
 
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
@@ -424,6 +1162,9 @@ for name, init in pairs({
 	Equipment = EquipmentService.Init,
 	Dig = DigService.Init,
 	Economy = EconomyService.Init,
+	Metrics = MetricsService.Init,
+	Artifacts = ArtifactService.Init,
+	Dynamite = DynamiteService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then
@@ -445,11 +1186,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="10">
+      <Item class="Folder" referent="14">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="11">
+        <Item class="ModuleScript" referent="15">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -467,7 +1208,725 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="12">
+        <Item class="ModuleScript" referent="16">
+          <Properties>
+            <string name="Name">ArtifactRecords</string>
+            <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
+-- (tests/artifact_test.luau). Every transition is a synchronous check-and-set: there is no yield between "is it
+-- allowed?" and "do it", so two simultaneous requests can never both succeed.
+--
+--   Dropped --Pickup--> Carried --Deposit--> Deposited (terminal; value paid exactly once)
+--      ^                   |
+--      +---Place / Drop----+      (Drop = forced: death, respawn, disconnect)
+--
+-- Records live only in server memory. They are NOT saved: an artifact never in a DataStore cannot be counted as
+-- deposited by loading a saved character. Cash/collection are written only by a successful Deposit.
+local ArtifactRecords = {}
+ArtifactRecords.__index = ArtifactRecords
+
+function ArtifactRecords.new(idGenerator: () -> string)
+	return setmetatable({ records = {}, carried = {}, idGenerator = idGenerator }, ArtifactRecords)
+end
+
+-- `position` is where the artifact first rests. OwnerId = discoverer (claims it for this version).
+function ArtifactRecords:Create(treasureId: string, value: number, ownerId: number, position)
+	local id = self.idGenerator()
+	local rec = {
+		Id = id, TreasureId = treasureId, Value = value, OwnerId = ownerId,
+		State = "Dropped", CarrierId = nil, Position = position, Origin = position, Transfers = 0,
+	}
+	self.records[id] = rec
+	return rec
+end
+
+function ArtifactRecords:Get(id: string)
+	return self.records[id]
+end
+
+function ArtifactRecords:CarriedBy(userId: number)
+	local id = self.carried[userId]
+	return id and self.records[id] or nil
+end
+
+function ArtifactRecords:Pickup(id: string, userId: number): (boolean, string?)
+	local rec = self.records[id]
+	if not rec then
+		return false, "Missing"
+	end
+	if rec.State == "Deposited" then
+		return false, "AlreadyDeposited"
+	end
+	if rec.State ~= "Dropped" then
+		return false, "NotAvailable"
+	end
+	if rec.OwnerId ~= userId then
+		return false, "NotOwner"
+	end
+	if self.carried[userId] then
+		return false, "AlreadyCarrying"
+	end
+	rec.State = "Carried"
+	rec.CarrierId = userId
+	rec.Transfers += 1
+	self.carried[userId] = id
+	return true
+end
+
+function ArtifactRecords:Place(id: string, userId: number, position): (boolean, string?)
+	local rec = self.records[id]
+	if not rec or rec.State ~= "Carried" or rec.CarrierId ~= userId then
+		return false, "NotCarrying"
+	end
+	rec.State = "Dropped"
+	rec.CarrierId = nil
+	rec.Position = position
+	self.carried[userId] = nil
+	return true
+end
+
+-- Returns (true, value) exactly once per artifact.
+function ArtifactRecords:Deposit(id: string, userId: number): (boolean, any)
+	local rec = self.records[id]
+	if not rec then
+		return false, "Missing"
+	end
+	if rec.State == "Deposited" then
+		return false, "AlreadyDeposited"
+	end
+	if rec.State ~= "Carried" or rec.CarrierId ~= userId then
+		return false, "NotCarrying"
+	end
+	rec.State = "Deposited"
+	rec.CarrierId = nil
+	self.carried[userId] = nil
+	return true, rec.Value
+end
+
+-- Forced drop (death / respawn / disconnect). Never awards anything. Idempotent.
+function ArtifactRecords:Drop(id: string, position): boolean
+	local rec = self.records[id]
+	if not rec or rec.State ~= "Carried" then
+		return false
+	end
+	if rec.CarrierId then
+		self.carried[rec.CarrierId] = nil
+	end
+	rec.State = "Dropped"
+	rec.CarrierId = nil
+	rec.Position = position
+	return true
+end
+
+return ArtifactRecords
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="17">
+          <Properties>
+            <string name="Name">ArtifactService</string>
+            <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
+-- Ownership/state lives in CarryRegistry.Store (pure, tested). This service does the world side effects.
+--
+-- Recovery policy (server session only; NOTHING here is saved to a DataStore):
+--   * Death / respawn / disconnect while carrying: the artifact is dropped at the carrier's last supported spot (or,
+--     failing that, where it was found, or finally on the camp "lost & found" pad) and stays claimed by its
+--     discoverer. If the discoverer rejoins the SAME server they can pick it up again.
+--   * If the server shuts down, an unbanked artifact is lost. There is no cross-session recovery.
+--   * Dying never awards or secures an artifact; cash/collection are written only by a successful deposit.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local Kit = require(ReplicatedStorage.Shared.ModelKit)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+
+local CarryRegistry = require(script.Parent.CarryRegistry)
+local DataService = require(script.Parent.DataService)
+local StateService = require(script.Parent.StateService)
+local EquipmentService = require(script.Parent.EquipmentService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+local MetricsService = require(script.Parent.MetricsService)
+local RateLimiter = require(script.Parent.RateLimiter)
+local AnalyticsService = require(script.Parent.AnalyticsService)
+
+local ArtifactService = {}
+
+local store = CarryRegistry.Store
+local folder: Folder
+local worldModels: { [string]: Model } = {}
+local carryTools: { [string]: Tool } = {}
+local lastSafe: { [Player]: Vector3 } = {}
+local sizeCache: { [string]: Vector3 } = {}
+local notifyRemote = Remotes.Get("Notify")
+local depositedRemote = Remotes.Get("ArtifactDeposited")
+
+local function say(player: Player, text: string, kind: string?)
+	if player.Parent then
+		notifyRemote:FireClient(player, text, kind or "Info")
+	end
+end
+
+-- Physics query params that ignore characters and our own artifact models but respect everything solid.
+local function queryParams(): (RaycastParams, OverlapParams)
+	local ignore: { Instance } = { folder }
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character then
+			table.insert(ignore, p.Character)
+		end
+	end
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = ignore
+	rp.RespectCanCollide = true
+	local op = OverlapParams.new()
+	op.FilterType = Enum.RaycastFilterType.Exclude
+	op.FilterDescendantsInstances = ignore
+	op.RespectCanCollide = true
+	return rp, op
+end
+
+local function artifactSize(treasureId: string): Vector3
+	local cached = sizeCache[treasureId]
+	if cached then
+		return cached
+	end
+	local m = TreasureModels.BuildAny(treasureId, Defs.Treasure[treasureId])
+	local size = m:GetExtentsSize()
+	m:Destroy()
+	sizeCache[treasureId] = size
+	return size
+end
+
+-- First candidate point that has an upward-facing support within reach AND a clear (non-overlapping) volume.
+-- Returns the CFrame where the model's centre should rest.
+local function findResting(candidates: { Vector3 }, size: Vector3, accept: ((Vector3) -> boolean)?): CFrame?
+	local rp, op = queryParams()
+	for _, c in ipairs(candidates) do
+		local hit = Workspace:Raycast(c + Vector3.new(0, 1.5, 0), Vector3.new(0, -16, 0), rp)
+		if hit and hit.Normal.Y > 0.7 then
+			local center = hit.Position + Vector3.new(0, size.Y / 2 + 0.05, 0)
+			if not accept or accept(center) then
+				-- shrink the test volume slightly so resting ON the ground does not count as overlapping it
+				local box = Vector3.new(size.X, math.max(size.Y - 0.4, 0.2), size.Z)
+				local boxCF = CFrame.new(center + Vector3.new(0, 0.15, 0))
+				if #Workspace:GetPartBoundsInBox(boxCF, box, op) == 0 then
+					return CFrame.new(center)
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function ringAround(origin: Vector3, look: Vector3, radius: number): { Vector3 }
+	local right = look:Cross(Vector3.yAxis)
+	return {
+		origin + look * radius, origin + (look + right).Unit * radius, origin + (look - right).Unit * radius,
+		origin + right * radius, origin - right * radius, origin - look * radius, origin,
+	}
+end
+
+-- World model ------------------------------------------------------------------------------------------------
+local function destroyWorldModel(id: string)
+	local m = worldModels[id]
+	if m then
+		worldModels[id] = nil
+		m:Destroy()
+	end
+end
+
+local function spawnWorldModel(id: string)
+	local rec = store:Get(id)
+	if not rec or rec.State ~= "Dropped" or worldModels[id] then
+		return
+	end
+	local def = Defs.Treasure[rec.TreasureId]
+	local rar = Defs.Rarity[def.Rarity]
+	local model = TreasureModels.BuildAny(rec.TreasureId, def)
+	model:PivotTo(CFrame.new(rec.Position))
+	model:SetAttribute("ArtifactId", id)
+	model:SetAttribute("OwnerUserId", rec.OwnerId)
+	model:SetAttribute("TreasureName", def.Name)
+
+	local root = model.PrimaryPart :: BasePart
+	local hl = Instance.new("Highlight")
+	hl.FillColor = rar.Color
+	hl.OutlineColor = Color3.new(1, 1, 1)
+	hl.FillTransparency = 0.8
+	hl.DepthMode = Enum.HighlightDepthMode.Occluded -- never visible through walls
+	hl.Parent = model
+	local light = Instance.new("PointLight")
+	light.Color = rar.Color
+	light.Range = 14
+	light.Brightness = 1.5
+	light.Parent = root
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "PickupPrompt"
+	prompt.ObjectText = def.Name
+	prompt.ActionText = "Pick up artifact"
+	prompt.HoldDuration = 0.4
+	prompt.MaxActivationDistance = Config.Artifacts.PickupReach - 2
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = root
+	prompt.Triggered:Connect(function(player)
+		ArtifactService.Pickup(player, id)
+	end)
+
+	model.Parent = folder
+	worldModels[id] = model
+end
+
+-- Carry tool --------------------------------------------------------------------------------------------------
+local function buildCarryTool(rec): Tool
+	local def = Defs.Treasure[rec.TreasureId]
+	local specs = Kit.Transform(TreasureModels.Specs(rec.TreasureId, def), Config.Artifacts.CarryScale, Config.Artifacts.CarryRotation)
+	local tool = Instance.new("Tool")
+	tool.Name = "CarriedArtifact"
+	tool.CanBeDropped = false
+	tool.ManualActivationOnly = true
+	tool.RequiresHandle = true
+	tool.ToolTip = def.Name
+	tool.Grip = Config.Artifacts.CarryGrip
+	tool:SetAttribute("ArtifactId", rec.Id)
+	tool:SetAttribute("ToolFPScale", 1)
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Size = Vector3.one * 0.3
+	handle.Transparency = 1
+	handle.CanCollide = false -- the held model must never collide with the player or the world
+	handle.CanTouch = false
+	handle.Massless = true
+	handle.Parent = tool
+	for _, s in ipairs(specs) do
+		local p = Kit.make(s)
+		p.Massless = true
+		p.Parent = tool
+		local w = Instance.new("Weld")
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = s.Offset
+		w.Parent = p
+	end
+	return tool
+end
+
+-- Removes the carry tool and brings the shovel back. The registry transition must already have happened.
+local function finishCarry(player: Player, recId: string)
+	local tool = carryTools[recId]
+	carryTools[recId] = nil
+	if tool then
+		tool:Destroy()
+	end
+	lastSafe[player] = nil
+	StateService.Push(player)
+	if player.Parent then
+		task.spawn(EquipmentService.Refresh, player)
+	end
+end
+
+-- Discovery ----------------------------------------------------------------------------------------------------
+function ArtifactService.Discover(player: Player, treasureId: string, cellIndex: number): boolean
+	local def = Defs.Treasure[treasureId]
+	if not def or not def.RequiresCarry or not DataService.Get(player) then
+		return false
+	end
+	local x, y, z = Grid.FromIndex(cellIndex)
+	local center = Grid.CellCenter(x, y, z)
+	local size = artifactSize(treasureId)
+
+	-- Prefer the cell it was found in (visible + accessible, never inside remaining dirt); otherwise near the player.
+	local cf = findResting({ center, center + Vector3.new(1, 0, 0), center - Vector3.new(1, 0, 0),
+		center + Vector3.new(0, 0, 1), center - Vector3.new(0, 0, 1) }, size)
+	if not cf then
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 3.5), size)
+		end
+	end
+	local position = cf and cf.Position or (center + Vector3.new(0, size.Y / 2 - Grid.CellSize / 2 + 0.05, 0))
+
+	local rec = store:Create(treasureId, def.Value, player.UserId, position)
+	task.delay(Config.Artifacts.SpawnDelay, spawnWorldModel, rec.Id)
+	say(player, "Important artifact found - carry it to camp.", "Good")
+	AnalyticsService.Log(player, "ArtifactDiscovered", { id = rec.Id, treasure = treasureId })
+	return true
+end
+
+-- Pickup ---------------------------------------------------------------------------------------------------------
+function ArtifactService.Pickup(player: Player, recId: any)
+	if type(recId) ~= "string" then
+		return
+	end
+	local rec = store:Get(recId)
+	local model = worldModels[recId]
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not rec or not model or not hrp or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+	if (hrp.Position - rec.Position).Magnitude > Config.Artifacts.PickupReach then
+		return
+	end
+	-- Atomic check-and-set: duplicate/simultaneous pickups fail here.
+	local ok, reason = store:Pickup(recId, player.UserId)
+	if not ok then
+		if reason == "NotOwner" then
+			say(player, "This artifact was claimed by its discoverer.", "Danger")
+		elseif reason == "AlreadyCarrying" then
+			say(player, "You can only carry one important artifact at a time.", "Danger")
+		end
+		return
+	end
+
+	destroyWorldModel(recId)
+	local tool = buildCarryTool(rec)
+	carryTools[recId] = tool
+	tool.Parent = player:FindFirstChildOfClass("Backpack")
+	humanoid:UnequipTools() -- stows the shovel
+	humanoid:EquipTool(tool)
+	lastSafe[player] = hrp.Position
+
+	-- If anything pulls the artifact out of the player's hands, put it back.
+	tool.Unequipped:Connect(function()
+		task.defer(function()
+			local h = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+			if h and h.Health > 0 and carryTools[recId] == tool and tool.Parent == player:FindFirstChildOfClass("Backpack") then
+				h:EquipTool(tool)
+			end
+		end)
+	end)
+
+	StateService.Push(player)
+	say(player, ("Carrying %s - take it to the receiving table at camp."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
+	AnalyticsService.Log(player, "ArtifactPickedUp", { id = recId })
+end
+
+-- Place down -----------------------------------------------------------------------------------------------------
+local function placeDown(player: Player)
+	if not RateLimiter.Check(player, "PlaceArtifact") then
+		return
+	end
+	local rec = CarryRegistry.Get(player)
+	if not rec then
+		say(player, "You are not carrying an artifact.", "Info")
+		return
+	end
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not hrp or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+	local size = artifactSize(rec.TreasureId)
+	local look = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+	look = look.Magnitude > 0.01 and look.Unit or Vector3.new(0, 0, -1)
+	local base = hrp.Position
+	local cf = findResting(ringAround(base, look, 3.5), size, function(center: Vector3)
+		local flat = Vector3.new(center.X - base.X, 0, center.Z - base.Z).Magnitude
+		return flat <= Config.Artifacts.PlaceReach and math.abs(center.Y - base.Y) <= 6
+	end)
+	if not cf then
+		say(player, "No safe spot to put it down here. Find open, flat ground.", "Danger")
+		return
+	end
+	-- Re-check the carry state right before committing (the search above has no yields, but be explicit).
+	local ok = store:Place(rec.Id, player.UserId, cf.Position)
+	if not ok then
+		return
+	end
+	finishCarry(player, rec.Id)
+	spawnWorldModel(rec.Id)
+	say(player, "Artifact placed. Pick it up again when you are ready.", "Info")
+	AnalyticsService.Log(player, "ArtifactPlaced", { id = rec.Id })
+end
+
+-- Deposit ---------------------------------------------------------------------------------------------------------
+function ArtifactService.Deposit(player: Player)
+	local rec = CarryRegistry.Get(player)
+	local data = DataService.Get(player)
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not rec or not data or not hrp or not humanoid or humanoid.Health <= 0 then
+		if player.Parent and not rec then
+			say(player, "You are not carrying an important artifact.", "Info")
+		end
+		return
+	end
+	if (hrp.Position - WorldBuilder.ReceivingCenter).Magnitude > Config.Artifacts.DepositReach then
+		return
+	end
+	-- Atomic: pays out exactly once.
+	local ok, value = store:Deposit(rec.Id, player.UserId)
+	if not ok then
+		return
+	end
+	local def = Defs.Treasure[rec.TreasureId]
+	data.Cash += value
+	data.Stats.CashEarned += value
+	data.Stats.TreasureFound += 1
+	local entry = data.Collection[rec.TreasureId]
+	if not entry then
+		entry = { Count = 0, FirstFound = os.time() }
+		data.Collection[rec.TreasureId] = entry
+	end
+	entry.Count += 1
+	DataService.MarkDirty(player)
+	MetricsService.Sold(player, value, 1)
+
+	finishCarry(player, rec.Id)
+	depositedRemote:FireClient(player, def.Name, value)
+	ArtifactService.ShowOnTable(rec.TreasureId)
+	AnalyticsService.Log(player, "ArtifactDeposited", { id = rec.Id, value = value })
+end
+
+-- Briefly displays a deposited artifact on the receiving table (visual only; not tracked as an artifact).
+function ArtifactService.ShowOnTable(treasureId: string)
+	local def = Defs.Treasure[treasureId]
+	local model = TreasureModels.BuildAny(treasureId, def)
+	model:PivotTo(CFrame.new(WorldBuilder.ReceivingDisplayPosition))
+	model.Name = "DepositedDisplay"
+	local hl = Instance.new("Highlight")
+	hl.FillColor = Defs.Rarity[def.Rarity].Color
+	hl.FillTransparency = 0.6
+	hl.Parent = model
+	model.Parent = folder
+	task.delay(Config.Artifacts.DisplaySeconds, function()
+		model:Destroy()
+	end)
+end
+
+-- Loss handling (death / respawn / disconnect) --------------------------------------------------------------------
+local function onLoss(player: Player, reason: string)
+	local rec = CarryRegistry.Get(player)
+	if not rec then
+		return
+	end
+	local size = artifactSize(rec.TreasureId)
+	local cf
+	local safe = lastSafe[player]
+	if safe then
+		cf = findResting(ringAround(safe, Vector3.new(0, 0, -1), 2.5), size)
+	end
+	if not cf then
+		cf = findResting(ringAround(rec.Origin, Vector3.new(0, 0, -1), 2), size)
+	end
+	-- Last resort: the camp lost & found pad is always valid.
+	local position = cf and cf.Position or WorldBuilder.LostFoundPosition
+	if not store:Drop(rec.Id, position) then
+		return
+	end
+	finishCarry(player, rec.Id)
+	spawnWorldModel(rec.Id)
+	if player.Parent then
+		say(player, "You dropped your artifact. It is waiting where you lost it.", "Danger")
+	end
+	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
+end
+
+function ArtifactService.Init()
+	folder = Workspace:FindFirstChild("Artifacts") or Instance.new("Folder")
+	folder.Name = "Artifacts"
+	folder.Parent = Workspace
+
+	Remotes.Get("PlaceArtifact").OnServerEvent:Connect(placeDown)
+
+	-- Deposit prompt at the receiving table
+	local world = Workspace:FindFirstChild("World")
+	local prompt = world and world:FindFirstChild("DepositPrompt", true)
+	if prompt then
+		prompt.Triggered:Connect(ArtifactService.Deposit)
+	else
+		warn("[ArtifactService] Deposit prompt not found - the receiving table was not built.")
+	end
+
+	local function watch(player: Player)
+		player.CharacterRemoving:Connect(function()
+			onLoss(player, "respawn")
+		end)
+		local function onChar(char: Model)
+			local hum = char:WaitForChild("Humanoid", 10)
+			if hum then
+				(hum :: Humanoid).Died:Connect(function()
+					onLoss(player, "died")
+				end)
+			end
+		end
+		player.CharacterAdded:Connect(onChar)
+		if player.Character then
+			task.spawn(onChar, player.Character)
+		end
+	end
+	Players.PlayerAdded:Connect(watch)
+	for _, p in ipairs(Players:GetPlayers()) do
+		watch(p)
+	end
+	Players.PlayerRemoving:Connect(function(player)
+		onLoss(player, "disconnect")
+		lastSafe[player] = nil
+		RateLimiter.Forget(player)
+	end)
+
+	-- Remember where the carrier last stood on solid ground, for death/disconnect drops.
+	local acc = 0
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.5 then
+			return
+		end
+		acc = 0
+		for _, player in ipairs(Players:GetPlayers()) do
+			if CarryRegistry.IsCarrying(player) then
+				local char = player.Character
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				local hrp = char and char:FindFirstChild("HumanoidRootPart")
+				if hum and hrp and hum.Health > 0 and hum.FloorMaterial ~= Enum.Material.Air then
+					lastSafe[player] = hrp.Position
+				end
+			end
+		end
+	end)
+end
+
+return ArtifactService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="18">
+          <Properties>
+            <string name="Name">CarryRegistry</string>
+            <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
+-- must be gated on it (digging, equipment, teleport, state snapshots) without creating require cycles.
+local HttpService = game:GetService("HttpService")
+local ArtifactRecords = require(script.Parent.ArtifactRecords)
+
+local CarryRegistry = {}
+
+-- Recovery ids are server-generated GUIDs; the client never supplies or sees authority over them.
+CarryRegistry.Store = ArtifactRecords.new(function()
+	return HttpService:GenerateGUID(false)
+end)
+
+function CarryRegistry.Get(player: Player)
+	return CarryRegistry.Store:CarriedBy(player.UserId)
+end
+
+function CarryRegistry.IsCarrying(player: Player): boolean
+	return CarryRegistry.Store:CarriedBy(player.UserId) ~= nil
+end
+
+return CarryRegistry
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="19">
+          <Properties>
+            <string name="Name">DataMigrations</string>
+            <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
+-- Each step [n] upgrades data from schema version n to n+1. `defs` is Shared/Defs (or a test double).
+local DataMigrations = {}
+
+-- v1 -> v2: the old two-tool progression is replaced by the seven-tool ladder + Dynamite.
+--   * "rusty_shovel" keeps its id and meaning (tier 1).
+--   * "digging_shovel" used to be the strong early upgrade (Power 18, 3 swings/s, 3x3x3 splash, $180). The id now
+--     means the modest tier-2 tool. To honour what legacy owners paid for, they KEEP it and are also granted the
+--     tiers listed here (no refund, no further skipping); their equipped tool becomes the best tier they own.
+DataMigrations.LEGACY_TOOL_GRANTS = {
+	digging_shovel = { "heavy_shovel" },
+}
+
+local function highestOwnedTool(owned, defs): string
+	local best, bestTier = nil, -1
+	for id in pairs(owned) do
+		local def = defs.Tools[id]
+		if def and def.Tier > bestTier then
+			best, bestTier = id, def.Tier
+		end
+	end
+	return best or "rusty_shovel"
+end
+
+local function toolsV2(data, defs)
+	data.OwnedTools = data.OwnedTools or {}
+	local granted = {}
+	for legacyId, grants in pairs(DataMigrations.LEGACY_TOOL_GRANTS) do
+		if data.OwnedTools[legacyId] then
+			for _, id in ipairs(grants) do
+				if defs.Tools[id] and not data.OwnedTools[id] then
+					data.OwnedTools[id] = true
+					table.insert(granted, id)
+				end
+			end
+			table.insert(granted, "(legacy " .. legacyId .. ")")
+		end
+	end
+	data.OwnedTools.rusty_shovel = true
+	data.Equipment = data.Equipment or {}
+	if #granted > 0 or not defs.Tools[data.Equipment.ToolId or ""] or not data.OwnedTools[data.Equipment.ToolId or ""] then
+		data.Equipment.ToolId = highestOwnedTool(data.OwnedTools, defs)
+	end
+	data.MigrationLog = data.MigrationLog or {}
+	if #granted > 0 then
+		data.MigrationLog.ToolsV2 = table.concat(granted, ",")
+	end
+end
+
+DataMigrations.Steps = {
+	[1] = toolsV2,
+}
+
+-- Runs every pending step in order, then stamps the new version.
+function DataMigrations.Migrate(data, currentVersion: number, defs)
+	local v = data.Version or 0
+	while v < currentVersion do
+		local step = DataMigrations.Steps[v]
+		if step then
+			step(data, defs)
+		end
+		v += 1
+		data.Version = v
+	end
+	return data
+end
+
+-- Always-on repair: drops unknown tool/backpack ids and makes sure the equipped items are valid and owned.
+function DataMigrations.Sanitize(data, defs, starterTool: string, starterBackpack: string)
+	data.OwnedTools = data.OwnedTools or {}
+	for id in pairs(data.OwnedTools) do
+		if not defs.Tools[id] then
+			data.OwnedTools[id] = nil
+		end
+	end
+	data.OwnedTools[starterTool] = true
+	data.OwnedBackpacks = data.OwnedBackpacks or {}
+	for id in pairs(data.OwnedBackpacks) do
+		if not defs.Backpacks[id] then
+			data.OwnedBackpacks[id] = nil
+		end
+	end
+	data.OwnedBackpacks[starterBackpack] = true
+	data.Equipment = data.Equipment or {}
+	if not defs.Tools[data.Equipment.ToolId or ""] or not data.OwnedTools[data.Equipment.ToolId] then
+		data.Equipment.ToolId = highestOwnedTool(data.OwnedTools, defs)
+	end
+	if not defs.Backpacks[data.Equipment.BackpackId or ""] or not data.OwnedBackpacks[data.Equipment.BackpackId] then
+		data.Equipment.BackpackId = starterBackpack
+	end
+end
+
+return DataMigrations
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="20">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -479,6 +1938,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local DataMigrations = require(script.Parent.DataMigrations)
 
 local DataService = {}
 
@@ -490,6 +1951,7 @@ local function defaultData()
 		Equipment = { ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId },
 		OwnedTools = { [Config.Starting.ToolId] = true },
 		OwnedBackpacks = { [Config.Starting.BackpackId] = true },
+		Consumables = {}, -- [consumableId] = count (e.g. dynamite)
 		BackpackItems = {}, -- [treasureId] = count (persisted so a reset/rejoin never eats your haul)
 		Research = {},
 		UnlockedSites = {},
@@ -504,22 +1966,10 @@ local function defaultData()
 	}
 end
 
--- Migrations: [n] upgrades data from version n to n+1.
-local Migrations: { [number]: (any) -> () } = {
-	-- [1] = function(data) ... end,
-}
-
 local function migrate(data)
-	local v = data.Version or 0
-	while v < Config.Data.CurrentVersion do
-		local step = Migrations[v]
-		if step then
-			step(data)
-		end
-		v += 1
-		data.Version = v
-	end
+	DataMigrations.Migrate(data, Config.Data.CurrentVersion, Defs)
 	Util.Reconcile(data, defaultData())
+	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
 end
 
 -- GetDataStore throws in an unpublished place, so it must never run unprotected.
@@ -669,7 +2119,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="13">
+        <Item class="ModuleScript" referent="21">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -687,6 +2137,8 @@ local SiteService = require(script.Parent.SiteService)
 local LootService = require(script.Parent.LootService)
 local StateService = require(script.Parent.StateService)
 local RateLimiter = require(script.Parent.RateLimiter)
+local MetricsService = require(script.Parent.MetricsService)
+local CarryRegistry = require(script.Parent.CarryRegistry)
 
 local DigService = {}
 
@@ -706,6 +2158,9 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 	end
 	if not Grid.InBounds(x, y, z) then
 		return
+	end
+	if CarryRegistry.IsCarrying(player) then
+		return -- no mining while carrying an important artifact
 	end
 	local data = DataService.Get(player)
 	local character = player.Character
@@ -733,8 +2188,10 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 
 	-- Resolve target + splash
 	local targets = { { idx, tool.Power } }
-	for _, ni in ipairs(SiteService.ExposedNeighbours(idx, tool.DigRadius)) do
-		table.insert(targets, { ni, tool.Power * Config.Dig.SplashFraction })
+	if tool.Splash then
+		for _, ni in ipairs(SiteService.PickSplash(idx, tool.Splash.Radius, tool.Splash.MaxExtra, hrp.Position)) do
+			table.insert(targets, { ni, tool.Power * tool.Splash.Fraction })
+		end
 	end
 
 	local hits = {}
@@ -758,6 +2215,7 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 	for _, di in ipairs(destroyed) do
 		SiteService.ExposeAround(di)
 	end
+	MetricsService.Hit(player, #destroyed)
 	DataService.MarkDirty(player)
 
 	-- Feedback to everyone nearby (cosmetic only)
@@ -786,7 +2244,160 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="14">
+        <Item class="ModuleScript" referent="22">
+          <Properties>
+            <string name="Name">DynamiteService</string>
+            <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
+-- server owns the inventory count, cooldown, the thrown stick, the fuse, which blocks break, and all rewards.
+-- The blast is deliberately capped (Blast.MaxCells nearest blocks within Blast.Radius cells) and harms no players.
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+
+local DataService = require(script.Parent.DataService)
+local SiteService = require(script.Parent.SiteService)
+local LootService = require(script.Parent.LootService)
+local StateService = require(script.Parent.StateService)
+local MetricsService = require(script.Parent.MetricsService)
+local CarryRegistry = require(script.Parent.CarryRegistry)
+local RateLimiter = require(script.Parent.RateLimiter)
+local AnalyticsService = require(script.Parent.AnalyticsService)
+
+local DynamiteService = {}
+
+local notifyRemote = Remotes.Get("Notify")
+local explosionRemote = Remotes.Get("Explosion")
+local digResult = Remotes.Get("DigResult")
+local lastThrow: { [Player]: number } = {}
+local active: { [Player]: number } = {}
+local folder: Folder
+
+local function explode(thrower: Player, stick: Model)
+	if not stick.Parent or not stick.PrimaryPart then
+		active[thrower] = math.max((active[thrower] or 1) - 1, 0)
+		stick:Destroy()
+		return
+	end
+	local def = Defs.Consumables.dynamite
+	local pos = stick.PrimaryPart.Position
+	stick:Destroy()
+	active[thrower] = math.max((active[thrower] or 1) - 1, 0)
+
+	local thrownBy = thrower.Parent and DataService.Get(thrower)
+	local destroyed, hits = {}, {}
+	for _, idx in ipairs(SiteService.CellsNear(pos, def.Blast.Radius, def.Blast.MaxCells)) do
+		local _, dead, treasureId = SiteService.Damage(idx, 1e9)
+		if dead then
+			table.insert(destroyed, idx)
+			table.insert(hits, { idx, 0, 1 })
+			if thrownBy then
+				thrownBy.Stats.BlocksDug += 1
+				if treasureId then
+					LootService.Award(thrower, treasureId, idx) -- normal rules: backpack space, or artifact discovery
+				end
+			end
+		end
+	end
+	for _, idx in ipairs(destroyed) do
+		SiteService.ExposeAround(idx)
+	end
+	if thrownBy then
+		DataService.MarkDirty(thrower)
+		MetricsService.Hit(thrower, #destroyed)
+		StateService.Push(thrower)
+	end
+
+	-- cosmetic feedback to everyone nearby
+	for _, other in ipairs(Players:GetPlayers()) do
+		local hrp = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
+		if hrp and (hrp.Position - pos).Magnitude <= Config.Dig.MaxBroadcastDistance then
+			explosionRemote:FireClient(other, pos, #destroyed)
+			if #hits > 0 then
+				digResult:FireClient(other, { Digger = thrower.UserId, Hits = hits })
+			end
+		end
+	end
+	AnalyticsService.Log(thrower, "DynamiteBlast", { blocks = #destroyed })
+end
+
+local function handleThrow(player: Player, dx: any, dy: any, dz: any)
+	if type(dx) ~= "number" or type(dy) ~= "number" or type(dz) ~= "number" then
+		return
+	end
+	if dx ~= dx or dy ~= dy or dz ~= dz or math.abs(dx) > 10 or math.abs(dy) > 10 or math.abs(dz) > 10 then
+		return
+	end
+	if not RateLimiter.Check(player, "ThrowDynamite") then
+		return
+	end
+	local dir = Vector3.new(dx, dy, dz)
+	if dir.Magnitude < 0.1 then
+		return
+	end
+	dir = dir.Unit
+
+	local def = Defs.Consumables.dynamite
+	local data = DataService.Get(player)
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if not data or not hrp or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+	-- throwing counts as a digging action: forbidden while carrying an important artifact
+	if CarryRegistry.IsCarrying(player) then
+		notifyRemote:FireClient(player, "Place your artifact down before throwing dynamite.", "Danger")
+		return
+	end
+	local count = data.Consumables.dynamite or 0
+	if count <= 0 then
+		notifyRemote:FireClient(player, "You have no dynamite. Buy some at the Equipment Shop.", "Danger")
+		return
+	end
+	local now = os.clock()
+	if now - (lastThrow[player] or 0) < def.Cooldown or (active[player] or 0) >= def.MaxActive then
+		return
+	end
+	lastThrow[player] = now
+
+	-- consume first (atomic): one stick is gone the moment it is thrown
+	data.Consumables.dynamite = count - 1
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+
+	local stick = ToolModels.BuildProjectile(def.Appearance)
+	local origin = hrp.Position + dir * 2.5 + Vector3.new(0, 1.2, 0)
+	stick:PivotTo(CFrame.new(origin) * CFrame.Angles(math.rad(80), 0, 0))
+	stick.Parent = folder
+	local root = stick.PrimaryPart :: BasePart
+	root:SetNetworkOwner(nil)
+	root.AssemblyLinearVelocity = dir * def.ThrowSpeed + Vector3.new(0, def.ThrowLift, 0)
+	root.AssemblyAngularVelocity = Vector3.new(6, 2, 0)
+	active[player] = (active[player] or 0) + 1
+	task.delay(def.FuseSeconds, explode, player, stick)
+end
+
+function DynamiteService.Init()
+	folder = Workspace:FindFirstChild("Projectiles") or Instance.new("Folder")
+	folder.Name = "Projectiles"
+	folder.Parent = Workspace
+	Remotes.Get("ThrowDynamite").OnServerEvent:Connect(handleThrow)
+	Players.PlayerRemoving:Connect(function(p)
+		lastThrow[p] = nil
+		active[p] = nil
+	end)
+end
+
+return DynamiteService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="23">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -805,6 +2416,8 @@ local EquipmentService = require(script.Parent.EquipmentService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
 local RateLimiter = require(script.Parent.RateLimiter)
 local AnalyticsService = require(script.Parent.AnalyticsService)
+local MetricsService = require(script.Parent.MetricsService)
+local CarryRegistry = require(script.Parent.CarryRegistry)
 
 local EconomyService = {}
 
@@ -828,6 +2441,7 @@ function EconomyService.SellAll(player: Player)
 	DataService.MarkDirty(player)
 	StateService.Push(player)
 	soldRemote:FireClient(player, value, count)
+	MetricsService.Sold(player, value, count)
 	AnalyticsService.Log(player, "Sell", { value = value, count = count })
 end
 
@@ -851,6 +2465,28 @@ local function purchase(player: Player, kind: any, id: any)
 	if not data then
 		return
 	end
+	if kind == "Consumable" then
+		local cdef = Defs.Consumables[id]
+		if not cdef then
+			return
+		end
+		local count = data.Consumables[id] or 0
+		if count >= cdef.MaxCarry then
+			notifyRemote:FireClient(player, ("You can only carry %d %s."):format(cdef.MaxCarry, cdef.DisplayName), "Danger")
+			return
+		end
+		if data.Cash < cdef.Price then
+			notifyRemote:FireClient(player, "Not enough Cash!", "Danger")
+			return
+		end
+		data.Cash -= cdef.Price
+		data.Consumables[id] = count + 1
+		DataService.MarkDirty(player)
+		StateService.Push(player)
+		notifyRemote:FireClient(player, ("Bought %s (%d/%d)"):format(cdef.DisplayName, count + 1, cdef.MaxCarry), "Good")
+		AnalyticsService.Log(player, "Purchase", { kind = kind, id = id, price = cdef.Price })
+		return
+	end
 	local def, owned
 	if kind == "Tool" then
 		def, owned = Defs.Tools[id], data.OwnedTools
@@ -863,6 +2499,13 @@ local function purchase(player: Player, kind: any, id: any)
 	if owned[id] then
 		notifyRemote:FireClient(player, "You already own that.", "Info")
 		return
+	end
+	if kind == "Tool" and Config.Shop.SequentialTools then
+		local prev = Defs.PreviousTool(id)
+		if prev and not owned[prev] then
+			notifyRemote:FireClient(player, ("Buy the %s first."):format(Defs.Tools[prev].DisplayName), "Danger")
+			return
+		end
 	end
 	if (data.Reputation or 0) < def.RequiredReputation then
 		notifyRemote:FireClient(player, "Not enough Reputation.", "Danger")
@@ -889,8 +2532,33 @@ local function purchase(player: Player, kind: any, id: any)
 	AnalyticsService.Log(player, "Purchase", { kind = kind, id = id, price = def.Price })
 end
 
+local function equip(player: Player, kind: any, id: any)
+	if kind ~= "Tool" or type(id) ~= "string" or not RateLimiter.Check(player, "RequestEquip") then
+		return
+	end
+	if CarryRegistry.IsCarrying(player) then
+		notifyRemote:FireClient(player, "Place your artifact down before switching tools.", "Danger")
+		return
+	end
+	local data = DataService.Get(player)
+	if not data or not Defs.Tools[id] or not data.OwnedTools[id] or data.Equipment.ToolId == id then
+		return
+	end
+	data.Equipment.ToolId = id
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+	EquipmentService.Refresh(player)
+	notifyRemote:FireClient(player, ("Equipped %s"):format(Defs.Tools[id].DisplayName), "Good")
+end
+
 local function returnToCamp(player: Player)
 	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	-- Carrying an important artifact forbids teleporting. Checked FIRST and before any rate-limit/cooldown
+	-- bookkeeping, so a rejected attempt never consumes the cooldown. A hand-fired remote hits the same check.
+	if CarryRegistry.IsCarrying(player) then
+		returnRemote:FireClient(player, false, 0, "CARRYING")
 		return
 	end
 	if not RateLimiter.Check(player, "ReturnToCamp") then
@@ -917,6 +2585,7 @@ end
 
 function EconomyService.Init()
 	Remotes.Get("RequestPurchase").OnServerEvent:Connect(purchase)
+	Remotes.Get("RequestEquip").OnServerEvent:Connect(equip)
 	Remotes.Get("ReturnToCamp").OnServerEvent:Connect(returnToCamp)
 
 	local acc = 0
@@ -951,7 +2620,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="15">
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -959,55 +2628,20 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Defs = require(ReplicatedStorage.Shared.Defs)
-local Config = require(ReplicatedStorage.Shared.Config)
+local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+local CarryRegistry = require(script.Parent.CarryRegistry)
 local DataService = require(script.Parent.DataService)
 
 local EquipmentService = {}
 
-local function buildShovel(toolId: string): Tool
-	local def = Defs.Tools[toolId]
-	local s = def.Scale
-	local P = Config.Palette
-
-	local tool = Instance.new("Tool")
-	tool.Name = "Shovel"
-	tool.CanBeDropped = false
-	tool.ManualActivationOnly = true
-	tool.RequiresHandle = true
+local function buildShovel(data): Tool
+	local def = Defs.Tools[data.Equipment.ToolId]
+	local skin = data.EquippedCosmetics and data.EquippedCosmetics.ToolSkin
+	-- appearance is resolved separately from stats: a skin can change the model but never the numbers
+	local tool = ToolModels.BuildTool(Appearances.Resolve(def, skin))
 	tool.ToolTip = def.DisplayName
-	tool:SetAttribute("ToolId", toolId)
-
-	local handle = Instance.new("Part")
-	handle.Name = "Handle"
-	handle.Size = Vector3.new(0.5, 4.2 * s, 0.5)
-	handle.Color = P.Dark
-	handle.Material = Enum.Material.Wood
-	handle.CanCollide = false
-	handle.Massless = true
-	handle.Parent = tool
-
-	local function add(name: string, size: Vector3, offset: Vector3, color: Color3)
-		local p = Instance.new("Part")
-		p.Name = name
-		p.Size = size
-		p.Color = color
-		p.Material = Enum.Material.SmoothPlastic
-		p.CanCollide = false
-		p.Massless = true
-		p.Parent = tool
-		local w = Instance.new("Weld")
-		w.Part0 = handle
-		w.Part1 = p
-		w.C0 = CFrame.new(offset)
-		w.Parent = p
-	end
-	add("Blade", Vector3.new(1.8 * s, 1.7 * s, 0.3 * s), Vector3.new(0, 2.5 * s, 0), def.Color)
-	add("Grip", Vector3.new(1.5 * s, 0.4, 0.4), Vector3.new(0, -2.1 * s, 0), P.Dark)
-	if def.DigRadius > 0 then
-		add("Spike", Vector3.new(0.5 * s, 0.9 * s, 0.4 * s), Vector3.new(0, 3.7 * s, 0), P.Gold)
-	end
-
-	tool.Grip = CFrame.new(0, -1.0 * s, 0)
+	tool:SetAttribute("ToolId", data.Equipment.ToolId)
 	return tool
 end
 
@@ -1034,7 +2668,10 @@ function EquipmentService.Refresh(player: Player)
 		return
 	end
 	clearTools(player)
-	local tool = buildShovel(data.Equipment.ToolId)
+	if CarryRegistry.IsCarrying(player) then
+		return -- the shovel stays stowed while carrying; it is rebuilt and re-equipped on place/deposit
+	end
+	local tool = buildShovel(data)
 	tool.Parent = player:WaitForChild("Backpack")
 	humanoid:EquipTool(tool)
 end
@@ -1055,7 +2692,8 @@ function EquipmentService.Init()
 			end
 			-- Keep the shovel in hand: if it ever gets unequipped, put it back next frame.
 			character.ChildRemoved:Connect(function(child)
-				if child:IsA("Tool") and child.Name == "Shovel" and child.Parent == player:FindFirstChild("Backpack") then
+				if child:IsA("Tool") and child.Name == "Shovel" and child.Parent == player:FindFirstChild("Backpack")
+					and not CarryRegistry.IsCarrying(player) then
 					task.defer(function()
 						local h = character:FindFirstChildOfClass("Humanoid")
 						if h and h.Health > 0 and child.Parent == player.Backpack then
@@ -1085,7 +2723,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="16">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -1152,7 +2790,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="17">
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -1165,6 +2803,7 @@ local Grid = require(ReplicatedStorage.Shared.Grid)
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local AnalyticsService = require(script.Parent.AnalyticsService)
+local ArtifactService = require(script.Parent.ArtifactService)
 
 local LootService = {}
 local treasureRemote = Remotes.Get("TreasureFound")
@@ -1179,6 +2818,22 @@ function LootService.Award(player: Player, treasureId: string, cellIndex: number
 		return false
 	end
 	local x, y, z = Grid.FromIndex(cellIndex)
+
+	-- Important artifacts are never auto-collected: they appear physically and must be carried to camp.
+	-- No backpack slot, no cash and no collection credit until a successful deposit.
+	if def.RequiresCarry then
+		ArtifactService.Discover(player, treasureId, cellIndex)
+		treasureRemote:FireClient(player, {
+			Id = treasureId,
+			Position = Grid.CellCenter(x, y, z),
+			Stored = false,
+			Carry = true,
+			IsNew = data.Collection[treasureId] == nil,
+		})
+		AnalyticsService.Log(player, "ImportantArtifactFound", { id = treasureId })
+		return true
+	end
+
 	local stored = InventoryService.Add(player, treasureId)
 
 	local entry = data.Collection[treasureId]
@@ -1219,7 +2874,98 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="18">
+        <Item class="ModuleScript" referent="27">
+          <Properties>
+            <string name="Name">MetricsService</string>
+            <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
+-- server Output every Config.Metrics.PrintInterval seconds (Studio playtests: View > Output).
+--   blocks/min (wall)   = blocks cleared / window length         (includes walking, shopping, idling)
+--   blocks/min (active) = blocks cleared / seconds with a swing  (comparable to economy_sim.py)
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+
+local DataService = require(script.Parent.DataService)
+
+local MetricsService = {}
+
+type Window = { Blocks: number, Cash: number, Items: number, ActiveSeconds: { [number]: boolean }, Start: number }
+local windows: { [Player]: Window } = {}
+local totals: { [Player]: { Blocks: number, Cash: number, Start: number } } = {}
+
+local function fresh(): Window
+	return { Blocks = 0, Cash = 0, Items = 0, ActiveSeconds = {}, Start = os.clock() }
+end
+
+local function get(player: Player): Window
+	local w = windows[player]
+	if not w then
+		w = fresh()
+		windows[player] = w
+		totals[player] = { Blocks = 0, Cash = 0, Start = os.clock() }
+	end
+	return w
+end
+
+function MetricsService.Hit(player: Player, blocksCleared: number)
+	if not Config.Metrics.Enabled then
+		return
+	end
+	local w = get(player)
+	w.ActiveSeconds[math.floor(os.clock())] = true
+	w.Blocks += blocksCleared
+	totals[player].Blocks += blocksCleared
+end
+
+function MetricsService.Sold(player: Player, cash: number, items: number)
+	if not Config.Metrics.Enabled then
+		return
+	end
+	local w = get(player)
+	w.Cash += cash
+	w.Items += items
+	totals[player].Cash += cash
+end
+
+local function report()
+	for player, w in pairs(windows) do
+		local data = DataService.Get(player)
+		local mins = math.max((os.clock() - w.Start) / 60, 1 / 60)
+		local active = 0
+		for _ in pairs(w.ActiveSeconds) do
+			active += 1
+		end
+		if w.Blocks > 0 or w.Cash > 0 then
+			print(("[Metrics] %s tool=%s | last %.1f min: blocks=%d (%.1f/min wall, %.1f/min active) cash=%d (%.0f/min) items sold=%d | session: blocks=%d cash=%d"):format(
+				player.Name, data and data.Equipment.ToolId or "?", mins, w.Blocks, w.Blocks / mins,
+				active > 0 and w.Blocks / (active / 60) or 0, w.Cash, w.Cash / mins, w.Items,
+				totals[player].Blocks, totals[player].Cash))
+		end
+		windows[player] = fresh()
+	end
+end
+
+function MetricsService.Init()
+	if not Config.Metrics.Enabled then
+		return
+	end
+	Players.PlayerRemoving:Connect(function(p)
+		windows[p] = nil
+		totals[p] = nil
+	end)
+	task.spawn(function()
+		while true do
+			task.wait(Config.Metrics.PrintInterval)
+			report()
+		end
+	end)
+end
+
+return MetricsService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -1268,7 +3014,7 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="19">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -1311,6 +3057,16 @@ local function spawnPart(idx: number)
 	parts[idx] = part
 end
 
+-- Cells on the grid's south edge that border the exit shaft (see Config.Exit).
+function SiteService.IsExitWall(x: number, z: number): boolean
+	local ex = Config.Exit
+	if not ex.Enabled or z ~= Grid.SizeZ - 1 then
+		return false
+	end
+	local x0 = Grid.OriginX + x * Grid.CellSize
+	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + ex.Width / 2 + 1e-3
+end
+
 function SiteService.Generate(seed: number?)
 	generation += 1
 	seed = seed or Config.Site.Seed
@@ -1342,10 +3098,11 @@ function SiteService.Generate(seed: number?)
 		end
 	end
 
-	-- Instance only the cells that start exposed (the top surface row).
+	-- Instance only the cells that start exposed: the top surface row, plus the wall of cells facing the exit shaft
+	-- (open air beyond the grid edge), so players can dig through to the ladder from any depth.
 	for idx = 1, Grid.Count do
-		local _, y = Grid.FromIndex(idx)
-		if y == 0 then
+		local x, y, z = Grid.FromIndex(idx)
+		if y == 0 or SiteService.IsExitWall(x, z) then
 			spawnPart(idx)
 		end
 	end
@@ -1425,11 +3182,73 @@ function SiteService.ExposedNeighbours(idx: number, radius: number): { number }
 	return out
 end
 
+-- Picks at most `maxExtra` exposed neighbours to also take splash damage. Closest to the target block first
+-- (face-adjacent before edge/corner), ties broken by nearness to the player, then by index for determinism.
+function SiteService.PickSplash(idx: number, radius: number, maxExtra: number, fromPos: Vector3): { number }
+	local candidates = SiteService.ExposedNeighbours(idx, radius)
+	if #candidates <= maxExtra then
+		return candidates
+	end
+	local tx, ty, tz = Grid.FromIndex(idx)
+	local targetCenter = Grid.CellCenter(tx, ty, tz)
+	local scored = {}
+	for _, ni in ipairs(candidates) do
+		local x, y, z = Grid.FromIndex(ni)
+		local c = Grid.CellCenter(x, y, z)
+		table.insert(scored, { Index = ni, D1 = (c - targetCenter).Magnitude, D2 = (c - fromPos).Magnitude })
+	end
+	table.sort(scored, function(a, b)
+		if math.abs(a.D1 - b.D1) > 1e-3 then
+			return a.D1 < b.D1
+		end
+		if math.abs(a.D2 - b.D2) > 1e-3 then
+			return a.D2 < b.D2
+		end
+		return a.Index < b.Index
+	end)
+	local out = {}
+	for i = 1, maxExtra do
+		out[i] = scored[i].Index
+	end
+	return out
+end
+
+-- The (up to) `maxCells` alive cells nearest to `pos` within `radius` cells of the cell containing it.
+-- Used by explosives; hidden interior cells count (they are exposed afterwards like any dug cell).
+function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number): { number }
+	local cx, cy, cz = Grid.WorldToCell(pos)
+	local found = {}
+	for dx = -radius, radius do
+		for dy = -radius, radius do
+			for dz = -radius, radius do
+				local x, y, z = cx + dx, cy + dy, cz + dz
+				if Grid.InBounds(x, y, z) then
+					local idx = Grid.ToIndex(x, y, z)
+					if (health[idx] or 0) > 0 then
+						table.insert(found, { Index = idx, D = (Grid.CellCenter(x, y, z) - pos).Magnitude })
+					end
+				end
+			end
+		end
+	end
+	table.sort(found, function(a, b)
+		if math.abs(a.D - b.D) > 1e-3 then
+			return a.D < b.D
+		end
+		return a.Index < b.Index
+	end)
+	local out = {}
+	for i = 1, math.min(maxCells, #found) do
+		out[i] = found[i].Index
+	end
+	return out
+end
+
 return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="20">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -1437,6 +3256,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
+local CarryRegistry = require(script.Parent.CarryRegistry)
+local Defs = require(ReplicatedStorage.Shared.Defs)
 
 local StateService = {}
 local pending: { [Player]: boolean } = {}
@@ -1447,9 +3268,13 @@ function StateService.Snapshot(player: Player)
 	if not data then
 		return nil
 	end
+	local carried = CarryRegistry.Get(player)
 	return {
+		Carrying = carried and { Id = carried.Id, Name = Defs.Treasure[carried.TreasureId].Name, Value = carried.Value } or nil,
 		Cash = data.Cash,
 		Reputation = data.Reputation,
+		Consumables = data.Consumables,
+		Skins = data.EquippedCosmetics,
 		Count = InventoryService.Count(data),
 		Capacity = InventoryService.Capacity(data),
 		BackpackValue = InventoryService.Value(data),
@@ -1481,7 +3306,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="21">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the graybox world (lighting, ground, Base Camp, Sell Zone, Shop) from code, idempotently:
@@ -1498,6 +3323,10 @@ local WorldBuilder = {}
 
 WorldBuilder.SellZoneCenter = Config.Camp.Position + Config.Camp.SellZoneOffset
 WorldBuilder.SpawnCFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 4, 16))
+-- Artifact receiving table (beside the sell/appraisal zone) and the lost & found pad (fallback drop point).
+WorldBuilder.ReceivingCenter = Config.Camp.Position + Vector3.new(-27, 3.5, -7) -- where a depositing player must be near
+WorldBuilder.ReceivingDisplayPosition = Config.Camp.Position + Vector3.new(-27, 5.2, -7)
+WorldBuilder.LostFoundPosition = Config.Camp.Position + Vector3.new(-27, 2.2, -13)
 
 local function part(parent: Instance, name: string, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?): Part
 	local p = Instance.new("Part")
@@ -1531,6 +3360,128 @@ local function sign(parent: Part, text: string, color: Color3, studsAbove: numbe
 	label.Font = Enum.Font.FredokaOne
 	label.TextScaled = true
 	label.Parent = gui
+end
+
+-- A sign that cannot be seen through walls (SurfaceGui, not an always-on-top billboard).
+local function surfaceSign(parent: Part, face: Enum.NormalId, text: string, bg: Color3, fg: Color3)
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = face
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	gui.CanvasSize = Vector2.new(400, 160)
+	gui.LightInfluence = 0.2
+	gui.AlwaysOnTop = false
+	gui.Parent = parent
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.fromScale(1, 1)
+	frame.BackgroundColor3 = bg
+	frame.BorderSizePixel = 0
+	frame.Parent = gui
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(0.94, 0.8)
+	label.Position = UDim2.fromScale(0.03, 0.1)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextColor3 = fg
+	label.Font = Enum.Font.FredokaOne
+	label.TextScaled = true
+	label.Parent = frame
+end
+
+-- Padded artifact receiving table: timber frame, cream cloth, plaque, deposit prompt.
+function WorldBuilder.BuildReceivingStation(camp: Folder)
+	local folder = Instance.new("Folder")
+	folder.Name = "ReceivingTable"
+	folder.Parent = camp
+	local c = WorldBuilder.ReceivingCenter
+	local base = Vector3.new(c.X, 0.5, c.Z) -- camp floor top
+	local TIMBER, TIMBER_DARK = Color3.fromHex("8B5E34"), Color3.fromHex("6B4A2E")
+
+	for _, sx in ipairs({ -2.5, 2.5 }) do
+		for _, sz in ipairs({ -1.5, 1.5 }) do
+			part(folder, "Leg", Vector3.new(0.7, 2.6, 0.7), CFrame.new(base + Vector3.new(sx, 1.3, sz)), TIMBER, Enum.Material.Wood)
+		end
+	end
+	part(folder, "RailFront", Vector3.new(5.7, 0.4, 0.4), CFrame.new(base + Vector3.new(0, 2.5, 1.5)), TIMBER_DARK, Enum.Material.Wood)
+	part(folder, "RailBack", Vector3.new(5.7, 0.4, 0.4), CFrame.new(base + Vector3.new(0, 2.5, -1.5)), TIMBER_DARK, Enum.Material.Wood)
+	part(folder, "RailL", Vector3.new(0.4, 0.4, 3.0), CFrame.new(base + Vector3.new(-2.5, 2.5, 0)), TIMBER_DARK, Enum.Material.Wood)
+	part(folder, "RailR", Vector3.new(0.4, 0.4, 3.0), CFrame.new(base + Vector3.new(2.5, 2.5, 0)), TIMBER_DARK, Enum.Material.Wood)
+	part(folder, "TableTop", Vector3.new(6.2, 0.4, 4.0), CFrame.new(base + Vector3.new(0, 2.8, 0)), TIMBER, Enum.Material.Wood)
+	part(folder, "ClothPad", Vector3.new(5.6, 0.35, 3.4), CFrame.new(base + Vector3.new(0, 3.18, 0)), P.Cream, Enum.Material.Fabric)
+	part(folder, "ClothDrape", Vector3.new(5.6, 1.0, 0.15), CFrame.new(base + Vector3.new(0, 2.6, 2.05)), P.Cream, Enum.Material.Fabric)
+	local plaque = part(folder, "Plaque", Vector3.new(3.2, 0.8, 0.2), CFrame.new(base + Vector3.new(0, 2.6, 2.2)), P.Dark)
+	surfaceSign(plaque, Enum.NormalId.Back, "ARTIFACT RECEIVING", P.Dark, P.Gold)
+
+	local anchor = part(folder, "DepositAnchor", Vector3.new(2, 1, 2), CFrame.new(base + Vector3.new(0, 4.0, 0)), P.Teal)
+	anchor.Transparency = 1
+	anchor.CanCollide = false
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "DepositPrompt"
+	prompt.ObjectText = "Receiving Table"
+	prompt.ActionText = "Deposit artifact"
+	prompt.HoldDuration = 0.3
+	prompt.MaxActivationDistance = 12
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = anchor
+
+	-- Lost & found pad: where an artifact lands if nowhere safer exists (death/disconnect fallback)
+	local pad = part(folder, "LostFoundPad", Vector3.new(4, 0.3, 4), CFrame.new(Vector3.new(c.X, 0.65, WorldBuilder.LostFoundPosition.Z)), Color3.fromHex("CDBE98"))
+	surfaceSign(pad, Enum.NormalId.Top, "LOST & FOUND", Color3.fromHex("CDBE98"), P.Dark)
+end
+
+-- Fixed ladder exit: a shaft OUTSIDE the destructible grid on the camp edge, full depth, with scaffold-supported
+-- landings in every layer. The grid cells on its north wall are instanced up front (see SiteService), so players
+-- dig sideways into it from any depth.
+function WorldBuilder.BuildExit(world: Folder, minX: number, maxX: number, minZ: number, maxZ: number)
+	local folder = Instance.new("Folder")
+	folder.Name = "ExitShaft"
+	folder.Parent = world
+	local width, run = maxX - minX, maxZ - minZ
+	local cx = (minX + maxX) / 2
+	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
+	local TIMBER, TIMBER_DARK = Color3.fromHex("8B5E34"), Color3.fromHex("6B4A2E")
+
+	part(folder, "ShaftFloor", Vector3.new(width, 12, run), CFrame.new(cx, floorY - 6, (minZ + maxZ) / 2), P.Dark, Enum.Material.Slate)
+
+	-- Ladder: climbable truss on the south wall, floor to just above ground. Works while holding tools/artifacts.
+	local top = Grid.SurfaceY + 4
+	local truss = Instance.new("TrussPart")
+	truss.Name = "Ladder"
+	truss.Anchored = true
+	truss.Size = Vector3.new(2, top - floorY, 2)
+	truss.CFrame = CFrame.new(cx, (top + floorY) / 2, maxZ - 1)
+	truss.Color = TIMBER_DARK
+	truss.Material = Enum.Material.Wood
+	truss.Parent = folder
+
+	-- Landings: tops sit on a cell-row boundary so the grid row right above each platform is diggable. One per layer.
+	local landingTops = { -8, -24, -36, -48 } -- soil, clay, stone, ruins
+	local lowerTops = { -8, -24, -36, -48, floorY }
+	for i, y in ipairs(landingTops) do
+		part(folder, "Landing" .. i, Vector3.new(width, 1, run - 2), CFrame.new(cx, y - 0.5, minZ + (run - 2) / 2), TIMBER, Enum.Material.WoodPlanks)
+		-- scaffold: corner posts down to the next landing/floor + cross beams
+		local nextY = lowerTops[i + 1]
+		local drop = (y - 1) - nextY
+		for _, px in ipairs({ minX + 1, maxX - 1 }) do
+			for _, pz in ipairs({ minZ + 1, minZ + run - 3 }) do
+				part(folder, "Post", Vector3.new(1, drop, 1), CFrame.new(px, nextY + drop / 2, pz), TIMBER_DARK, Enum.Material.Wood)
+			end
+		end
+		for _, pz in ipairs({ minZ + 1, minZ + run - 3 }) do
+			part(folder, "Beam", Vector3.new(width, 0.6, 0.6), CFrame.new(cx, y - 1.3, pz), TIMBER_DARK, Enum.Material.Wood)
+		end
+		-- EXIT sign beside the ladder, on the south wall facing north (SurfaceGui: invisible through walls)
+		local board = part(folder, "ExitSign" .. i, Vector3.new(4, 1.6, 0.2), CFrame.new(cx + 3.5, y + 2.6, maxZ - 0.1), P.Dark)
+		surfaceSign(board, Enum.NormalId.Front, "EXIT TO CAMP >>", P.Dark, P.Gold)
+	end
+	local floorBoard = part(folder, "ExitSignFloor", Vector3.new(4, 1.6, 0.2), CFrame.new(cx + 3.5, floorY + 2.6, maxZ - 0.1), P.Dark)
+	surfaceSign(floorBoard, Enum.NormalId.Front, "EXIT TO CAMP >>", P.Dark, P.Gold)
+
+	-- Camp-side marker so the shaft can be found from the surface
+	local post1 = part(folder, "MarkerPostL", Vector3.new(0.6, 6, 0.6), CFrame.new(cx - 3, 3, maxZ + 2), TIMBER_DARK, Enum.Material.Wood)
+	part(folder, "MarkerPostR", Vector3.new(0.6, 6, 0.6), CFrame.new(cx + 3, 3, maxZ + 2), TIMBER_DARK, Enum.Material.Wood)
+	local marker = part(folder, "MarkerSign", Vector3.new(7, 2, 0.3), CFrame.new(cx, 5, maxZ + 2), P.Dark)
+	surfaceSign(marker, Enum.NormalId.Back, "MINE LADDER", P.Dark, P.Cream)
+	post1.Name = "MarkerPost"
 end
 
 function WorldBuilder.Build()
@@ -1574,7 +3525,16 @@ function WorldBuilder.Build()
 			CFrame.new((x0 + x1) / 2, cy, (z0 + z1) / 2), P.Sandstone, Enum.Material.Sand)
 	end
 	slab("North", -ext, ext, -ext, -halfZ)
-	slab("South", -ext, ext, halfZ, ext)
+	local ex = Config.Exit
+	local exMinX, exMaxX = ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2
+	local exMaxZ = halfZ + ex.Run
+	if ex.Enabled then
+		slab("SouthWest", -ext, exMinX, halfZ, ext)
+		slab("SouthEast", exMaxX, ext, halfZ, ext)
+		slab("SouthFront", exMinX, exMaxX, exMaxZ, ext)
+	else
+		slab("South", -ext, ext, halfZ, ext)
+	end
 	slab("West", -ext, -half, -halfZ, halfZ)
 	slab("East", half, ext, -halfZ, halfZ)
 
@@ -1650,6 +3610,11 @@ function WorldBuilder.Build()
 	prompt.RequiresLineOfSight = false
 	prompt.Parent = anchor
 
+	WorldBuilder.BuildReceivingStation(camp)
+	if ex.Enabled then
+		WorldBuilder.BuildExit(world, exMinX, exMaxX, halfZ, exMaxZ)
+	end
+
 	-- Dig-site welcome sign
 	local board = part(camp, "SiteBoard", Vector3.new(14, 6, 1), CFrame.new(Vector3.new(0, 6, halfZ + 8)), P.Dark)
 	sign(board, "DIG HERE  ▼", P.Cream, 0, UDim2.fromOffset(280, 70))
@@ -1664,23 +3629,23 @@ return WorldBuilder
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="22">
+  <Item class="StarterPlayer" referent="32">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="23">
+    <Item class="StarterPlayerScripts" referent="33">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="24">
+      <Item class="Folder" referent="34">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="25">
+        <Item class="Folder" referent="35">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="26">
+          <Item class="ModuleScript" referent="36">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -1719,7 +3684,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="27">
+          <Item class="ModuleScript" referent="37">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera: Roblox's built-in first-person (LockFirstPerson) + a temporary V toggle to compare with
@@ -1909,12 +3874,13 @@ local CLEARANCE_OFFSETS = {
 -- area right around it (the face being mined). Five rays per frame; no art changes.
 local function updateToolClearance(dt: number)
 	local char = player.Character
-	local tool = char and char:FindFirstChild("Shovel")
+	local tool = char and char:FindFirstChildOfClass("Tool") -- the shovel OR a carried artifact
 	if not tool then
 		return
 	end
 	local first = CameraController.IsFirstPerson()
-	setToolScale(tool, first and SHOVEL_FP_SCALE or 1)
+	local fp = tool:GetAttribute("ToolFPScale") or SHOVEL_FP_SCALE
+	setToolScale(tool, first and fp or 1)
 
 	local target = 0
 	if first and not UI.IsMenuOpen() then
@@ -1983,7 +3949,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="28">
+          <Item class="ModuleScript" referent="38">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -2187,7 +4153,8 @@ function DigController.ClearInput()
 end
 
 local function isBlocked(): boolean
-	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil
+	-- A carried important artifact disables ALL mining (the server enforces this independently).
+	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
 end
 
 local function onStep()
@@ -2309,6 +4276,9 @@ function DigController.Init()
 		btn.TextColor3 = P.Dark
 		btn.AutoButtonColor = true
 		btn.Parent = UI.GetGui()
+		State.Connect(function(d)
+			btn.Visible = d.Carrying == nil
+		end)
 		local c = Instance.new("UICorner")
 		c.CornerRadius = UDim.new(1, 0)
 		c.Parent = btn
@@ -2328,6 +4298,13 @@ function DigController.Init()
 		end)
 	end
 
+	-- Carrying drops anything held immediately.
+	State.Connect(function(d)
+		if d.Carrying then
+			DigController.ClearInput()
+		end
+	end)
+
 	-- After the camera has updated, so the centre ray uses this frame's final camera.
 	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 1, onStep)
 end
@@ -2336,7 +4313,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="29">
+          <Item class="ModuleScript" referent="39">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -2354,6 +4331,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Audio = require(script.Parent.AudioController)
 local UI = require(script.Parent.UIController)
 local CameraController = require(script.Parent.CameraController)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
 local player = Players.LocalPlayer
 local Effects = {}
@@ -2612,7 +4590,7 @@ function Effects.NoteFace(part: Part, normal: Vector3)
 	end
 end
 
--- Treasure reveal ---------------------------------------------------------------------------------
+-- Treasure reveal ---------------------------------------------------------------------------------------
 local REVEAL = { -- per rarity: float height, hold time, burst count
 	Common = { 3, 0.12, 4 },
 	Uncommon = { 5, 0.45, 12 },
@@ -2622,31 +4600,6 @@ local REVEAL = { -- per rarity: float height, hold time, burst count
 	Mythic = { 10, 1.6, 70 },
 }
 
-local function buildTreasureModel(def): Part
-	local p = Instance.new("Part")
-	p.Anchored = true
-	p.CanCollide = false
-	p.CanQuery = false
-	p.CanTouch = false
-	p.Color = def.Color
-	p.Material = Enum.Material.SmoothPlastic
-	p.TopSurface = Enum.SurfaceType.Smooth
-	p.BottomSurface = Enum.SurfaceType.Smooth
-	if def.Shape == "Coin" then
-		p.Shape = Enum.PartType.Cylinder
-		p.Size = Vector3.new(0.5, 2.4, 2.4)
-	elseif def.Shape == "Ring" then
-		p.Shape = Enum.PartType.Cylinder
-		p.Size = Vector3.new(0.8, 2.4, 2.4)
-	elseif def.Shape == "Gem" then
-		p.Size = Vector3.new(1.8, 1.8, 1.8)
-		p.Material = Enum.Material.Neon
-	else
-		p.Size = Vector3.new(2.2, 1.6, 1.8)
-	end
-	return p
-end
-
 function Effects.RevealTreasure(info)
 	local def = Defs.Treasure[info.Id]
 	if not def then
@@ -2655,16 +4608,18 @@ function Effects.RevealTreasure(info)
 	local rar = Defs.Rarity[def.Rarity]
 	local cfg = REVEAL[def.Rarity] or REVEAL.Common
 
-	UI.ShowTreasure(info.Id, info.Stored, info.IsNew)
+	UI.ShowTreasure(info.Id, info.Stored, info.IsNew, info.Carry)
 	local order = rar.Order
 	Audio.Play(order >= 2 and "Reveal" or "Coin", 0.9 + order * 0.12 + math.random() * 0.1)
 
-	local model = buildTreasureModel(def)
+	-- Polished artifact model if there is one, else the generic stand-in. Always a Model so the same
+	-- pivot/scale animation drives both.
+	local model = TreasureModels.BuildAny(info.Id, def)
+	local root = model.PrimaryPart :: BasePart
 	local start = info.Position
 	local top = start + Vector3.new(0, cfg[1], 0)
-	model.CFrame = CFrame.new(start)
-	model.Size = model.Size * 0.2
-	local fullSize = buildTreasureModel(def).Size
+	model:ScaleTo(0.2)
+	model:PivotTo(CFrame.new(start))
 	model.Parent = fxFolder
 
 	if rar.Reveal then
@@ -2678,7 +4633,7 @@ function Effects.RevealTreasure(info)
 		light.Color = rar.Color
 		light.Range = 12 + order * 3
 		light.Brightness = 2
-		light.Parent = model
+		light.Parent = root
 		burst(start, Vector3.yAxis, rar.Color, cfg[3], 22, 0.8)
 	end
 
@@ -2688,8 +4643,8 @@ function Effects.RevealTreasure(info)
 		while true do
 			local a = math.min((os.clock() - t0) / dur, 1)
 			local e = TweenService:GetValue(a, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-			model.Size = fullSize * (0.2 + 0.8 * e)
-			model.CFrame = CFrame.new(start:Lerp(top, e)) * CFrame.Angles(0, a * 8, math.rad(15))
+			model:ScaleTo(0.2 + 0.8 * e)
+			model:PivotTo(CFrame.new(start:Lerp(top, e)) * CFrame.Angles(0, a * 8, math.rad(15)))
 			if a >= 1 then
 				break
 			end
@@ -2700,20 +4655,27 @@ function Effects.RevealTreasure(info)
 		local spin = 8
 		while os.clock() < hold do
 			spin += RunService.RenderStepped:Wait() * 4
-			model.CFrame = CFrame.new(top + Vector3.new(0, math.sin(os.clock() * 6) * 0.2, 0))
-				* CFrame.Angles(0, spin, math.rad(15))
+			model:PivotTo(CFrame.new(top + Vector3.new(0, math.sin(os.clock() * 6) * 0.2, 0))
+				* CFrame.Angles(0, spin, math.rad(15)))
 		end
-		-- fly to the player (or fizzle if it didn't fit in the backpack)
+		local pivot = model:GetPivot()
+		local from = pivot.Position
+		local rot = pivot - pivot.Position
+		-- fly to the player; fizzle if it did not fit; or, for important artifacts, settle back down to where the
+		-- real physical artifact is about to appear (it is never auto-collected)
 		local t1, d1 = os.clock(), 0.35
-		local from = model.Position
 		while true do
 			local a = math.min((os.clock() - t1) / d1, 1)
-			local char = player.Character
-			local hrp = char and char:FindFirstChild("HumanoidRootPart")
-			local target = (info.Stored and hrp) and (hrp :: BasePart).Position or (from + Vector3.new(0, 2, 0))
 			local e = a * a
-			model.Position = from:Lerp(target, e)
-			model.Size = fullSize * (1 - e * 0.9)
+			if info.Carry then
+				model:PivotTo(CFrame.new(from:Lerp(start, TweenService:GetValue(a, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))) * rot)
+			else
+				local char = player.Character
+				local hrp = char and char:FindFirstChild("HumanoidRootPart")
+				local target = (info.Stored and hrp) and (hrp :: BasePart).Position or (from + Vector3.new(0, 2, 0))
+				model:PivotTo(CFrame.new(from:Lerp(target, e)) * rot)
+				model:ScaleTo(math.max(1 - e * 0.9, 0.05))
+			end
 			if a >= 1 then
 				break
 			end
@@ -2725,6 +4687,36 @@ end
 
 function Effects.GetFolder(): Folder
 	return fxFolder
+end
+
+-- Dynamite blast: expanding flash, a big burst of chunks and a camera kick scaled by distance.
+local function onExplosion(pos: Vector3, blocks: number)
+	local flash = Instance.new("Part")
+	flash.Anchored = true
+	flash.CanCollide = false
+	flash.CanQuery = false
+	flash.CanTouch = false
+	flash.Shape = Enum.PartType.Ball
+	flash.Material = Enum.Material.Neon
+	flash.Color = Color3.fromHex("FFB347")
+	flash.Transparency = 0.2
+	flash.Size = Vector3.one * 2
+	flash.Position = pos
+	flash.Parent = fxFolder
+	local tw = TweenService:Create(flash, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Size = Vector3.one * 16, Transparency = 1 })
+	tw:Play()
+	tw.Completed:Once(function()
+		flash:Destroy()
+	end)
+	burst(pos, Vector3.yAxis, Color3.fromHex("FFB347"), 14, 30, 1.2)
+	Audio.Play("Break", 0.5, 1.4)
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		local dist = ((hrp :: BasePart).Position - pos).Magnitude
+		cameraKick(math.clamp(0.9 - dist / 90, 0, 0.9))
+	end
 end
 
 function Effects.Init()
@@ -2739,25 +4731,87 @@ function Effects.Init()
 		end
 	end)
 	Remotes.Get("TreasureFound").OnClientEvent:Connect(Effects.RevealTreasure)
+	Remotes.Get("Explosion").OnClientEvent:Connect(onExplosion)
 end
 
 return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="30">
+          <Item class="ModuleScript" referent="40">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
+--   * Shop prompt opens the shop.
+--   * Artifact pickup prompts are only enabled for the discoverer (who owns the claim) and only when not already
+--     carrying. The Deposit prompt only appears while carrying. The server validates all of it independently.
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
 local ProximityPromptService = game:GetService("ProximityPromptService")
+
+local State = require(script.Parent.State)
 local UI = require(script.Parent.UIController)
 
+local player = Players.LocalPlayer
 local InteractionController = {}
+
+local pickupPrompts: { [ProximityPrompt]: Model } = {}
+local depositPrompt: ProximityPrompt? = nil
+
+local function refreshPrompts()
+	local carrying = State.Data.Carrying ~= nil
+	for prompt, model in pairs(pickupPrompts) do
+		if prompt.Parent == nil then
+			pickupPrompts[prompt] = nil
+		else
+			prompt.Enabled = (not carrying) and model:GetAttribute("OwnerUserId") == player.UserId
+		end
+	end
+	if depositPrompt and depositPrompt.Parent then
+		depositPrompt.Enabled = carrying
+	end
+end
+
+local function watchArtifact(model: Instance)
+	if not model:IsA("Model") then
+		return
+	end
+	local function hook()
+		local prompt = model:FindFirstChild("PickupPrompt", true)
+		if prompt and prompt:IsA("ProximityPrompt") then
+			pickupPrompts[prompt] = model
+			refreshPrompts()
+		end
+	end
+	hook()
+	model.DescendantAdded:Connect(hook)
+end
 
 function InteractionController.Init()
 	ProximityPromptService.PromptTriggered:Connect(function(prompt)
 		if prompt.Name == "ShopPrompt" then
 			UI.OpenShop()
+		end
+	end)
+
+	State.Connect(refreshPrompts)
+
+	task.spawn(function()
+		local folder = Workspace:WaitForChild("Artifacts", 30)
+		if folder then
+			for _, m in ipairs(folder:GetChildren()) do
+				watchArtifact(m)
+			end
+			folder.ChildAdded:Connect(watchArtifact)
+		end
+	end)
+	task.spawn(function()
+		local world = Workspace:WaitForChild("World", 30)
+		local found = world and world:WaitForChild("BaseCamp", 30)
+		local p = found and found:FindFirstChild("DepositPrompt", true)
+		if p and p:IsA("ProximityPrompt") then
+			depositPrompt = p
+			refreshPrompts()
 		end
 	end)
 end
@@ -2766,7 +4820,652 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="31">
+          <Item class="ModuleScript" referent="41">
+            <Properties>
+              <string name="Name">ShopPreview</string>
+              <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
+-- Every preview uses one fixed camera, lens and light rig, sized from the largest tool, so tools are framed
+-- consistently and their relative sizes stay honest. An "inspect" preview reuses this with a closer camera and
+-- drag-to-rotate.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+local Appearances = require(ReplicatedStorage.Shared.Appearances)
+
+local ShopPreview = {}
+
+local FOV = 32
+local TILT = math.rad(14) -- lean so the blade, rib and grip read from the same angle
+local SPIN_SPEED = 0.9 -- rad/s
+local IDLE_RESUME = 2.2 -- seconds after a drag before auto-spin resumes
+
+-- One shared framing radius: the largest bounding sphere of any tool appearance.
+local framingRadius: number? = nil
+local function getFramingRadius(): number
+	if framingRadius then
+		return framingRadius
+	end
+	local r = 4
+	local appearances = {}
+	for _, id in ipairs(Defs.ToolsByTier) do
+		table.insert(appearances, Defs.Tools[id].Appearance)
+	end
+	for _, def in pairs(Defs.Consumables) do
+		table.insert(appearances, def.Appearance)
+	end
+	for _, ap in ipairs(appearances) do
+		if Appearances.List[ap] then
+			local m = ToolModels.BuildPreview(ap)
+			local _, size = m:GetBoundingBox()
+			r = math.max(r, size.Magnitude / 2)
+			m:Destroy()
+		end
+	end
+	framingRadius = r
+	return r
+end
+
+export type Preview = {
+	Viewport: ViewportFrame,
+	Camera: Camera,
+	Model: Model?,
+	Center: Vector3,
+	Appearance: string?,
+	Yaw: number,
+	IdleFor: number,
+	Closeness: number,
+}
+
+-- `closeness` < 1 moves the camera in (inspect view).
+function ShopPreview.Create(viewport: ViewportFrame, closeness: number?): Preview
+	viewport.Ambient = Color3.fromRGB(150, 138, 124)
+	viewport.LightColor = Color3.fromRGB(255, 244, 224)
+	viewport.LightDirection = Vector3.new(-0.5, -1, -0.7)
+	viewport.BackgroundColor3 = Color3.fromHex("2B3038")
+	local cam = Instance.new("Camera")
+	cam.FieldOfView = FOV
+	cam.Parent = viewport
+	viewport.CurrentCamera = cam
+	local p: Preview = {
+		Viewport = viewport, Camera = cam, Model = nil, Center = Vector3.zero, Appearance = nil,
+		Yaw = 0, IdleFor = IDLE_RESUME, Closeness = closeness or 1,
+	}
+	local dist = getFramingRadius() / math.sin(math.rad(FOV / 2)) * 1.08 * p.Closeness
+	cam.CFrame = CFrame.lookAt(Vector3.new(0, 0, dist), Vector3.zero)
+	return p
+end
+
+function ShopPreview.Show(p: Preview, appearanceId: string?)
+	if p.Appearance == appearanceId then
+		return
+	end
+	if p.Model then
+		p.Model:Destroy()
+		p.Model = nil
+	end
+	p.Appearance = appearanceId
+	if not appearanceId then
+		return
+	end
+	local model = ToolModels.BuildPreview(appearanceId)
+	local cf, _ = model:GetBoundingBox()
+	p.Center = cf.Position
+	model.Parent = p.Viewport
+	p.Model = model
+end
+
+-- Drag-to-rotate input (inspect view). dx in pixels.
+function ShopPreview.Drag(p: Preview, dx: number)
+	p.Yaw += dx * 0.012
+	p.IdleFor = 0
+end
+
+function ShopPreview.Update(p: Preview, dt: number)
+	if not p.Model then
+		return
+	end
+	p.IdleFor += dt
+	if p.IdleFor >= IDLE_RESUME then
+		p.Yaw += SPIN_SPEED * dt
+	end
+	-- spin about the world vertical through the model's own centre, with a fixed lean
+	p.Model:PivotTo(CFrame.Angles(0, p.Yaw, 0) * CFrame.Angles(0, 0, TILT) * CFrame.new(-p.Center))
+end
+
+return ShopPreview
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="42">
+            <Properties>
+              <string name="Name">ShopUI</string>
+              <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks / Utility / Cosmetics), a rotating 3D preview of the ACTUAL
+-- tool model with an Inspect view, stat bars with an equipped-vs-selected comparison, price + purchase, and a
+-- thumbnail strip of every item. Utility and Cosmetics are visible "coming soon" tabs.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Util = require(ReplicatedStorage.Shared.Util)
+
+local State = require(script.Parent.State)
+local Audio = require(script.Parent.AudioController)
+local ShopPreview = require(script.Parent.ShopPreview)
+local K = require(script.Parent.UIKit)
+
+local P = Config.Palette
+local mk, corner, stroke, label, button = K.mk, K.corner, K.stroke, K.label, K.button
+
+local ShopUI = {}
+
+local TABS = { "Tools", "Backpacks", "Utility", "Cosmetics" }
+local FAMILY_NAMES = { Hand = "HAND TOOL", Excavation = "EXCAVATION TOOL", Industrial = "INDUSTRIAL" }
+local FAMILY_COLORS = { Hand = Color3.fromHex("D9A066"), Excavation = P.Gold, Industrial = P.Danger }
+local COMING_SOON = {
+	Utility = { "Lantern", "Treasure scanner", "Rope", "Beacon" },
+	Cosmetics = { "Tool skins", "Helmets", "Backpack styles", "Titles" },
+}
+
+local root: Frame
+local refs: { [string]: any } = {}
+local previews: { [string]: any } = {}
+local open = false
+local tab = "Tools"
+local sel = { Kind = "Tool", Id = "rusty_shovel" }
+local onClose: (() -> ())?
+
+-- Maximums used to normalise the stat bars across every tier.
+local MAX = { Power = 1, Rate = 1, Extra = 3, ReachMin = 8, ReachMax = 12 }
+for _, def in pairs(Defs.Tools) do
+	MAX.Power = math.max(MAX.Power, def.Power)
+	MAX.Rate = math.max(MAX.Rate, def.Rate)
+end
+
+local function itemOf(kind: string, id: string)
+	for _, it in ipairs(Defs.ShopItems()) do
+		if it.Kind == kind and it.Id == id then
+			return it
+		end
+	end
+	return nil
+end
+
+local function itemState(it, d)
+	local s = { Owned = false, Equipped = false, Locked = false, LockedReason = nil, Affordable = d.Cash >= it.Def.Price, Count = 0 }
+	if it.Kind == "Tool" then
+		s.Owned = d.OwnedTools[it.Id] == true
+		s.Equipped = d.ToolId == it.Id
+		local prev = Defs.PreviousTool(it.Id)
+		if not s.Owned and Config.Shop.SequentialTools and prev and not d.OwnedTools[prev] then
+			s.Locked = true
+			s.LockedReason = "Buy the " .. Defs.Tools[prev].DisplayName .. " first"
+		end
+	elseif it.Kind == "Backpack" then
+		s.Owned = d.OwnedBackpacks[it.Id] == true
+		s.Equipped = d.BackpackId == it.Id
+	elseif it.Kind == "Consumable" then
+		s.Count = (d.Consumables and d.Consumables[it.Id]) or 0
+		s.Owned = s.Count > 0
+		if s.Count >= it.Def.MaxCarry then
+			s.Locked = true
+			s.LockedReason = ("Carrying the maximum (%d)"):format(it.Def.MaxCarry)
+		end
+	end
+	return s
+end
+
+local function tabItems(): { any }
+	local out = {}
+	for _, it in ipairs(Defs.ShopItems()) do
+		if tab == "Tools" and (it.Kind == "Tool" or it.Kind == "Consumable") then
+			table.insert(out, it)
+		elseif tab == "Backpacks" and it.Kind == "Backpack" then
+			table.insert(out, it)
+		end
+	end
+	return out
+end
+
+local function appearanceOf(it): string?
+	if it.Kind == "Tool" then
+		local skin = State.Data.Skins and State.Data.Skins.ToolSkin
+		return Appearances.Resolve(it.Def, skin)
+	elseif it.Kind == "Consumable" then
+		return it.Def.Appearance
+	end
+	return nil
+end
+
+-- Rows --------------------------------------------------------------------------------------------------------
+local function colorFor(delta: number, lowerIsBetter: boolean?): Color3
+	if delta == 0 then
+		return P.Cream
+	end
+	local better = (delta > 0) ~= (lowerIsBetter == true)
+	return better and K.Good or K.Bad
+end
+
+local function statBar(parent: Instance, y: number, name: string, frac: number, equippedFrac: number?, valueText: string, valueColor: Color3)
+	label(parent, name, 17, P.Cream, { Size = UDim2.fromOffset(62, 20), Position = UDim2.fromOffset(0, y),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local back = mk("Frame", { Size = UDim2.fromOffset(120, 12), Position = UDim2.fromOffset(66, y + 4),
+		BackgroundColor3 = Color3.fromHex("3A3F47") }, parent)
+	corner(back, 6)
+	local fill = mk("Frame", { Size = UDim2.fromScale(math.clamp(frac, 0.02, 1), 1), BackgroundColor3 = P.Gold }, back)
+	corner(fill, 6)
+	if equippedFrac then
+		mk("Frame", { Size = UDim2.new(0, 3, 1, 6), Position = UDim2.new(math.clamp(equippedFrac, 0, 1), -1, 0, -3),
+			BackgroundColor3 = Color3.new(1, 1, 1) }, back)
+	end
+	label(parent, valueText, 15, valueColor, { Size = UDim2.fromOffset(96, 20), Position = UDim2.fromOffset(192, y),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1, RichText = true })
+end
+
+local function delta(newV: number, curV: number, fmt: string, same: boolean): string
+	if same then
+		return fmt:format(newV)
+	end
+	local d = newV - curV
+	return (fmt .. "  (%s" .. fmt .. ")"):format(newV, d > 0 and "+" or "", d)
+end
+
+-- Rendering ----------------------------------------------------------------------------------------------------
+local function clearChildren(parent: Instance, keep: { [string]: boolean }?)
+	for _, c in ipairs(parent:GetChildren()) do
+		if not c:IsA("UIListLayout") and not (keep and keep[c.Name]) then
+			c:Destroy()
+		end
+	end
+end
+
+local function renderDetail()
+	local d = State.Data
+	local box = refs.detail
+	clearChildren(box)
+	local actionBox = refs.action
+	clearChildren(actionBox)
+
+	if tab == "Utility" or tab == "Cosmetics" then
+		refs.pvName.Text = tab:upper()
+		refs.pvTier.Text = "COMING SOON"
+		refs.pvTier.TextColor3 = K.Muted
+		refs.inspectBtn.Visible = false
+		ShopPreview.Show(previews.main, nil)
+		label(box, "Planned for this shop:", 18, P.Cream, { Size = UDim2.fromOffset(280, 24), Position = UDim2.fromOffset(0, 0),
+			TextXAlignment = Enum.TextXAlignment.Left })
+		for i, name in ipairs(COMING_SOON[tab]) do
+			label(box, "-  " .. name, 17, K.Muted, { Size = UDim2.fromOffset(280, 22), Position = UDim2.fromOffset(8, 22 + i * 24),
+				TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+		end
+		return
+	end
+
+	local it = itemOf(sel.Kind, sel.Id)
+	if not it then
+		return
+	end
+	local def, st = it.Def, itemState(it, d)
+	refs.pvName.Text = def.DisplayName:upper()
+
+	if it.Kind == "Backpack" then
+		refs.pvTier.Text = "BACKPACK"
+		refs.pvTier.TextColor3 = P.Teal
+		refs.inspectBtn.Visible = false
+		ShopPreview.Show(previews.main, nil)
+		label(box, def.Blurb or "", 16, P.Cream, { Size = UDim2.fromOffset(290, 54), Position = UDim2.fromOffset(0, 0),
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+			TextStrokeTransparency = 1 })
+		local cur = Defs.Backpacks[d.BackpackId]
+		statBar(box, 70, "Capacity", def.Capacity / 40, (not st.Equipped) and (cur.Capacity / 40) or nil,
+			st.Equipped and tostring(def.Capacity) or delta(def.Capacity, cur.Capacity, "%d", false),
+			colorFor(def.Capacity - cur.Capacity))
+	else
+		local isTool = it.Kind == "Tool"
+		local family = def.Family or "Hand"
+		refs.pvTier.Text = ("TIER %d  -  %s%s"):format(def.Tier, isTool and FAMILY_NAMES[family] or "THROWABLE",
+			isTool and "" or "  -  SINGLE USE")
+		refs.pvTier.TextColor3 = FAMILY_COLORS[family]
+		refs.inspectBtn.Visible = true
+		ShopPreview.Show(previews.main, appearanceOf(it))
+		label(box, def.Blurb or "", 16, P.Cream, { Size = UDim2.fromOffset(290, 50), Position = UDim2.fromOffset(0, 0),
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+			TextStrokeTransparency = 1 })
+		if isTool then
+			local cur = Defs.Tools[d.ToolId]
+			local same = st.Equipped
+			local extraNew = def.Splash and def.Splash.MaxExtra or 0
+			local extraCur = cur.Splash and cur.Splash.MaxExtra or 0
+			statBar(box, 56, "Power", def.Power / MAX.Power, (not same) and cur.Power / MAX.Power or nil,
+				delta(def.Power, cur.Power, "%d", same), colorFor(def.Power - cur.Power))
+			statBar(box, 80, "Speed", def.Rate / MAX.Rate, (not same) and cur.Rate / MAX.Rate or nil,
+				delta(def.Rate, cur.Rate, "%.1f", same) .. "/s", colorFor(def.Rate - cur.Rate))
+			statBar(box, 104, "Area", extraNew / MAX.Extra, (not same) and extraCur / MAX.Extra or nil,
+				extraNew == 0 and "single block" or ("+%d blocks"):format(extraNew), colorFor(extraNew - extraCur))
+			statBar(box, 128, "Reach", (def.Reach - MAX.ReachMin + 2) / (MAX.ReachMax - MAX.ReachMin + 2),
+				(not same) and (cur.Reach - MAX.ReachMin + 2) / (MAX.ReachMax - MAX.ReachMin + 2) or nil,
+				delta(def.Reach, cur.Reach, "%d", same) .. " studs", colorFor(def.Reach - cur.Reach))
+			-- swings to break one block, per layer (lower is better)
+			local parts = {}
+			for _, layer in ipairs(Config.Layers) do
+				local n, c = Defs.HitsToBreak(def, layer), Defs.HitsToBreak(cur, layer)
+				local text = same and tostring(n) or (n == c and tostring(n) or ("%d>%d"):format(c, n))
+				parts[#parts + 1] = ('<font color="#%s">%s %s</font>'):format(
+					colorFor(c - n, false):ToHex(), layer.Name:sub(1, 1) .. layer.Name:sub(2):lower(), text)
+			end
+			label(box, "Swings to break:  " .. table.concat(parts, "   "), 14, P.Cream, { Size = UDim2.fromOffset(290, 36),
+				Position = UDim2.fromOffset(0, 156), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+				TextWrapped = true, TextStrokeTransparency = 1, RichText = true })
+		else
+			local blast = def.Blast
+			statBar(box, 56, "Blast", blast.MaxCells / 20, nil, ("up to %d blocks"):format(blast.MaxCells), P.Cream)
+			statBar(box, 80, "Fuse", def.FuseSeconds / 5, nil, ("%.1fs"):format(def.FuseSeconds), P.Cream)
+			label(box, ("Carry up to %d. Throw with G (or the THROW button). It breaks the blocks nearest where it lands, " ..
+				"and is used up."):format(def.MaxCarry), 14, P.Cream, { Size = UDim2.fromOffset(290, 60),
+				Position = UDim2.fromOffset(0, 112), TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
+		end
+	end
+
+	-- price pill + action button
+	local priceText = def.Price > 0 and Util.FormatCash(def.Price) or "FREE"
+	local pill = mk("Frame", { Size = UDim2.fromOffset(120, 34), Position = UDim2.fromOffset(0, 0),
+		BackgroundColor3 = st.Affordable and K.Green or Color3.fromHex("5A5F66") }, actionBox)
+	corner(pill, 17)
+	stroke(pill, P.Dark, 2)
+	label(pill, priceText, 22, Color3.new(1, 1, 1), { Size = UDim2.fromScale(1, 1) })
+
+	local text, color, enabled = nil, K.Muted, false
+	local carrying = d.Carrying ~= nil
+	if it.Kind == "Consumable" then
+		if st.Locked then
+			text = st.LockedReason
+		elseif st.Affordable then
+			text, color, enabled = ("BUY 1  (have %d/%d)"):format(st.Count, def.MaxCarry), P.Gold, true
+		else
+			text = "NEED " .. Util.FormatCash(def.Price - d.Cash) .. " MORE"
+		end
+	elseif st.Equipped and st.Owned then
+		text = "EQUIPPED"
+	elseif st.Owned then
+		if it.Kind == "Tool" then
+			if carrying then
+				text = "PLACE ARTIFACT FIRST"
+			else
+				text, color, enabled = "EQUIP", Color3.fromHex("5BA7E8"), true
+			end
+		else
+			text = "OWNED"
+		end
+	elseif st.Locked then
+		text = st.LockedReason
+	elseif st.Affordable then
+		text, color, enabled = "PURCHASE", P.Gold, true
+	else
+		text = "NEED " .. Util.FormatCash(def.Price - d.Cash) .. " MORE"
+	end
+	local b = button(actionBox, text or "", UDim2.fromOffset(150, 40), UDim2.fromOffset(130, -3), color)
+	b.TextSize = (#(text or "") > 14) and 15 or 20
+	b.TextWrapped = true
+	b.Activated:Connect(function()
+		if not enabled then
+			Audio.Play("Error")
+			return
+		end
+		Audio.Play("UI")
+		if it.Kind == "Tool" and st.Owned then
+			Remotes.Get("RequestEquip"):FireServer("Tool", it.Id)
+		else
+			Remotes.Get("RequestPurchase"):FireServer(it.Kind, it.Id)
+		end
+	end)
+	if st.Locked and not st.Owned and it.Kind == "Tool" then
+		label(actionBox, st.LockedReason or "", 14, K.Bad, { Size = UDim2.fromOffset(280, 18), Position = UDim2.fromOffset(0, 42),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	end
+end
+
+local function renderList()
+	local list = refs.list
+	clearChildren(list)
+	if tab == "Utility" or tab == "Cosmetics" then
+		label(list, "Nothing here yet.", 16, K.Muted, { Size = UDim2.new(1, 0, 0, 30), TextStrokeTransparency = 1 })
+		return
+	end
+	local d = State.Data
+	for i, it in ipairs(tabItems()) do
+		local st = itemState(it, d)
+		local card = mk("TextButton", { Name = "Card", Text = "", AutoButtonColor = true, LayoutOrder = i, Size = UDim2.new(1, -6, 0, 78),
+			BackgroundColor3 = (sel.Kind == it.Kind and sel.Id == it.Id) and Color3.fromHex("4A4130") or Color3.fromHex("2F343C") }, list)
+		corner(card, 10)
+		stroke(card, (sel.Kind == it.Kind and sel.Id == it.Id) and P.Gold or P.Dark, 2)
+
+		local app = appearanceOf(it)
+		local vp = mk("ViewportFrame", { Size = UDim2.fromOffset(62, 66), Position = UDim2.fromOffset(6, 6), BackgroundTransparency = 1 }, card)
+		if app then
+			local key = it.Kind .. ":" .. it.Id
+			local pv = previews[key]
+			if not pv or pv.Viewport.Parent == nil or pv.Viewport ~= vp then
+				pv = ShopPreview.Create(vp, 1)
+				previews[key] = pv
+			end
+			ShopPreview.Show(pv, app)
+			pv.Yaw = 0.5
+			ShopPreview.Update(pv, 0)
+		else
+			vp:Destroy()
+			label(card, "PACK", 15, P.Teal, { Size = UDim2.fromOffset(62, 66), Position = UDim2.fromOffset(6, 6) })
+		end
+		label(card, (it.Def.Tier and (it.Def.Tier .. ". ") or "") .. it.Def.DisplayName, 15, P.Cream, {
+			Size = UDim2.new(1, -78, 0, 36), Position = UDim2.fromOffset(72, 4), TextXAlignment = Enum.TextXAlignment.Left,
+			TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top })
+		local status, scolor
+		if it.Kind == "Consumable" then
+			status, scolor = ("%s  (have %d)"):format(Util.FormatCash(it.Def.Price), st.Count), P.Gold
+		elseif st.Equipped and st.Owned then
+			status, scolor = "EQUIPPED", P.Teal
+		elseif st.Owned then
+			status, scolor = "OWNED", K.Good
+		elseif st.Locked then
+			status, scolor = "LOCKED", K.Muted
+		else
+			status, scolor = Util.FormatCash(it.Def.Price), st.Affordable and P.Gold or K.Muted
+		end
+		label(card, status, 15, scolor, { Size = UDim2.new(1, -78, 0, 20), Position = UDim2.fromOffset(72, 50),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+		card.Activated:Connect(function()
+			sel = { Kind = it.Kind, Id = it.Id }
+			Audio.Play("UI")
+			ShopUI.Render()
+		end)
+	end
+end
+
+local function renderTabs()
+	for _, name in ipairs(TABS) do
+		local b = refs.tabs[name]
+		local active = name == tab
+		b.BackgroundColor3 = active and Color3.fromHex("6B5530") or Color3.fromHex("2F343C")
+		b.UIStroke.Color = active and P.Gold or P.Dark
+	end
+end
+
+function ShopUI.Render()
+	if not root then
+		return
+	end
+	-- keep the selection valid for the current tab
+	if tab == "Tools" and sel.Kind == "Backpack" then
+		sel = { Kind = "Tool", Id = State.Data.ToolId or "rusty_shovel" }
+	elseif tab == "Backpacks" and sel.Kind ~= "Backpack" then
+		local first = tabItems()[1]
+		sel = first and { Kind = first.Kind, Id = first.Id } or sel
+	end
+	renderTabs()
+	renderList()
+	renderDetail()
+	if refs.inspect.Visible then
+		local it = itemOf(sel.Kind, sel.Id)
+		refs.inspectName.Text = it and it.Def.DisplayName:upper() or ""
+		ShopPreview.Show(previews.inspect, it and appearanceOf(it) or nil)
+	end
+end
+
+function ShopUI.IsOpen(): boolean
+	return open
+end
+
+function ShopUI.Open()
+	open = true
+	root.Visible = true
+	-- start on the tool you would buy next
+	local d = State.Data
+	tab = "Tools"
+	local target = "rusty_shovel"
+	for _, id in ipairs(Defs.ToolsByTier) do
+		if not d.OwnedTools[id] then
+			target = id
+			break
+		end
+		target = id
+	end
+	sel = { Kind = "Tool", Id = target }
+	ShopUI.Render()
+end
+
+function ShopUI.Close()
+	open = false
+	if root then
+		root.Visible = false
+		refs.inspect.Visible = false
+	end
+	if onClose then
+		onClose()
+	end
+end
+
+-- Spins the previews (called every frame while open).
+function ShopUI.Step(dt: number)
+	if not open then
+		return
+	end
+	ShopPreview.Update(previews.main, dt)
+	if refs.inspect.Visible then
+		ShopPreview.Update(previews.inspect, dt)
+	end
+end
+
+function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
+	onClose = closed
+	root = mk("Frame", { Name = "Shop", Size = UDim2.fromOffset(880, 486), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = Color3.fromHex("1D2025"), BackgroundTransparency = 0.02,
+		Visible = false }, gui)
+	corner(root, 16)
+	stroke(root, Color3.fromHex("C9A46B"), 4)
+	-- Modal button: while the shop is visible the cursor is released, even in first person.
+	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
+		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, root)
+
+	label(root, "EQUIPMENT SHOP", 30, P.Cream, { Size = UDim2.fromOffset(300, 40), Position = UDim2.fromOffset(16, 8),
+		TextXAlignment = Enum.TextXAlignment.Left })
+	label(root, "VIEW, COMPARE AND PURCHASE UPGRADES", 14, K.Muted, { Size = UDim2.fromOffset(360, 40), Position = UDim2.fromOffset(300, 8),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local close = button(root, "X", UDim2.fromOffset(48, 38), UDim2.new(1, -60, 0, 10), P.Danger)
+	close.Activated:Connect(ShopUI.Close)
+
+	-- tabs
+	refs.tabs = {}
+	for i, name in ipairs(TABS) do
+		local b = mk("TextButton", { Name = name, Text = "", AutoButtonColor = true, Size = UDim2.fromOffset(128, 62),
+			Position = UDim2.fromOffset(12, 60 + (i - 1) * 70), BackgroundColor3 = Color3.fromHex("2F343C") }, root)
+		corner(b, 10)
+		stroke(b, P.Dark, 2)
+		local glyph = mk("Frame", { Size = UDim2.fromOffset(30, 30), Position = UDim2.fromOffset(8, 16),
+			BackgroundColor3 = ({ Tools = P.Gold, Backpacks = P.Clay, Utility = P.Teal, Cosmetics = P.Danger })[name] }, b)
+		corner(glyph, 8)
+		label(glyph, name:sub(1, 1), 18, P.Dark, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
+		label(b, name, 17, P.Cream, { Size = UDim2.fromOffset(78, 62), Position = UDim2.fromOffset(44, 0),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+		b.Activated:Connect(function()
+			tab = name
+			Audio.Play("UI")
+			ShopUI.Render()
+		end)
+		refs.tabs[name] = b
+	end
+
+	-- preview panel
+	local pv = mk("Frame", { Position = UDim2.fromOffset(152, 60), Size = UDim2.fromOffset(240, 414),
+		BackgroundColor3 = Color3.fromHex("2B3038") }, root)
+	corner(pv, 12)
+	stroke(pv, Color3.fromHex("C9A46B"), 2)
+	local mainVp = mk("ViewportFrame", { Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(224, 330), BackgroundTransparency = 1 }, pv)
+	previews.main = ShopPreview.Create(mainVp, 1)
+	refs.pvName = label(pv, "", 22, P.Cream, { Size = UDim2.fromOffset(224, 28), Position = UDim2.fromOffset(8, 342) })
+	refs.pvTier = label(pv, "", 14, P.Gold, { Size = UDim2.fromOffset(224, 20), Position = UDim2.fromOffset(8, 370), TextStrokeTransparency = 1 })
+	refs.inspectBtn = button(pv, "INSPECT", UDim2.fromOffset(96, 30), UDim2.fromOffset(136, 14), Color3.fromHex("5BA7E8"))
+	refs.inspectBtn.TextSize = 16
+	refs.inspectBtn.ZIndex = 5
+
+	-- detail panel
+	refs.detail = mk("Frame", { Position = UDim2.fromOffset(404, 66), Size = UDim2.fromOffset(300, 300), BackgroundTransparency = 1 }, root)
+	refs.action = mk("Frame", { Position = UDim2.fromOffset(404, 400), Size = UDim2.fromOffset(300, 74), BackgroundTransparency = 1 }, root)
+
+	-- thumbnail strip
+	refs.list = mk("ScrollingFrame", { Position = UDim2.fromOffset(716, 60), Size = UDim2.fromOffset(152, 414), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 5, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, root)
+	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6) }, refs.list)
+
+	-- enlarged inspect view
+	local inspect = mk("Frame", { Name = "Inspect", Position = UDim2.fromOffset(0, 0), Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromHex("14171B"), BackgroundTransparency = 0.03, Visible = false, ZIndex = 10, Active = true }, root)
+	corner(inspect, 16)
+	refs.inspect = inspect
+	refs.inspectName = label(inspect, "", 28, P.Cream, { Size = UDim2.new(1, -140, 0, 44), Position = UDim2.fromOffset(20, 10),
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11 })
+	label(inspect, "DRAG TO ROTATE", 14, K.Muted, { Size = UDim2.fromOffset(200, 20), Position = UDim2.fromOffset(20, 50),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1, ZIndex = 11 })
+	local bigVp = mk("ViewportFrame", { Position = UDim2.fromOffset(20, 80), Size = UDim2.new(1, -40, 1, -100),
+		BackgroundTransparency = 1, Active = true, ZIndex = 11 }, inspect)
+	previews.inspect = ShopPreview.Create(bigVp, 0.62)
+	local back = button(inspect, "BACK", UDim2.fromOffset(100, 38), UDim2.new(1, -120, 0, 12), P.Gold)
+	back.ZIndex = 12
+	back.Activated:Connect(function()
+		inspect.Visible = false
+	end)
+	refs.inspectBtn.Activated:Connect(function()
+		inspect.Visible = true
+		Audio.Play("UI")
+		ShopUI.Render()
+	end)
+	-- drag-to-rotate (mouse or touch)
+	local dragging = false
+	bigVp.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			ShopPreview.Drag(previews.inspect, input.Delta.X)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	return root
+end
+
+return ShopUI
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="43">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -2779,7 +5478,7 @@ local State = {
 	Data = {
 		Cash = 0, Reputation = 0, Count = 0, Capacity = 1, BackpackValue = 0,
 		ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId,
-		OwnedTools = {}, OwnedBackpacks = {},
+		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any,
 	},
 	Loaded = false,
 }
@@ -2811,10 +5510,85 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="32">
+          <Item class="ModuleScript" referent="44">
+            <Properties>
+              <string name="Name">ThrowController</string>
+              <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
+-- server owns the stick count, cooldown, fuse and blast. Blocked while carrying an artifact or in a menu.
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local State = require(script.Parent.State)
+local UI = require(script.Parent.UIController)
+local Audio = require(script.Parent.AudioController)
+
+local P = Config.Palette
+local TOUCH = UserInputService.TouchEnabled
+local ThrowController = {}
+
+local function canThrow(): boolean
+	local d = State.Data
+	return (d.Consumables and (d.Consumables.dynamite or 0) > 0 or false) and d.Carrying == nil
+		and not UI.IsMenuOpen() and UserInputService:GetFocusedTextBox() == nil
+end
+
+local function throw()
+	if not canThrow() then
+		if State.Data.Carrying then
+			Audio.Play("Error")
+		end
+		return
+	end
+	local look = Workspace.CurrentCamera.CFrame.LookVector
+	Remotes.Get("ThrowDynamite"):FireServer(look.X, look.Y, look.Z)
+end
+
+function ThrowController.Init()
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if not processed and input.KeyCode == Enum.KeyCode.G then
+			throw()
+		end
+	end)
+	if TOUCH then
+		local btn = Instance.new("TextButton")
+		btn.Name = "ThrowButton"
+		btn.Size = UDim2.fromOffset(84, 84)
+		btn.AnchorPoint = Vector2.new(1, 1)
+		btn.Position = UDim2.new(1, -240, 1, -150)
+		btn.BackgroundColor3 = P.Danger
+		btn.Text = "THROW"
+		btn.TextSize = 18
+		btn.Font = Enum.Font.FredokaOne
+		btn.TextColor3 = P.Cream
+		btn.Visible = false
+		btn.Parent = UI.GetGui()
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(1, 0)
+		c.Parent = btn
+		local s = Instance.new("UIStroke")
+		s.Thickness = 3
+		s.Color = P.Dark
+		s.Parent = btn
+		btn.Activated:Connect(throw)
+		State.Connect(function(d)
+			btn.Visible = (d.Consumables and (d.Consumables.dynamite or 0) > 0 or false) and d.Carrying == nil
+		end)
+	end
+end
+
+return ThrowController
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="45">
             <Properties>
               <string name="Name">UIController</string>
-              <string name="Source"><![CDATA[-- All UI is built from code (no manual UI objects). Scale-based + UIScale so it works on phones and desktop.
+              <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
+-- The shop itself lives in ShopUI; shared constructors in UIKit.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -2831,18 +5605,20 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
+local ShopUI = require(script.Parent.ShopUI)
+local K = require(script.Parent.UIKit)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
+local mk, corner, stroke, label, panel, button = K.mk, K.corner, K.stroke, K.label, K.panel, K.button
 local UI = {}
 
-local FONT = Enum.Font.FredokaOne
 local TOUCH = UserInputService.TouchEnabled
+local CARRY_BLOCKED_TEXT = "Carry your artifact back to camp, or place it down first."
 
 local gui: ScreenGui
 local refs: { [string]: any } = {}
-local shopOpen = false
-local cursorFree = false -- held "free cursor" key (first-person)
+local cursorFree = false -- toggled free-cursor mode (first person)
 local menuCallbacks: { () -> () } = {}
 
 local function menuChanged()
@@ -2851,54 +5627,6 @@ local function menuChanged()
 	end
 end
 
-local function mk(class: string, props: { [string]: any }, parent: Instance?): any
-	local o = Instance.new(class)
-	for k, v in pairs(props) do
-		o[k] = v
-	end
-	if parent then
-		o.Parent = parent
-	end
-	return o
-end
-
-local function corner(parent: Instance, r: number?)
-	mk("UICorner", { CornerRadius = UDim.new(0, r or 10) }, parent)
-end
-
-local function stroke(parent: Instance, color: Color3?, thickness: number?)
-	mk("UIStroke", { Color = color or P.Dark, Thickness = thickness or 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, parent)
-end
-
-local function label(parent: Instance, text: string, size: number, color: Color3?, props: { [string]: any }?): TextLabel
-	local l = mk("TextLabel", {
-		BackgroundTransparency = 1, Text = text, TextSize = size, Font = FONT,
-		TextColor3 = color or P.Cream, TextStrokeTransparency = 0.5, TextStrokeColor3 = P.Dark,
-	}, parent)
-	for k, v in pairs(props or {}) do
-		l[k] = v
-	end
-	return l
-end
-
-local function panel(parent: Instance, size: UDim2, pos: UDim2): Frame
-	local f = mk("Frame", { Size = size, Position = pos, BackgroundColor3 = P.Dark, BackgroundTransparency = 0.15 }, parent)
-	corner(f, 12)
-	stroke(f, P.Dark, 2)
-	return f
-end
-
-local function button(parent: Instance, text: string, size: UDim2, pos: UDim2, color: Color3): TextButton
-	local b = mk("TextButton", {
-		Size = size, Position = pos, BackgroundColor3 = color, Text = text, TextSize = 22, Font = FONT,
-		TextColor3 = P.Dark, AutoButtonColor = true, TextStrokeTransparency = 1,
-	}, parent)
-	corner(b, 12)
-	stroke(b, P.Dark, 3)
-	return b
-end
-
--- Rolling cash display ---------------------------------------------------------------------
 local shownCash, targetCash = 0, 0
 local returnReadyAt = 0
 
@@ -2910,7 +5638,7 @@ local function toast(text: string, color: Color3)
 	refs.notifyToken = (refs.notifyToken or 0) + 1
 	local token = refs.notifyToken
 	l.TextTransparency = 0
-	task.delay(2.6, function()
+	task.delay(3.0, function()
 		if refs.notifyToken == token then
 			l.Visible = false
 		end
@@ -2918,24 +5646,38 @@ local function toast(text: string, color: Color3)
 end
 
 -- Objective ---------------------------------------------------------------------------------
-local function nextAffordable(d)
-	for _, item in ipairs(Defs.ShopItems()) do
-		local owned = (item.Kind == "Tool" and d.OwnedTools[item.Id]) or (item.Kind == "Backpack" and d.OwnedBackpacks[item.Id])
-		if not owned then
-			return item, d.Cash >= item.Def.Price
+-- The next thing worth buying: the next tool tier (if unowned) or an unowned backpack.
+local function nextPurchase(d)
+	local candidates = {}
+	for _, id in ipairs(Defs.ToolsByTier) do
+		if not d.OwnedTools[id] then
+			table.insert(candidates, Defs.Tools[id])
+			break
 		end
 	end
-	return nil, false
+	for id, def in pairs(Defs.Backpacks) do
+		if def.Price > 0 and not d.OwnedBackpacks[id] then
+			table.insert(candidates, def)
+		end
+	end
+	for _, def in ipairs(candidates) do
+		if d.Cash >= def.Price then
+			return def, true
+		end
+	end
+	return candidates[1], false
 end
 
 local function updateObjective(d)
 	local text, color
 	local full = d.Count >= d.Capacity
-	local item, canBuy = nextAffordable(d)
-	if full then
+	local item, canBuy = nextPurchase(d)
+	if d.Carrying then
+		text, color = ("Carry the %s to the receiving table at camp (ladder: EXIT TO CAMP)"):format(d.Carrying.Name), P.Gold
+	elseif full then
 		text, color = "BACKPACK FULL! Go to the SELL ZONE at Base Camp", P.Danger
 	elseif canBuy and item then
-		text, color = ("You can afford the %s - visit the SHOP!"):format(item.Def.DisplayName), P.Teal
+		text, color = ("You can afford the %s - visit the SHOP!"):format(item.DisplayName), P.Teal
 	elseif d.Count == 0 and d.Cash == 0 then
 		text, color = (TOUCH and "Tap the dirt (or hold DIG) to dig!" or "Hold click on the dirt to dig!"), P.Gold
 	elseif d.Count >= d.Capacity * 0.7 then
@@ -2949,77 +5691,14 @@ local function updateObjective(d)
 	refs.objective.TextColor3 = color
 end
 
--- Shop ----------------------------------------------------------------------------------------
-local function toolStats(def, cur): string
-	local area = def.DigRadius > 0 and ("Smashes %dx%dx%d blocks"):format(def.DigRadius * 2 + 1, def.DigRadius * 2 + 1, def.DigRadius * 2 + 1)
-		or "Single block"
-	return ("Power %d (now %d)  -  %.1f swings/s (now %.1f)\n%s"):format(def.Power, cur.Power, def.Rate, cur.Rate, area)
-end
-
-local function renderShop()
-	local list = refs.shopList
-	for _, c in ipairs(list:GetChildren()) do
-		if c:IsA("Frame") then
-			c:Destroy()
-		end
-	end
-	local d = State.Data
-	for i, item in ipairs(Defs.ShopItems()) do
-		local def = item.Def
-		local owned, equipped
-		if item.Kind == "Tool" then
-			owned = d.OwnedTools[item.Id]
-			equipped = d.ToolId == item.Id
-		else
-			owned = d.OwnedBackpacks[item.Id]
-			equipped = d.BackpackId == item.Id
-		end
-		local card = mk("Frame", { Size = UDim2.new(1, 0, 0, 120), BackgroundColor3 = P.Cream, LayoutOrder = i }, list)
-		corner(card, 12)
-		stroke(card, P.Dark, 3)
-		label(card, def.DisplayName:upper(), 26, P.Dark, {
-			Size = UDim2.new(0.62, 0, 0, 30), Position = UDim2.fromOffset(12, 8),
-			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
-		local stats
-		if item.Kind == "Tool" then
-			stats = toolStats(def, Defs.Tools[d.ToolId])
-		else
-			stats = ("Carries %d treasures (now %d)\n%s"):format(def.Capacity, Defs.Backpacks[d.BackpackId].Capacity, def.Blurb or "")
-		end
-		label(card, stats, 16, Color3.fromHex("4A3A2A"), {
-			Size = UDim2.new(0.62, 0, 0, 60), Position = UDim2.fromOffset(12, 42),
-			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-			TextWrapped = true, TextStrokeTransparency = 1 })
-		local text, color, canBuy
-		if equipped and owned then
-			text, color = "EQUIPPED", Color3.fromHex("B9B2A0")
-		elseif owned then
-			text, color = "OWNED", Color3.fromHex("B9B2A0")
-		elseif d.Cash >= def.Price then
-			text, color, canBuy = "BUY  " .. Util.FormatCash(def.Price), P.Gold, true
-		else
-			text, color = Util.FormatCash(def.Price) .. "\nneed " .. Util.FormatCash(def.Price - d.Cash) .. " more", Color3.fromHex("B9B2A0")
-		end
-		local b = button(card, text, UDim2.new(0.32, 0, 0, 64), UDim2.new(0.66, 0, 0.5, -32), color)
-		b.TextSize = 20
-		b.MouseButton1Click:Connect(function()
-			if canBuy then
-				Audio.Play("UI")
-				Remotes.Get("RequestPurchase"):FireServer(item.Kind, item.Id)
-			else
-				Audio.Play("Error")
-			end
-		end)
-	end
-end
-
--- True while any interactive menu wants the cursor (shop, or the held free-cursor key).
+-- Menu state ----------------------------------------------------------------------------------------
+-- True while any interactive menu wants the cursor (shop, or toggled free-cursor mode).
 function UI.IsMenuOpen(): boolean
-	return shopOpen or cursorFree
+	return ShopUI.IsOpen() or cursorFree
 end
 
 function UI.IsShopOpen(): boolean
-	return shopOpen
+	return ShopUI.IsOpen()
 end
 
 function UI.IsCursorFree(): boolean
@@ -3042,35 +5721,44 @@ function UI.SetCursorFree(free: boolean)
 	menuChanged()
 end
 
--- The single Return-to-Camp action: the button (Activated) and the R key both come through here.
--- The server owns the cooldown and answers with ReturnResult.
+function UI.OpenShop()
+	ShopUI.Open()
+	menuChanged()
+	Audio.Play("UI")
+end
+
+function UI.CloseShop()
+	if ShopUI.IsOpen() then
+		ShopUI.Close() -- its onClose callback announces the menu change
+	end
+end
+
+-- Return to camp / place artifact -----------------------------------------------------------------------
+-- The single Return-to-Camp action: the button (Activated) and the R key both come through here. While carrying an
+-- important artifact the action is blocked with an explanation; the server enforces the same rule independently.
 function UI.RequestReturnToCamp()
 	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	if State.Data.Carrying then
+		toast(CARRY_BLOCKED_TEXT, P.Danger)
+		Audio.Play("Error")
 		return
 	end
 	Audio.Play("UI")
 	Remotes.Get("ReturnToCamp"):FireServer()
 end
 
-function UI.OpenShop()
-	shopOpen = true
-	menuChanged()
-	refs.shop.Visible = true
-	renderShop()
-	Audio.Play("UI")
-end
-
-function UI.CloseShop()
-	local was = shopOpen
-	shopOpen = false
-	if was then
-		menuChanged()
+function UI.RequestPlaceArtifact()
+	if not State.Data.Carrying then
+		return
 	end
-	refs.shop.Visible = false
+	Audio.Play("UI")
+	Remotes.Get("PlaceArtifact"):FireServer()
 end
 
 -- Treasure cards --------------------------------------------------------------------------------
-function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
+function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?, carry: boolean?)
 	local def = Defs.Treasure[id]
 	if not def then
 		return
@@ -3088,7 +5776,9 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 	if big then
 		label(card, def.Name:upper(), 24, P.Cream, { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(10, 4),
 			TextXAlignment = Enum.TextXAlignment.Left })
-		label(card, ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value)), 20, rar.Color, {
+		local sub = carry and ("IMPORTANT  -  CARRY IT TO CAMP  -  " .. Util.FormatCash(def.Value))
+			or ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value))
+		label(card, sub, carry and 15 or 20, rar.Color, {
 			Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(10, 38), TextXAlignment = Enum.TextXAlignment.Left })
 		if isNew then
 			label(card, "NEW!", 20, P.Gold, { Size = UDim2.fromOffset(60, 26), Position = UDim2.new(1, -68, 0, 6) })
@@ -3097,7 +5787,7 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 		label(card, ("+ %s   %s"):format(def.Name, Util.FormatCash(def.Value)), 17, rar.Color, {
 			Size = UDim2.new(1, -12, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = Enum.TextXAlignment.Left })
 	end
-	if not stored then
+	if not stored and not carry then
 		card.GroupColor3 = Color3.fromRGB(200, 120, 120)
 	end
 	TweenService:Create(sc, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
@@ -3106,10 +5796,8 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 		task.wait(0.45)
 		wrap:Destroy()
 	end)
-	-- keep list short
-	local kids = refs.cards:GetChildren()
 	local frames = {}
-	for _, k in ipairs(kids) do
+	for _, k in ipairs(refs.cards:GetChildren()) do
 		if k:IsA("Frame") then
 			table.insert(frames, k)
 		end
@@ -3120,18 +5808,18 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 	end
 end
 
-local function showSold(amount: number, count: number)
-	Audio.Play("Sell")
+local function showPopup(amountText: string, subText: string, sound: string)
+	Audio.Play(sound)
 	local pop = refs.sold
 	pop.Visible = true
-	refs.soldAmount.Text = "+" .. Util.FormatCash(amount)
-	refs.soldSub.Text = ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S")
+	refs.soldAmount.Text = amountText
+	refs.soldSub.Text = subText
 	pop.GroupTransparency = 0
 	refs.soldScale.Scale = 0.5
 	TweenService:Create(refs.soldScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1.1 }):Play()
 	refs.soldToken = (refs.soldToken or 0) + 1
 	local token = refs.soldToken
-	task.delay(1.6, function()
+	task.delay(1.8, function()
 		if refs.soldToken == token then
 			local tw = TweenService:Create(pop, TweenInfo.new(0.5), { GroupTransparency = 1 })
 			tw:Play()
@@ -3141,6 +5829,10 @@ local function showSold(amount: number, count: number)
 			end
 		end
 	end)
+end
+
+local function showSold(amount: number, count: number)
+	showPopup("+" .. Util.FormatCash(amount), ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S"), "Sell")
 end
 
 -- Build ---------------------------------------------------------------------------------------------
@@ -3166,10 +5858,17 @@ local function build()
 	refs.bagValue = label(stats, "Backpack worth ~$0", 15, P.Cream, { Size = UDim2.new(1, -24, 0, 18), Position = UDim2.fromOffset(12, 80),
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
 
+	-- Compact "Carrying" indicator (under the stats panel)
+	refs.carry = panel(gui, UDim2.fromOffset(250, 34), UDim2.fromOffset(10, 118))
+	refs.carry.Visible = false
+	stroke(refs.carry, P.Gold, 2)
+	refs.carryText = label(refs.carry, "", 17, P.Gold, { Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+
 	-- Top-center: objective + notify
 	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(0.5, 0, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0 })
-	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.5, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
+	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.62, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 48), Visible = false })
 
 	-- Top-right: depth
@@ -3181,39 +5880,36 @@ local function build()
 	refs.cards = mk("Frame", { Size = UDim2.fromOffset(260, 300), Position = UDim2.new(0, 10, 0.5, -60), BackgroundTransparency = 1 }, gui)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 6) }, refs.cards)
 
-	-- Sold popup
-	refs.sold = mk("CanvasGroup", { Size = UDim2.fromOffset(360, 130), AnchorPoint = Vector2.new(0.5, 0.5),
+	-- Popup (sold / artifact secured)
+	refs.sold = mk("CanvasGroup", { Size = UDim2.fromOffset(460, 130), AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.36), BackgroundTransparency = 1, Visible = false }, gui)
 	refs.soldScale = mk("UIScale", {}, refs.sold)
 	refs.soldAmount = label(refs.sold, "+$0", 76, P.Gold, { Size = UDim2.new(1, 0, 0, 84), TextStrokeTransparency = 0 })
 	refs.soldSub = label(refs.sold, "", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 88) })
 
-	-- Return to camp
-	local ret = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(150, 46),
-		UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
-	ret.Activated:Connect(function()
-		UI.RequestReturnToCamp()
-	end)
-	refs.returnBtn = ret
+	-- Bottom-left stack: explanation, place artifact, return to camp
+	local base = TOUCH and 230 or 70
+	refs.returnBtn = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(170, 46), UDim2.new(0, 12, 1, -base), P.Cream)
+	refs.returnBtn.Activated:Connect(UI.RequestReturnToCamp)
 	if not Config.ReturnToCamp.Enabled then
-		ret.Visible = false
+		refs.returnBtn.Visible = false
 	end
+	refs.placeBtn = button(gui, TOUCH and "PLACE ARTIFACT" or "PLACE ARTIFACT [X]", UDim2.fromOffset(220, 46),
+		UDim2.new(0, 12, 1, -(base + 54)), Color3.fromHex("5BA7E8"))
+	refs.placeBtn.TextSize = 18
+	refs.placeBtn.Visible = false
+	refs.placeBtn.Activated:Connect(UI.RequestPlaceArtifact)
+	refs.carryNote = label(gui, CARRY_BLOCKED_TEXT, 14, P.Danger, { Size = UDim2.fromOffset(250, 36),
+		Position = UDim2.new(0, 12, 1, -(base + 98)), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Bottom,
+		TextWrapped = true, Visible = false })
 
-	-- Shop modal
-	local shop = mk("Frame", { Size = UDim2.fromOffset(560, 420), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-		BackgroundColor3 = P.Dark, BackgroundTransparency = 0.05, Visible = false }, gui)
-	corner(shop, 16)
-	stroke(shop, P.Gold, 4)
-	label(shop, "EQUIPMENT SHOP", 32, P.Gold, { Size = UDim2.new(1, -70, 0, 44), Position = UDim2.fromOffset(16, 6), TextXAlignment = Enum.TextXAlignment.Left })
-	local close = button(shop, "X", UDim2.fromOffset(52, 44), UDim2.new(1, -62, 0, 8), P.Danger)
-	close.MouseButton1Click:Connect(UI.CloseShop)
-	refs.shopList = mk("ScrollingFrame", { Size = UDim2.new(1, -24, 1, -64), Position = UDim2.fromOffset(12, 56), BackgroundTransparency = 1,
-		BorderSizePixel = 0, ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, shop)
-	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }, refs.shopList)
-	refs.shop = shop
-	-- Invisible Modal button: while the shop is visible the mouse cursor is released (even in first person).
-	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
-		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, shop)
+	-- Dynamite count (desktop badge; touch gets a THROW button from ThrowController)
+	refs.dynBadge = panel(gui, UDim2.fromOffset(200, 34), UDim2.new(1, -212, 1, -(TOUCH and 270 or 52)))
+	refs.dynBadge.Visible = false
+	refs.dynText = label(refs.dynBadge, "", 17, P.Cream, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
+
+	-- Shop
+	ShopUI.Build(gui, menuChanged)
 	refs.cursorFree = mk("TextButton", { Name = "CursorFree", Text = "", BackgroundTransparency = 1, Modal = true,
 		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5), Visible = false }, gui)
 end
@@ -3236,14 +5932,34 @@ function UI.Init()
 		refs.barFill.BackgroundColor3 = frac >= 1 and P.Danger or (frac >= 0.7 and P.Gold or P.Teal)
 		refs.barText.Text = d.Count >= d.Capacity and "FULL!" or refs.barText.Text
 		refs.bagValue.Text = "Backpack worth ~" .. Util.FormatCash(d.BackpackValue)
+		-- carry UI
+		refs.carry.Visible = d.Carrying ~= nil
+		refs.placeBtn.Visible = d.Carrying ~= nil
+		refs.carryNote.Visible = d.Carrying ~= nil
+		if d.Carrying then
+			refs.carryText.Text = "Carrying: " .. d.Carrying.Name
+		end
+		-- dynamite badge
+		local dyn = d.Consumables and d.Consumables.dynamite or 0
+		refs.dynBadge.Visible = dyn > 0 and not TOUCH
+		refs.dynText.Text = ("DYNAMITE x%d   [G] throw"):format(dyn)
 		updateObjective(d)
-		if shopOpen then
-			renderShop()
+		if ShopUI.IsOpen() then
+			ShopUI.Render()
 		end
 	end)
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
-	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number)
+	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number)
+		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper(), "Reveal")
+	end)
+	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
+		if reason == "CARRYING" then
+			-- rejected: the cooldown is NOT consumed, so do not touch returnReadyAt
+			toast(CARRY_BLOCKED_TEXT, P.Danger)
+			Audio.Play("Error")
+			return
+		end
 		returnReadyAt = os.clock() + math.max(seconds, 0)
 		if ok then
 			toast("Back at Base Camp", P.Teal)
@@ -3253,22 +5969,25 @@ function UI.Init()
 			Audio.Play("Error")
 		end
 	end)
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or input.KeyCode ~= Enum.KeyCode.R then
-			return
-		end
-		if UserInputService:GetFocusedTextBox() or shopOpen then
-			return
-		end
-		UI.RequestReturnToCamp()
-	end)
 	Remotes.Get("Notify").OnClientEvent:Connect(function(text, kind)
 		local c = kind == "Danger" and P.Danger or (kind == "Good" and P.Teal or P.Cream)
 		toast(text, c)
 		Audio.Play(kind == "Danger" and "Error" or (kind == "Good" and "Buy" or "UI"))
 	end)
 
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or UserInputService:GetFocusedTextBox() then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.R and not ShopUI.IsOpen() then
+			UI.RequestReturnToCamp()
+		elseif input.KeyCode == Enum.KeyCode.X and not TOUCH then
+			UI.RequestPlaceArtifact()
+		end
+	end)
+
 	RunService.Heartbeat:Connect(function(dt)
+		ShopUI.Step(dt)
 		-- rolling cash
 		if shownCash ~= targetCash then
 			local diff = targetCash - shownCash
@@ -3289,19 +6008,25 @@ function UI.Init()
 				refs.depth.Text = "SURFACE"
 				refs.layer.Text = (p - Config.Camp.Position).Magnitude < 40 and "BASE CAMP" or "DIG SITE"
 			end
-			if shopOpen and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
+			if ShopUI.IsOpen() and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
 				UI.CloseShop()
 			end
 		end
-		-- return-to-camp cooldown readout
-		local left = returnReadyAt - os.clock()
+		-- return-to-camp button: unavailable (with explanation) while carrying, else the cooldown readout
 		local idle = TOUCH and "TO CAMP" or "TO CAMP [R]"
-		if left > 0 then
+		local left = returnReadyAt - os.clock()
+		if State.Data.Carrying then
+			refs.returnBtn.Text = "TO CAMP - CARRYING"
+			refs.returnBtn.BackgroundColor3 = Color3.fromHex("8A8578")
+			refs.returnBtn.TextSize = 16
+		elseif left > 0 then
 			refs.returnBtn.Text = ("CAMP  %ds"):format(math.ceil(left))
 			refs.returnBtn.BackgroundColor3 = Color3.fromHex("B9B2A0")
+			refs.returnBtn.TextSize = 22
 		elseif refs.returnBtn.Text ~= idle then
 			refs.returnBtn.Text = idle
 			refs.returnBtn.BackgroundColor3 = P.Cream
+			refs.returnBtn.TextSize = 22
 		end
 		-- pulse the bar when full
 		if State.Data.Count >= State.Data.Capacity then
@@ -3314,8 +6039,75 @@ return UI
 ]]></string>
             </Properties>
           </Item>
+          <Item class="ModuleScript" referent="46">
+            <Properties>
+              <string name="Name">UIKit</string>
+              <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+
+local P = Config.Palette
+local UIKit = {}
+
+UIKit.Font = Enum.Font.FredokaOne
+UIKit.Muted = Color3.fromHex("B9B2A0")
+UIKit.Good = Color3.fromHex("7BD36B")
+UIKit.Bad = Color3.fromHex("EF5944")
+UIKit.Green = Color3.fromHex("3FA34D")
+
+function UIKit.mk(class: string, props: { [string]: any }, parent: Instance?): any
+	local o = Instance.new(class)
+	for k, v in pairs(props) do
+		o[k] = v
+	end
+	if parent then
+		o.Parent = parent
+	end
+	return o
+end
+
+function UIKit.corner(parent: Instance, r: number?)
+	UIKit.mk("UICorner", { CornerRadius = UDim.new(0, r or 10) }, parent)
+end
+
+function UIKit.stroke(parent: Instance, color: Color3?, thickness: number?)
+	UIKit.mk("UIStroke", { Color = color or P.Dark, Thickness = thickness or 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, parent)
+end
+
+function UIKit.label(parent: Instance, text: string, size: number, color: Color3?, props: { [string]: any }?): TextLabel
+	local l = UIKit.mk("TextLabel", {
+		BackgroundTransparency = 1, Text = text, TextSize = size, Font = UIKit.Font,
+		TextColor3 = color or P.Cream, TextStrokeTransparency = 0.5, TextStrokeColor3 = P.Dark,
+	}, parent)
+	for k, v in pairs(props or {}) do
+		l[k] = v
+	end
+	return l
+end
+
+function UIKit.panel(parent: Instance, size: UDim2, pos: UDim2): Frame
+	local f = UIKit.mk("Frame", { Size = size, Position = pos, BackgroundColor3 = P.Dark, BackgroundTransparency = 0.15 }, parent)
+	UIKit.corner(f, 12)
+	UIKit.stroke(f, P.Dark, 2)
+	return f
+end
+
+function UIKit.button(parent: Instance, text: string, size: UDim2, pos: UDim2, color: Color3): TextButton
+	local b = UIKit.mk("TextButton", {
+		Size = size, Position = pos, BackgroundColor3 = color, Text = text, TextSize = 22, Font = UIKit.Font,
+		TextColor3 = P.Dark, AutoButtonColor = true, TextStrokeTransparency = 1,
+	}, parent)
+	UIKit.corner(b, 12)
+	UIKit.stroke(b, P.Dark, 3)
+	return b
+end
+
+return UIKit
+]]></string>
+            </Properties>
+          </Item>
         </Item>
-        <Item class="LocalScript" referent="33">
+        <Item class="LocalScript" referent="47">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
@@ -3329,6 +6121,7 @@ local Camera = require(Controllers.CameraController)
 local Effects = require(Controllers.EffectsController)
 local Dig = require(Controllers.DigController)
 local Interaction = require(Controllers.InteractionController)
+local Throw = require(Controllers.ThrowController)
 
 State.Init()
 UI.Init()
@@ -3336,6 +6129,7 @@ Camera.Init()
 Effects.Init()
 Dig.Init()
 Interaction.Init()
+Throw.Init()
 
 -- Ask for state until the server answers (data may still be loading).
 task.spawn(function()

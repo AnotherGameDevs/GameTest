@@ -7,6 +7,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local DataMigrations = require(script.Parent.DataMigrations)
 
 local DataService = {}
 
@@ -18,6 +20,7 @@ local function defaultData()
 		Equipment = { ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId },
 		OwnedTools = { [Config.Starting.ToolId] = true },
 		OwnedBackpacks = { [Config.Starting.BackpackId] = true },
+		Consumables = {}, -- [consumableId] = count (e.g. dynamite)
 		BackpackItems = {}, -- [treasureId] = count (persisted so a reset/rejoin never eats your haul)
 		Research = {},
 		UnlockedSites = {},
@@ -32,22 +35,10 @@ local function defaultData()
 	}
 end
 
--- Migrations: [n] upgrades data from version n to n+1.
-local Migrations: { [number]: (any) -> () } = {
-	-- [1] = function(data) ... end,
-}
-
 local function migrate(data)
-	local v = data.Version or 0
-	while v < Config.Data.CurrentVersion do
-		local step = Migrations[v]
-		if step then
-			step(data)
-		end
-		v += 1
-		data.Version = v
-	end
+	DataMigrations.Migrate(data, Config.Data.CurrentVersion, Defs)
 	Util.Reconcile(data, defaultData())
+	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
 end
 
 -- GetDataStore throws in an unpublished place, so it must never run unprotected.

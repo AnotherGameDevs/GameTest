@@ -13,6 +13,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Audio = require(script.Parent.AudioController)
 local UI = require(script.Parent.UIController)
 local CameraController = require(script.Parent.CameraController)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
 local player = Players.LocalPlayer
 local Effects = {}
@@ -271,7 +272,7 @@ function Effects.NoteFace(part: Part, normal: Vector3)
 	end
 end
 
--- Treasure reveal ---------------------------------------------------------------------------------
+-- Treasure reveal ---------------------------------------------------------------------------------------
 local REVEAL = { -- per rarity: float height, hold time, burst count
 	Common = { 3, 0.12, 4 },
 	Uncommon = { 5, 0.45, 12 },
@@ -281,31 +282,6 @@ local REVEAL = { -- per rarity: float height, hold time, burst count
 	Mythic = { 10, 1.6, 70 },
 }
 
-local function buildTreasureModel(def): Part
-	local p = Instance.new("Part")
-	p.Anchored = true
-	p.CanCollide = false
-	p.CanQuery = false
-	p.CanTouch = false
-	p.Color = def.Color
-	p.Material = Enum.Material.SmoothPlastic
-	p.TopSurface = Enum.SurfaceType.Smooth
-	p.BottomSurface = Enum.SurfaceType.Smooth
-	if def.Shape == "Coin" then
-		p.Shape = Enum.PartType.Cylinder
-		p.Size = Vector3.new(0.5, 2.4, 2.4)
-	elseif def.Shape == "Ring" then
-		p.Shape = Enum.PartType.Cylinder
-		p.Size = Vector3.new(0.8, 2.4, 2.4)
-	elseif def.Shape == "Gem" then
-		p.Size = Vector3.new(1.8, 1.8, 1.8)
-		p.Material = Enum.Material.Neon
-	else
-		p.Size = Vector3.new(2.2, 1.6, 1.8)
-	end
-	return p
-end
-
 function Effects.RevealTreasure(info)
 	local def = Defs.Treasure[info.Id]
 	if not def then
@@ -314,16 +290,18 @@ function Effects.RevealTreasure(info)
 	local rar = Defs.Rarity[def.Rarity]
 	local cfg = REVEAL[def.Rarity] or REVEAL.Common
 
-	UI.ShowTreasure(info.Id, info.Stored, info.IsNew)
+	UI.ShowTreasure(info.Id, info.Stored, info.IsNew, info.Carry)
 	local order = rar.Order
 	Audio.Play(order >= 2 and "Reveal" or "Coin", 0.9 + order * 0.12 + math.random() * 0.1)
 
-	local model = buildTreasureModel(def)
+	-- Polished artifact model if there is one, else the generic stand-in. Always a Model so the same
+	-- pivot/scale animation drives both.
+	local model = TreasureModels.BuildAny(info.Id, def)
+	local root = model.PrimaryPart :: BasePart
 	local start = info.Position
 	local top = start + Vector3.new(0, cfg[1], 0)
-	model.CFrame = CFrame.new(start)
-	model.Size = model.Size * 0.2
-	local fullSize = buildTreasureModel(def).Size
+	model:ScaleTo(0.2)
+	model:PivotTo(CFrame.new(start))
 	model.Parent = fxFolder
 
 	if rar.Reveal then
@@ -337,7 +315,7 @@ function Effects.RevealTreasure(info)
 		light.Color = rar.Color
 		light.Range = 12 + order * 3
 		light.Brightness = 2
-		light.Parent = model
+		light.Parent = root
 		burst(start, Vector3.yAxis, rar.Color, cfg[3], 22, 0.8)
 	end
 
@@ -347,8 +325,8 @@ function Effects.RevealTreasure(info)
 		while true do
 			local a = math.min((os.clock() - t0) / dur, 1)
 			local e = TweenService:GetValue(a, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-			model.Size = fullSize * (0.2 + 0.8 * e)
-			model.CFrame = CFrame.new(start:Lerp(top, e)) * CFrame.Angles(0, a * 8, math.rad(15))
+			model:ScaleTo(0.2 + 0.8 * e)
+			model:PivotTo(CFrame.new(start:Lerp(top, e)) * CFrame.Angles(0, a * 8, math.rad(15)))
 			if a >= 1 then
 				break
 			end
@@ -359,20 +337,27 @@ function Effects.RevealTreasure(info)
 		local spin = 8
 		while os.clock() < hold do
 			spin += RunService.RenderStepped:Wait() * 4
-			model.CFrame = CFrame.new(top + Vector3.new(0, math.sin(os.clock() * 6) * 0.2, 0))
-				* CFrame.Angles(0, spin, math.rad(15))
+			model:PivotTo(CFrame.new(top + Vector3.new(0, math.sin(os.clock() * 6) * 0.2, 0))
+				* CFrame.Angles(0, spin, math.rad(15)))
 		end
-		-- fly to the player (or fizzle if it didn't fit in the backpack)
+		local pivot = model:GetPivot()
+		local from = pivot.Position
+		local rot = pivot - pivot.Position
+		-- fly to the player; fizzle if it did not fit; or, for important artifacts, settle back down to where the
+		-- real physical artifact is about to appear (it is never auto-collected)
 		local t1, d1 = os.clock(), 0.35
-		local from = model.Position
 		while true do
 			local a = math.min((os.clock() - t1) / d1, 1)
-			local char = player.Character
-			local hrp = char and char:FindFirstChild("HumanoidRootPart")
-			local target = (info.Stored and hrp) and (hrp :: BasePart).Position or (from + Vector3.new(0, 2, 0))
 			local e = a * a
-			model.Position = from:Lerp(target, e)
-			model.Size = fullSize * (1 - e * 0.9)
+			if info.Carry then
+				model:PivotTo(CFrame.new(from:Lerp(start, TweenService:GetValue(a, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))) * rot)
+			else
+				local char = player.Character
+				local hrp = char and char:FindFirstChild("HumanoidRootPart")
+				local target = (info.Stored and hrp) and (hrp :: BasePart).Position or (from + Vector3.new(0, 2, 0))
+				model:PivotTo(CFrame.new(from:Lerp(target, e)) * rot)
+				model:ScaleTo(math.max(1 - e * 0.9, 0.05))
+			end
 			if a >= 1 then
 				break
 			end
@@ -384,6 +369,36 @@ end
 
 function Effects.GetFolder(): Folder
 	return fxFolder
+end
+
+-- Dynamite blast: expanding flash, a big burst of chunks and a camera kick scaled by distance.
+local function onExplosion(pos: Vector3, blocks: number)
+	local flash = Instance.new("Part")
+	flash.Anchored = true
+	flash.CanCollide = false
+	flash.CanQuery = false
+	flash.CanTouch = false
+	flash.Shape = Enum.PartType.Ball
+	flash.Material = Enum.Material.Neon
+	flash.Color = Color3.fromHex("FFB347")
+	flash.Transparency = 0.2
+	flash.Size = Vector3.one * 2
+	flash.Position = pos
+	flash.Parent = fxFolder
+	local tw = TweenService:Create(flash, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Size = Vector3.one * 16, Transparency = 1 })
+	tw:Play()
+	tw.Completed:Once(function()
+		flash:Destroy()
+	end)
+	burst(pos, Vector3.yAxis, Color3.fromHex("FFB347"), 14, 30, 1.2)
+	Audio.Play("Break", 0.5, 1.4)
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		local dist = ((hrp :: BasePart).Position - pos).Magnitude
+		cameraKick(math.clamp(0.9 - dist / 90, 0, 0.9))
+	end
 end
 
 function Effects.Init()
@@ -398,6 +413,7 @@ function Effects.Init()
 		end
 	end)
 	Remotes.Get("TreasureFound").OnClientEvent:Connect(Effects.RevealTreasure)
+	Remotes.Get("Explosion").OnClientEvent:Connect(onExplosion)
 end
 
 return Effects

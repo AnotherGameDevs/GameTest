@@ -185,12 +185,13 @@ local CLEARANCE_OFFSETS = {
 -- area right around it (the face being mined). Five rays per frame; no art changes.
 local function updateToolClearance(dt: number)
 	local char = player.Character
-	local tool = char and char:FindFirstChild("Shovel")
+	local tool = char and char:FindFirstChildOfClass("Tool") -- the shovel OR a carried artifact
 	if not tool then
 		return
 	end
 	local first = CameraController.IsFirstPerson()
-	setToolScale(tool, first and SHOVEL_FP_SCALE or 1)
+	local fp = tool:GetAttribute("ToolFPScale") or SHOVEL_FP_SCALE
+	setToolScale(tool, first and fp or 1)
 
 	local target = 0
 	if first and not UI.IsMenuOpen() then

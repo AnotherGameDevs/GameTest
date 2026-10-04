@@ -38,6 +38,16 @@ local function spawnPart(idx: number)
 	parts[idx] = part
 end
 
+-- Cells on the grid's south edge that border the exit shaft (see Config.Exit).
+function SiteService.IsExitWall(x: number, z: number): boolean
+	local ex = Config.Exit
+	if not ex.Enabled or z ~= Grid.SizeZ - 1 then
+		return false
+	end
+	local x0 = Grid.OriginX + x * Grid.CellSize
+	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + ex.Width / 2 + 1e-3
+end
+
 function SiteService.Generate(seed: number?)
 	generation += 1
 	seed = seed or Config.Site.Seed
@@ -69,10 +79,11 @@ function SiteService.Generate(seed: number?)
 		end
 	end
 
-	-- Instance only the cells that start exposed (the top surface row).
+	-- Instance only the cells that start exposed: the top surface row, plus the wall of cells facing the exit shaft
+	-- (open air beyond the grid edge), so players can dig through to the ladder from any depth.
 	for idx = 1, Grid.Count do
-		local _, y = Grid.FromIndex(idx)
-		if y == 0 then
+		local x, y, z = Grid.FromIndex(idx)
+		if y == 0 or SiteService.IsExitWall(x, z) then
 			spawnPart(idx)
 		end
 	end
@@ -148,6 +159,68 @@ function SiteService.ExposedNeighbours(idx: number, radius: number): { number }
 				end
 			end
 		end
+	end
+	return out
+end
+
+-- Picks at most `maxExtra` exposed neighbours to also take splash damage. Closest to the target block first
+-- (face-adjacent before edge/corner), ties broken by nearness to the player, then by index for determinism.
+function SiteService.PickSplash(idx: number, radius: number, maxExtra: number, fromPos: Vector3): { number }
+	local candidates = SiteService.ExposedNeighbours(idx, radius)
+	if #candidates <= maxExtra then
+		return candidates
+	end
+	local tx, ty, tz = Grid.FromIndex(idx)
+	local targetCenter = Grid.CellCenter(tx, ty, tz)
+	local scored = {}
+	for _, ni in ipairs(candidates) do
+		local x, y, z = Grid.FromIndex(ni)
+		local c = Grid.CellCenter(x, y, z)
+		table.insert(scored, { Index = ni, D1 = (c - targetCenter).Magnitude, D2 = (c - fromPos).Magnitude })
+	end
+	table.sort(scored, function(a, b)
+		if math.abs(a.D1 - b.D1) > 1e-3 then
+			return a.D1 < b.D1
+		end
+		if math.abs(a.D2 - b.D2) > 1e-3 then
+			return a.D2 < b.D2
+		end
+		return a.Index < b.Index
+	end)
+	local out = {}
+	for i = 1, maxExtra do
+		out[i] = scored[i].Index
+	end
+	return out
+end
+
+-- The (up to) `maxCells` alive cells nearest to `pos` within `radius` cells of the cell containing it.
+-- Used by explosives; hidden interior cells count (they are exposed afterwards like any dug cell).
+function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number): { number }
+	local cx, cy, cz = Grid.WorldToCell(pos)
+	local found = {}
+	for dx = -radius, radius do
+		for dy = -radius, radius do
+			for dz = -radius, radius do
+				local x, y, z = cx + dx, cy + dy, cz + dz
+				if Grid.InBounds(x, y, z) then
+					local idx = Grid.ToIndex(x, y, z)
+					if (health[idx] or 0) > 0 then
+						table.insert(found, { Index = idx, D = (Grid.CellCenter(x, y, z) - pos).Magnitude })
+					end
+				end
+			end
+		end
+	end
+	table.sort(found, function(a, b)
+		if math.abs(a.D - b.D) > 1e-3 then
+			return a.D < b.D
+		end
+		return a.Index < b.Index
+	end)
+	local out = {}
+	for i = 1, math.min(maxCells, #found) do
+		out[i] = found[i].Index
 	end
 	return out
 end

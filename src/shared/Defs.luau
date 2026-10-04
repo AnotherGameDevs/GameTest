@@ -14,18 +14,64 @@ Defs.Rarity = {
 	Mythic = { Order = 6, Color = P.Danger, Reveal = true },
 }
 
--- Tools. Power = damage per hit, Rate = hits/second, DigRadius = extra cells hit around the target
--- (this is what makes better shovels *behave* differently, not only hit harder).
+-- Tools: STATS ONLY. How a tool looks lives in Appearances.luau / ToolModels.luau, so skins can change
+-- appearance without touching balance.
+--   Power  = damage per hit            Rate  = swings per second
+--   Reach  = studs from the character to the NEAREST POINT of the target block (see Defs.CellInReach)
+--   Splash = optional { Radius, MaxExtra, Fraction }: up to MaxExtra nearby exposed blocks also take
+--            Fraction of Power per swing. Deliberately capped; most tiers are single-block.
+--   Family = which construction family it belongs to (drives art + the shop's grouping).
+-- No tier raises damage, rate, reach and area all at once. Prices are PROVISIONAL (docs/TOOL_TIERS.md,
+-- tools/economy_sim.py). Tier 8 (Dynamite) is a throwable consumable: see Defs.Consumables.
 Defs.Tools = {
 	rusty_shovel = {
-		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 8,
-		Price = 0, RequiredReputation = 0, Order = 1, Color = Color3.fromHex("8A6A55"), Scale = 1.0,
-		Blurb = "Slow. One block at a time.",
+		DisplayName = "Rusty Shovel", Tier = 1, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_rusty",
+		Power = 8, Rate = 2.0, Reach = 8, Price = 0, RequiredReputation = 0,
+		Blurb = "Small and basic. Gets the job done.",
 	},
 	digging_shovel = {
-		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 10,
-		Price = 180, RequiredReputation = 0, Order = 2, Color = P.Teal, Scale = 1.35,
-		Blurb = "Faster, harder, and smashes neighbouring blocks too!",
+		DisplayName = "Digging Shovel", Tier = 2, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_digging",
+		Power = 12, Rate = 2.2, Reach = 8, Price = 300, RequiredReputation = 0,
+		Blurb = "Faster and stronger than the rusty shovel.",
+	},
+	heavy_shovel = {
+		DisplayName = "Heavy Shovel", Tier = 3, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_heavy",
+		Power = 36, Rate = 1.5, Reach = 8, Price = 1500, RequiredReputation = 0,
+		Blurb = "Bigger scoop. Heavy swings break soft ground in one hit.",
+	},
+	power_shovel = {
+		DisplayName = "Power Shovel", Tier = 4, Family = "Excavation", ToolType = "Shovel", Appearance = "shovel_power",
+		Power = 36, Rate = 1.5, Reach = 8, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
+		Price = 2800, RequiredReputation = 0,
+		Blurb = "Reinforced design. Each swing also chips 2 neighbouring blocks.",
+	},
+	jackhammer = {
+		DisplayName = "Jackhammer", Tier = 5, Family = "Excavation", ToolType = "Jackhammer", Appearance = "jackhammer",
+		Power = 22, Rate = 4.5, Reach = 8, Price = 5000, RequiredReputation = 0,
+		Blurb = "Rapid digging. Chips through hard material.",
+	},
+	drill = {
+		DisplayName = "Drill", Tier = 6, Family = "Excavation", ToolType = "Drill", Appearance = "drill",
+		Power = 22, Rate = 5.5, Reach = 11, Price = 7500, RequiredReputation = 0,
+		Blurb = "Cuts a tunnel. Faster, and reaches deeper from where you stand.",
+	},
+	industrial_drill = {
+		DisplayName = "Industrial Drill", Tier = 7, Family = "Industrial", ToolType = "Drill", Appearance = "drill_industrial",
+		Power = 22, Rate = 5.5, Reach = 11, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
+		Price = 11500, RequiredReputation = 0,
+		Blurb = "Massive digging power. Clears neighbouring blocks as it goes.",
+	},
+}
+
+-- Tier 8: a throwable, single-use item (buy one, throw it, it is gone). Counts are saved per player.
+-- The blast breaks the nearest MaxCells blocks within Radius cells of where it lands (a tightly capped area).
+Defs.Consumables = {
+	dynamite = {
+		DisplayName = "Dynamite", Tier = 8, Family = "Industrial", Appearance = "dynamite",
+		Price = 400, MaxCarry = 3, Cooldown = 1.0, MaxActive = 3,
+		FuseSeconds = 2.5, ThrowSpeed = 42, ThrowLift = 14,
+		Blast = { Radius = 1, MaxCells = 14 },
+		Blurb = "Throwable. Destroys a cluster of blocks. One use, then it is gone.",
 	},
 }
 
@@ -42,10 +88,10 @@ Defs.Treasure = {
 	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring" },
 	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block" },
 	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
-	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring" },
-	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem" },
-	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
-	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
+	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring", Model = "necklace" },
+	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem", Model = "gem" },
+	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block", RequiresCarry = true },
+	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
 }
 
 -- The ONE reach rule, used by server validation and the client reach indicator.
@@ -105,25 +151,59 @@ function Defs.PickTreasure(layerId: string, rng: Random): string?
 	return w.List[#w.List].Id
 end
 
--- Shop catalogue, sorted. Items: { Kind = "Tool"|"Backpack", Id, Def }
+-- Swings needed to break one block of a layer with this tool (pure; used by the shop comparison UI).
+function Defs.HitsToBreak(tool, layer): number
+	return math.ceil(layer.Health / tool.Power)
+end
+
+-- Tool ids ordered by tier.
+local toolsByTier = {}
+for id, def in pairs(Defs.Tools) do
+	table.insert(toolsByTier, id)
+end
+table.sort(toolsByTier, function(a, b)
+	return Defs.Tools[a].Tier < Defs.Tools[b].Tier
+end)
+Defs.ToolsByTier = toolsByTier
+
+-- The tier directly below `toolId` (nil for tier 1). Used for sequential unlocking.
+function Defs.PreviousTool(toolId: string): string?
+	local def = Defs.Tools[toolId]
+	if not def then
+		return nil
+	end
+	for _, id in ipairs(toolsByTier) do
+		if Defs.Tools[id].Tier == def.Tier - 1 then
+			return id
+		end
+	end
+	return nil
+end
+
+-- Shop catalogue. Tools tab: the seven equippable tiers then the tier-8 consumable. Backpacks tab: purchasable packs.
 function Defs.ShopItems()
 	local items = {}
-	for id, def in pairs(Defs.Tools) do
-		if def.Price > 0 then
-			table.insert(items, { Kind = "Tool", Id = id, Def = def })
-		end
+	for _, id in ipairs(toolsByTier) do
+		table.insert(items, { Kind = "Tool", Id = id, Def = Defs.Tools[id] })
 	end
+	for id, def in pairs(Defs.Consumables) do
+		table.insert(items, { Kind = "Consumable", Id = id, Def = def })
+	end
+	local packs = {}
 	for id, def in pairs(Defs.Backpacks) do
 		if def.Price > 0 then
-			table.insert(items, { Kind = "Backpack", Id = id, Def = def })
+			table.insert(packs, { Kind = "Backpack", Id = id, Def = def })
 		end
 	end
-	table.sort(items, function(a, b)
+	table.sort(packs, function(a, b)
 		if a.Def.Price ~= b.Def.Price then
 			return a.Def.Price < b.Def.Price
 		end
 		return a.Id < b.Id
 	end)
+	for _, it in ipairs(packs) do
+		table.insert(items, it)
+	end
 	return items
 end
 

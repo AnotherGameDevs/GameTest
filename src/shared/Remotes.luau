@@ -8,13 +8,18 @@ local EVENTS = {
 	"ClientReady", -- C->S  client finished loading, wants initial state
 	"DigHit", -- C->S  (x, y, z) request to hit a cell
 	"RequestPurchase", -- C->S  (kind, id)
+	"RequestEquip", -- C->S  (kind, id)  equip an already-owned tool
 	"ReturnToCamp", -- C->S
 	"PlayerState", -- S->C  full state snapshot
 	"DigResult", -- S->C  { hits = {...}, depth }
 	"TreasureFound", -- S->C  treasure reveal
 	"Sold", -- S->C  (amount, count)
 	"Notify", -- S->C  (text, kind)
-	"ReturnResult", -- S->C  (ok, secondsUntilReady)
+	"ReturnResult", -- S->C  (ok, secondsUntilReady, reason?)
+	"PlaceArtifact", -- C->S  put the carried artifact down
+	"ThrowDynamite", -- C->S  (dx, dy, dz) aim direction; the server decides everything else
+	"Explosion", -- S->C  (position) cosmetic blast feedback
+	"ArtifactDeposited", -- S->C  (name, value)
 }
 
 local folder: Folder

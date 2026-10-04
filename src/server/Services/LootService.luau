@@ -8,6 +8,7 @@ local Grid = require(ReplicatedStorage.Shared.Grid)
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local AnalyticsService = require(script.Parent.AnalyticsService)
+local ArtifactService = require(script.Parent.ArtifactService)
 
 local LootService = {}
 local treasureRemote = Remotes.Get("TreasureFound")
@@ -22,6 +23,22 @@ function LootService.Award(player: Player, treasureId: string, cellIndex: number
 		return false
 	end
 	local x, y, z = Grid.FromIndex(cellIndex)
+
+	-- Important artifacts are never auto-collected: they appear physically and must be carried to camp.
+	-- No backpack slot, no cash and no collection credit until a successful deposit.
+	if def.RequiresCarry then
+		ArtifactService.Discover(player, treasureId, cellIndex)
+		treasureRemote:FireClient(player, {
+			Id = treasureId,
+			Position = Grid.CellCenter(x, y, z),
+			Stored = false,
+			Carry = true,
+			IsNew = data.Collection[treasureId] == nil,
+		})
+		AnalyticsService.Log(player, "ImportantArtifactFound", { id = treasureId })
+		return true
+	end
+
 	local stored = InventoryService.Add(player, treasureId)
 
 	local entry = data.Collection[treasureId]

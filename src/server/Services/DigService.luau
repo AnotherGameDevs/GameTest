@@ -13,6 +13,8 @@ local SiteService = require(script.Parent.SiteService)
 local LootService = require(script.Parent.LootService)
 local StateService = require(script.Parent.StateService)
 local RateLimiter = require(script.Parent.RateLimiter)
+local MetricsService = require(script.Parent.MetricsService)
+local CarryRegistry = require(script.Parent.CarryRegistry)
 
 local DigService = {}
 
@@ -32,6 +34,9 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 	end
 	if not Grid.InBounds(x, y, z) then
 		return
+	end
+	if CarryRegistry.IsCarrying(player) then
+		return -- no mining while carrying an important artifact
 	end
 	local data = DataService.Get(player)
 	local character = player.Character
@@ -59,8 +64,10 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 
 	-- Resolve target + splash
 	local targets = { { idx, tool.Power } }
-	for _, ni in ipairs(SiteService.ExposedNeighbours(idx, tool.DigRadius)) do
-		table.insert(targets, { ni, tool.Power * Config.Dig.SplashFraction })
+	if tool.Splash then
+		for _, ni in ipairs(SiteService.PickSplash(idx, tool.Splash.Radius, tool.Splash.MaxExtra, hrp.Position)) do
+			table.insert(targets, { ni, tool.Power * tool.Splash.Fraction })
+		end
 	end
 
 	local hits = {}
@@ -84,6 +91,7 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 	for _, di in ipairs(destroyed) do
 		SiteService.ExposeAround(di)
 	end
+	MetricsService.Hit(player, #destroyed)
 	DataService.MarkDirty(player)
 
 	-- Feedback to everyone nearby (cosmetic only)

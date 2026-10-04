@@ -14,6 +14,8 @@ local EquipmentService = require(script.Parent.EquipmentService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
 local RateLimiter = require(script.Parent.RateLimiter)
 local AnalyticsService = require(script.Parent.AnalyticsService)
+local MetricsService = require(script.Parent.MetricsService)
+local CarryRegistry = require(script.Parent.CarryRegistry)
 
 local EconomyService = {}
 
@@ -37,6 +39,7 @@ function EconomyService.SellAll(player: Player)
 	DataService.MarkDirty(player)
 	StateService.Push(player)
 	soldRemote:FireClient(player, value, count)
+	MetricsService.Sold(player, value, count)
 	AnalyticsService.Log(player, "Sell", { value = value, count = count })
 end
 
@@ -60,6 +63,28 @@ local function purchase(player: Player, kind: any, id: any)
 	if not data then
 		return
 	end
+	if kind == "Consumable" then
+		local cdef = Defs.Consumables[id]
+		if not cdef then
+			return
+		end
+		local count = data.Consumables[id] or 0
+		if count >= cdef.MaxCarry then
+			notifyRemote:FireClient(player, ("You can only carry %d %s."):format(cdef.MaxCarry, cdef.DisplayName), "Danger")
+			return
+		end
+		if data.Cash < cdef.Price then
+			notifyRemote:FireClient(player, "Not enough Cash!", "Danger")
+			return
+		end
+		data.Cash -= cdef.Price
+		data.Consumables[id] = count + 1
+		DataService.MarkDirty(player)
+		StateService.Push(player)
+		notifyRemote:FireClient(player, ("Bought %s (%d/%d)"):format(cdef.DisplayName, count + 1, cdef.MaxCarry), "Good")
+		AnalyticsService.Log(player, "Purchase", { kind = kind, id = id, price = cdef.Price })
+		return
+	end
 	local def, owned
 	if kind == "Tool" then
 		def, owned = Defs.Tools[id], data.OwnedTools
@@ -72,6 +97,13 @@ local function purchase(player: Player, kind: any, id: any)
 	if owned[id] then
 		notifyRemote:FireClient(player, "You already own that.", "Info")
 		return
+	end
+	if kind == "Tool" and Config.Shop.SequentialTools then
+		local prev = Defs.PreviousTool(id)
+		if prev and not owned[prev] then
+			notifyRemote:FireClient(player, ("Buy the %s first."):format(Defs.Tools[prev].DisplayName), "Danger")
+			return
+		end
 	end
 	if (data.Reputation or 0) < def.RequiredReputation then
 		notifyRemote:FireClient(player, "Not enough Reputation.", "Danger")
@@ -98,8 +130,33 @@ local function purchase(player: Player, kind: any, id: any)
 	AnalyticsService.Log(player, "Purchase", { kind = kind, id = id, price = def.Price })
 end
 
+local function equip(player: Player, kind: any, id: any)
+	if kind ~= "Tool" or type(id) ~= "string" or not RateLimiter.Check(player, "RequestEquip") then
+		return
+	end
+	if CarryRegistry.IsCarrying(player) then
+		notifyRemote:FireClient(player, "Place your artifact down before switching tools.", "Danger")
+		return
+	end
+	local data = DataService.Get(player)
+	if not data or not Defs.Tools[id] or not data.OwnedTools[id] or data.Equipment.ToolId == id then
+		return
+	end
+	data.Equipment.ToolId = id
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+	EquipmentService.Refresh(player)
+	notifyRemote:FireClient(player, ("Equipped %s"):format(Defs.Tools[id].DisplayName), "Good")
+end
+
 local function returnToCamp(player: Player)
 	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	-- Carrying an important artifact forbids teleporting. Checked FIRST and before any rate-limit/cooldown
+	-- bookkeeping, so a rejected attempt never consumes the cooldown. A hand-fired remote hits the same check.
+	if CarryRegistry.IsCarrying(player) then
+		returnRemote:FireClient(player, false, 0, "CARRYING")
 		return
 	end
 	if not RateLimiter.Check(player, "ReturnToCamp") then
@@ -126,6 +183,7 @@ end
 
 function EconomyService.Init()
 	Remotes.Get("RequestPurchase").OnServerEvent:Connect(purchase)
+	Remotes.Get("RequestEquip").OnServerEvent:Connect(equip)
 	Remotes.Get("ReturnToCamp").OnServerEvent:Connect(returnToCamp)
 
 	local acc = 0

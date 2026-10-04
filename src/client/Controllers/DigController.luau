@@ -199,7 +199,8 @@ function DigController.ClearInput()
 end
 
 local function isBlocked(): boolean
-	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil
+	-- A carried important artifact disables ALL mining (the server enforces this independently).
+	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
 end
 
 local function onStep()
@@ -321,6 +322,9 @@ function DigController.Init()
 		btn.TextColor3 = P.Dark
 		btn.AutoButtonColor = true
 		btn.Parent = UI.GetGui()
+		State.Connect(function(d)
+			btn.Visible = d.Carrying == nil
+		end)
 		local c = Instance.new("UICorner")
 		c.CornerRadius = UDim.new(1, 0)
 		c.Parent = btn
@@ -339,6 +343,13 @@ function DigController.Init()
 			end
 		end)
 	end
+
+	-- Carrying drops anything held immediately.
+	State.Connect(function(d)
+		if d.Carrying then
+			DigController.ClearInput()
+		end
+	end)
 
 	-- After the camera has updated, so the centre ray uses this frame's final camera.
 	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 1, onStep)

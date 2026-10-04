@@ -1,4 +1,5 @@
--- All UI is built from code (no manual UI objects). Scale-based + UIScale so it works on phones and desktop.
+-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
+-- The shop itself lives in ShopUI; shared constructors in UIKit.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -15,18 +16,20 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
+local ShopUI = require(script.Parent.ShopUI)
+local K = require(script.Parent.UIKit)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
+local mk, corner, stroke, label, panel, button = K.mk, K.corner, K.stroke, K.label, K.panel, K.button
 local UI = {}
 
-local FONT = Enum.Font.FredokaOne
 local TOUCH = UserInputService.TouchEnabled
+local CARRY_BLOCKED_TEXT = "Carry your artifact back to camp, or place it down first."
 
 local gui: ScreenGui
 local refs: { [string]: any } = {}
-local shopOpen = false
-local cursorFree = false -- held "free cursor" key (first-person)
+local cursorFree = false -- toggled free-cursor mode (first person)
 local menuCallbacks: { () -> () } = {}
 
 local function menuChanged()
@@ -35,54 +38,6 @@ local function menuChanged()
 	end
 end
 
-local function mk(class: string, props: { [string]: any }, parent: Instance?): any
-	local o = Instance.new(class)
-	for k, v in pairs(props) do
-		o[k] = v
-	end
-	if parent then
-		o.Parent = parent
-	end
-	return o
-end
-
-local function corner(parent: Instance, r: number?)
-	mk("UICorner", { CornerRadius = UDim.new(0, r or 10) }, parent)
-end
-
-local function stroke(parent: Instance, color: Color3?, thickness: number?)
-	mk("UIStroke", { Color = color or P.Dark, Thickness = thickness or 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, parent)
-end
-
-local function label(parent: Instance, text: string, size: number, color: Color3?, props: { [string]: any }?): TextLabel
-	local l = mk("TextLabel", {
-		BackgroundTransparency = 1, Text = text, TextSize = size, Font = FONT,
-		TextColor3 = color or P.Cream, TextStrokeTransparency = 0.5, TextStrokeColor3 = P.Dark,
-	}, parent)
-	for k, v in pairs(props or {}) do
-		l[k] = v
-	end
-	return l
-end
-
-local function panel(parent: Instance, size: UDim2, pos: UDim2): Frame
-	local f = mk("Frame", { Size = size, Position = pos, BackgroundColor3 = P.Dark, BackgroundTransparency = 0.15 }, parent)
-	corner(f, 12)
-	stroke(f, P.Dark, 2)
-	return f
-end
-
-local function button(parent: Instance, text: string, size: UDim2, pos: UDim2, color: Color3): TextButton
-	local b = mk("TextButton", {
-		Size = size, Position = pos, BackgroundColor3 = color, Text = text, TextSize = 22, Font = FONT,
-		TextColor3 = P.Dark, AutoButtonColor = true, TextStrokeTransparency = 1,
-	}, parent)
-	corner(b, 12)
-	stroke(b, P.Dark, 3)
-	return b
-end
-
--- Rolling cash display ---------------------------------------------------------------------
 local shownCash, targetCash = 0, 0
 local returnReadyAt = 0
 
@@ -94,7 +49,7 @@ local function toast(text: string, color: Color3)
 	refs.notifyToken = (refs.notifyToken or 0) + 1
 	local token = refs.notifyToken
 	l.TextTransparency = 0
-	task.delay(2.6, function()
+	task.delay(3.0, function()
 		if refs.notifyToken == token then
 			l.Visible = false
 		end
@@ -102,24 +57,38 @@ local function toast(text: string, color: Color3)
 end
 
 -- Objective ---------------------------------------------------------------------------------
-local function nextAffordable(d)
-	for _, item in ipairs(Defs.ShopItems()) do
-		local owned = (item.Kind == "Tool" and d.OwnedTools[item.Id]) or (item.Kind == "Backpack" and d.OwnedBackpacks[item.Id])
-		if not owned then
-			return item, d.Cash >= item.Def.Price
+-- The next thing worth buying: the next tool tier (if unowned) or an unowned backpack.
+local function nextPurchase(d)
+	local candidates = {}
+	for _, id in ipairs(Defs.ToolsByTier) do
+		if not d.OwnedTools[id] then
+			table.insert(candidates, Defs.Tools[id])
+			break
 		end
 	end
-	return nil, false
+	for id, def in pairs(Defs.Backpacks) do
+		if def.Price > 0 and not d.OwnedBackpacks[id] then
+			table.insert(candidates, def)
+		end
+	end
+	for _, def in ipairs(candidates) do
+		if d.Cash >= def.Price then
+			return def, true
+		end
+	end
+	return candidates[1], false
 end
 
 local function updateObjective(d)
 	local text, color
 	local full = d.Count >= d.Capacity
-	local item, canBuy = nextAffordable(d)
-	if full then
+	local item, canBuy = nextPurchase(d)
+	if d.Carrying then
+		text, color = ("Carry the %s to the receiving table at camp (ladder: EXIT TO CAMP)"):format(d.Carrying.Name), P.Gold
+	elseif full then
 		text, color = "BACKPACK FULL! Go to the SELL ZONE at Base Camp", P.Danger
 	elseif canBuy and item then
-		text, color = ("You can afford the %s - visit the SHOP!"):format(item.Def.DisplayName), P.Teal
+		text, color = ("You can afford the %s - visit the SHOP!"):format(item.DisplayName), P.Teal
 	elseif d.Count == 0 and d.Cash == 0 then
 		text, color = (TOUCH and "Tap the dirt (or hold DIG) to dig!" or "Hold click on the dirt to dig!"), P.Gold
 	elseif d.Count >= d.Capacity * 0.7 then
@@ -133,77 +102,14 @@ local function updateObjective(d)
 	refs.objective.TextColor3 = color
 end
 
--- Shop ----------------------------------------------------------------------------------------
-local function toolStats(def, cur): string
-	local area = def.DigRadius > 0 and ("Smashes %dx%dx%d blocks"):format(def.DigRadius * 2 + 1, def.DigRadius * 2 + 1, def.DigRadius * 2 + 1)
-		or "Single block"
-	return ("Power %d (now %d)  -  %.1f swings/s (now %.1f)\n%s"):format(def.Power, cur.Power, def.Rate, cur.Rate, area)
-end
-
-local function renderShop()
-	local list = refs.shopList
-	for _, c in ipairs(list:GetChildren()) do
-		if c:IsA("Frame") then
-			c:Destroy()
-		end
-	end
-	local d = State.Data
-	for i, item in ipairs(Defs.ShopItems()) do
-		local def = item.Def
-		local owned, equipped
-		if item.Kind == "Tool" then
-			owned = d.OwnedTools[item.Id]
-			equipped = d.ToolId == item.Id
-		else
-			owned = d.OwnedBackpacks[item.Id]
-			equipped = d.BackpackId == item.Id
-		end
-		local card = mk("Frame", { Size = UDim2.new(1, 0, 0, 120), BackgroundColor3 = P.Cream, LayoutOrder = i }, list)
-		corner(card, 12)
-		stroke(card, P.Dark, 3)
-		label(card, def.DisplayName:upper(), 26, P.Dark, {
-			Size = UDim2.new(0.62, 0, 0, 30), Position = UDim2.fromOffset(12, 8),
-			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
-		local stats
-		if item.Kind == "Tool" then
-			stats = toolStats(def, Defs.Tools[d.ToolId])
-		else
-			stats = ("Carries %d treasures (now %d)\n%s"):format(def.Capacity, Defs.Backpacks[d.BackpackId].Capacity, def.Blurb or "")
-		end
-		label(card, stats, 16, Color3.fromHex("4A3A2A"), {
-			Size = UDim2.new(0.62, 0, 0, 60), Position = UDim2.fromOffset(12, 42),
-			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-			TextWrapped = true, TextStrokeTransparency = 1 })
-		local text, color, canBuy
-		if equipped and owned then
-			text, color = "EQUIPPED", Color3.fromHex("B9B2A0")
-		elseif owned then
-			text, color = "OWNED", Color3.fromHex("B9B2A0")
-		elseif d.Cash >= def.Price then
-			text, color, canBuy = "BUY  " .. Util.FormatCash(def.Price), P.Gold, true
-		else
-			text, color = Util.FormatCash(def.Price) .. "\nneed " .. Util.FormatCash(def.Price - d.Cash) .. " more", Color3.fromHex("B9B2A0")
-		end
-		local b = button(card, text, UDim2.new(0.32, 0, 0, 64), UDim2.new(0.66, 0, 0.5, -32), color)
-		b.TextSize = 20
-		b.MouseButton1Click:Connect(function()
-			if canBuy then
-				Audio.Play("UI")
-				Remotes.Get("RequestPurchase"):FireServer(item.Kind, item.Id)
-			else
-				Audio.Play("Error")
-			end
-		end)
-	end
-end
-
--- True while any interactive menu wants the cursor (shop, or the held free-cursor key).
+-- Menu state ----------------------------------------------------------------------------------------
+-- True while any interactive menu wants the cursor (shop, or toggled free-cursor mode).
 function UI.IsMenuOpen(): boolean
-	return shopOpen or cursorFree
+	return ShopUI.IsOpen() or cursorFree
 end
 
 function UI.IsShopOpen(): boolean
-	return shopOpen
+	return ShopUI.IsOpen()
 end
 
 function UI.IsCursorFree(): boolean
@@ -226,35 +132,44 @@ function UI.SetCursorFree(free: boolean)
 	menuChanged()
 end
 
--- The single Return-to-Camp action: the button (Activated) and the R key both come through here.
--- The server owns the cooldown and answers with ReturnResult.
+function UI.OpenShop()
+	ShopUI.Open()
+	menuChanged()
+	Audio.Play("UI")
+end
+
+function UI.CloseShop()
+	if ShopUI.IsOpen() then
+		ShopUI.Close() -- its onClose callback announces the menu change
+	end
+end
+
+-- Return to camp / place artifact -----------------------------------------------------------------------
+-- The single Return-to-Camp action: the button (Activated) and the R key both come through here. While carrying an
+-- important artifact the action is blocked with an explanation; the server enforces the same rule independently.
 function UI.RequestReturnToCamp()
 	if not Config.ReturnToCamp.Enabled then
+		return
+	end
+	if State.Data.Carrying then
+		toast(CARRY_BLOCKED_TEXT, P.Danger)
+		Audio.Play("Error")
 		return
 	end
 	Audio.Play("UI")
 	Remotes.Get("ReturnToCamp"):FireServer()
 end
 
-function UI.OpenShop()
-	shopOpen = true
-	menuChanged()
-	refs.shop.Visible = true
-	renderShop()
-	Audio.Play("UI")
-end
-
-function UI.CloseShop()
-	local was = shopOpen
-	shopOpen = false
-	if was then
-		menuChanged()
+function UI.RequestPlaceArtifact()
+	if not State.Data.Carrying then
+		return
 	end
-	refs.shop.Visible = false
+	Audio.Play("UI")
+	Remotes.Get("PlaceArtifact"):FireServer()
 end
 
 -- Treasure cards --------------------------------------------------------------------------------
-function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
+function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?, carry: boolean?)
 	local def = Defs.Treasure[id]
 	if not def then
 		return
@@ -272,7 +187,9 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 	if big then
 		label(card, def.Name:upper(), 24, P.Cream, { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(10, 4),
 			TextXAlignment = Enum.TextXAlignment.Left })
-		label(card, ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value)), 20, rar.Color, {
+		local sub = carry and ("IMPORTANT  -  CARRY IT TO CAMP  -  " .. Util.FormatCash(def.Value))
+			or ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value))
+		label(card, sub, carry and 15 or 20, rar.Color, {
 			Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(10, 38), TextXAlignment = Enum.TextXAlignment.Left })
 		if isNew then
 			label(card, "NEW!", 20, P.Gold, { Size = UDim2.fromOffset(60, 26), Position = UDim2.new(1, -68, 0, 6) })
@@ -281,7 +198,7 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 		label(card, ("+ %s   %s"):format(def.Name, Util.FormatCash(def.Value)), 17, rar.Color, {
 			Size = UDim2.new(1, -12, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = Enum.TextXAlignment.Left })
 	end
-	if not stored then
+	if not stored and not carry then
 		card.GroupColor3 = Color3.fromRGB(200, 120, 120)
 	end
 	TweenService:Create(sc, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
@@ -290,10 +207,8 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 		task.wait(0.45)
 		wrap:Destroy()
 	end)
-	-- keep list short
-	local kids = refs.cards:GetChildren()
 	local frames = {}
-	for _, k in ipairs(kids) do
+	for _, k in ipairs(refs.cards:GetChildren()) do
 		if k:IsA("Frame") then
 			table.insert(frames, k)
 		end
@@ -304,18 +219,18 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
 	end
 end
 
-local function showSold(amount: number, count: number)
-	Audio.Play("Sell")
+local function showPopup(amountText: string, subText: string, sound: string)
+	Audio.Play(sound)
 	local pop = refs.sold
 	pop.Visible = true
-	refs.soldAmount.Text = "+" .. Util.FormatCash(amount)
-	refs.soldSub.Text = ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S")
+	refs.soldAmount.Text = amountText
+	refs.soldSub.Text = subText
 	pop.GroupTransparency = 0
 	refs.soldScale.Scale = 0.5
 	TweenService:Create(refs.soldScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1.1 }):Play()
 	refs.soldToken = (refs.soldToken or 0) + 1
 	local token = refs.soldToken
-	task.delay(1.6, function()
+	task.delay(1.8, function()
 		if refs.soldToken == token then
 			local tw = TweenService:Create(pop, TweenInfo.new(0.5), { GroupTransparency = 1 })
 			tw:Play()
@@ -325,6 +240,10 @@ local function showSold(amount: number, count: number)
 			end
 		end
 	end)
+end
+
+local function showSold(amount: number, count: number)
+	showPopup("+" .. Util.FormatCash(amount), ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S"), "Sell")
 end
 
 -- Build ---------------------------------------------------------------------------------------------
@@ -350,10 +269,17 @@ local function build()
 	refs.bagValue = label(stats, "Backpack worth ~$0", 15, P.Cream, { Size = UDim2.new(1, -24, 0, 18), Position = UDim2.fromOffset(12, 80),
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
 
+	-- Compact "Carrying" indicator (under the stats panel)
+	refs.carry = panel(gui, UDim2.fromOffset(250, 34), UDim2.fromOffset(10, 118))
+	refs.carry.Visible = false
+	stroke(refs.carry, P.Gold, 2)
+	refs.carryText = label(refs.carry, "", 17, P.Gold, { Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+
 	-- Top-center: objective + notify
 	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(0.5, 0, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0 })
-	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.5, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
+	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.62, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 48), Visible = false })
 
 	-- Top-right: depth
@@ -365,39 +291,36 @@ local function build()
 	refs.cards = mk("Frame", { Size = UDim2.fromOffset(260, 300), Position = UDim2.new(0, 10, 0.5, -60), BackgroundTransparency = 1 }, gui)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 6) }, refs.cards)
 
-	-- Sold popup
-	refs.sold = mk("CanvasGroup", { Size = UDim2.fromOffset(360, 130), AnchorPoint = Vector2.new(0.5, 0.5),
+	-- Popup (sold / artifact secured)
+	refs.sold = mk("CanvasGroup", { Size = UDim2.fromOffset(460, 130), AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.36), BackgroundTransparency = 1, Visible = false }, gui)
 	refs.soldScale = mk("UIScale", {}, refs.sold)
 	refs.soldAmount = label(refs.sold, "+$0", 76, P.Gold, { Size = UDim2.new(1, 0, 0, 84), TextStrokeTransparency = 0 })
 	refs.soldSub = label(refs.sold, "", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 88) })
 
-	-- Return to camp
-	local ret = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(150, 46),
-		UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
-	ret.Activated:Connect(function()
-		UI.RequestReturnToCamp()
-	end)
-	refs.returnBtn = ret
+	-- Bottom-left stack: explanation, place artifact, return to camp
+	local base = TOUCH and 230 or 70
+	refs.returnBtn = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(170, 46), UDim2.new(0, 12, 1, -base), P.Cream)
+	refs.returnBtn.Activated:Connect(UI.RequestReturnToCamp)
 	if not Config.ReturnToCamp.Enabled then
-		ret.Visible = false
+		refs.returnBtn.Visible = false
 	end
+	refs.placeBtn = button(gui, TOUCH and "PLACE ARTIFACT" or "PLACE ARTIFACT [X]", UDim2.fromOffset(220, 46),
+		UDim2.new(0, 12, 1, -(base + 54)), Color3.fromHex("5BA7E8"))
+	refs.placeBtn.TextSize = 18
+	refs.placeBtn.Visible = false
+	refs.placeBtn.Activated:Connect(UI.RequestPlaceArtifact)
+	refs.carryNote = label(gui, CARRY_BLOCKED_TEXT, 14, P.Danger, { Size = UDim2.fromOffset(250, 36),
+		Position = UDim2.new(0, 12, 1, -(base + 98)), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Bottom,
+		TextWrapped = true, Visible = false })
 
-	-- Shop modal
-	local shop = mk("Frame", { Size = UDim2.fromOffset(560, 420), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-		BackgroundColor3 = P.Dark, BackgroundTransparency = 0.05, Visible = false }, gui)
-	corner(shop, 16)
-	stroke(shop, P.Gold, 4)
-	label(shop, "EQUIPMENT SHOP", 32, P.Gold, { Size = UDim2.new(1, -70, 0, 44), Position = UDim2.fromOffset(16, 6), TextXAlignment = Enum.TextXAlignment.Left })
-	local close = button(shop, "X", UDim2.fromOffset(52, 44), UDim2.new(1, -62, 0, 8), P.Danger)
-	close.MouseButton1Click:Connect(UI.CloseShop)
-	refs.shopList = mk("ScrollingFrame", { Size = UDim2.new(1, -24, 1, -64), Position = UDim2.fromOffset(12, 56), BackgroundTransparency = 1,
-		BorderSizePixel = 0, ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, shop)
-	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }, refs.shopList)
-	refs.shop = shop
-	-- Invisible Modal button: while the shop is visible the mouse cursor is released (even in first person).
-	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
-		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, shop)
+	-- Dynamite count (desktop badge; touch gets a THROW button from ThrowController)
+	refs.dynBadge = panel(gui, UDim2.fromOffset(200, 34), UDim2.new(1, -212, 1, -(TOUCH and 270 or 52)))
+	refs.dynBadge.Visible = false
+	refs.dynText = label(refs.dynBadge, "", 17, P.Cream, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
+
+	-- Shop
+	ShopUI.Build(gui, menuChanged)
 	refs.cursorFree = mk("TextButton", { Name = "CursorFree", Text = "", BackgroundTransparency = 1, Modal = true,
 		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5), Visible = false }, gui)
 end
@@ -420,14 +343,34 @@ function UI.Init()
 		refs.barFill.BackgroundColor3 = frac >= 1 and P.Danger or (frac >= 0.7 and P.Gold or P.Teal)
 		refs.barText.Text = d.Count >= d.Capacity and "FULL!" or refs.barText.Text
 		refs.bagValue.Text = "Backpack worth ~" .. Util.FormatCash(d.BackpackValue)
+		-- carry UI
+		refs.carry.Visible = d.Carrying ~= nil
+		refs.placeBtn.Visible = d.Carrying ~= nil
+		refs.carryNote.Visible = d.Carrying ~= nil
+		if d.Carrying then
+			refs.carryText.Text = "Carrying: " .. d.Carrying.Name
+		end
+		-- dynamite badge
+		local dyn = d.Consumables and d.Consumables.dynamite or 0
+		refs.dynBadge.Visible = dyn > 0 and not TOUCH
+		refs.dynText.Text = ("DYNAMITE x%d   [G] throw"):format(dyn)
 		updateObjective(d)
-		if shopOpen then
-			renderShop()
+		if ShopUI.IsOpen() then
+			ShopUI.Render()
 		end
 	end)
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
-	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number)
+	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number)
+		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper(), "Reveal")
+	end)
+	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
+		if reason == "CARRYING" then
+			-- rejected: the cooldown is NOT consumed, so do not touch returnReadyAt
+			toast(CARRY_BLOCKED_TEXT, P.Danger)
+			Audio.Play("Error")
+			return
+		end
 		returnReadyAt = os.clock() + math.max(seconds, 0)
 		if ok then
 			toast("Back at Base Camp", P.Teal)
@@ -437,22 +380,25 @@ function UI.Init()
 			Audio.Play("Error")
 		end
 	end)
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed or input.KeyCode ~= Enum.KeyCode.R then
-			return
-		end
-		if UserInputService:GetFocusedTextBox() or shopOpen then
-			return
-		end
-		UI.RequestReturnToCamp()
-	end)
 	Remotes.Get("Notify").OnClientEvent:Connect(function(text, kind)
 		local c = kind == "Danger" and P.Danger or (kind == "Good" and P.Teal or P.Cream)
 		toast(text, c)
 		Audio.Play(kind == "Danger" and "Error" or (kind == "Good" and "Buy" or "UI"))
 	end)
 
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or UserInputService:GetFocusedTextBox() then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.R and not ShopUI.IsOpen() then
+			UI.RequestReturnToCamp()
+		elseif input.KeyCode == Enum.KeyCode.X and not TOUCH then
+			UI.RequestPlaceArtifact()
+		end
+	end)
+
 	RunService.Heartbeat:Connect(function(dt)
+		ShopUI.Step(dt)
 		-- rolling cash
 		if shownCash ~= targetCash then
 			local diff = targetCash - shownCash
@@ -473,19 +419,25 @@ function UI.Init()
 				refs.depth.Text = "SURFACE"
 				refs.layer.Text = (p - Config.Camp.Position).Magnitude < 40 and "BASE CAMP" or "DIG SITE"
 			end
-			if shopOpen and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
+			if ShopUI.IsOpen() and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
 				UI.CloseShop()
 			end
 		end
-		-- return-to-camp cooldown readout
-		local left = returnReadyAt - os.clock()
+		-- return-to-camp button: unavailable (with explanation) while carrying, else the cooldown readout
 		local idle = TOUCH and "TO CAMP" or "TO CAMP [R]"
-		if left > 0 then
+		local left = returnReadyAt - os.clock()
+		if State.Data.Carrying then
+			refs.returnBtn.Text = "TO CAMP - CARRYING"
+			refs.returnBtn.BackgroundColor3 = Color3.fromHex("8A8578")
+			refs.returnBtn.TextSize = 16
+		elseif left > 0 then
 			refs.returnBtn.Text = ("CAMP  %ds"):format(math.ceil(left))
 			refs.returnBtn.BackgroundColor3 = Color3.fromHex("B9B2A0")
+			refs.returnBtn.TextSize = 22
 		elseif refs.returnBtn.Text ~= idle then
 			refs.returnBtn.Text = idle
 			refs.returnBtn.BackgroundColor3 = P.Cream
+			refs.returnBtn.TextSize = 22
 		end
 		-- pulse the bar when full
 		if State.Data.Count >= State.Data.Capacity then

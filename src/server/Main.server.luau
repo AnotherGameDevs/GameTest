@@ -13,6 +13,9 @@ local EquipmentService = require(Services.EquipmentService)
 local DigService = require(Services.DigService)
 local EconomyService = require(Services.EconomyService)
 local RateLimiter = require(Services.RateLimiter)
+local MetricsService = require(Services.MetricsService)
+local ArtifactService = require(Services.ArtifactService)
+local DynamiteService = require(Services.DynamiteService)
 
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
@@ -22,6 +25,9 @@ for name, init in pairs({
 	Equipment = EquipmentService.Init,
 	Dig = DigService.Init,
 	Economy = EconomyService.Init,
+	Metrics = MetricsService.Init,
+	Artifacts = ArtifactService.Init,
+	Dynamite = DynamiteService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then

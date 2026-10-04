@@ -38,7 +38,6 @@ Config.Layers = {
 Config.Dig = {
 	ReachTolerance = 2, -- studs of slack the SERVER adds to tool Reach (movement/latency). Client indicator uses none.
 	CooldownTolerance = 0.80, -- server accepts hits at >= 80% of the tool's nominal interval
-	SplashFraction = 0.55, -- damage fraction applied to neighbours when tool DigRadius > 0
 	MaxBroadcastDistance = 220, -- only clients within this distance get hit feedback
 }
 
@@ -53,6 +52,36 @@ Config.Camp = {
 	SellZoneOffset = Vector3.new(-14, 0, 0),
 	ShopOffset = Vector3.new(14, 0, -4),
 	SellZoneRadius = 9,
+}
+
+-- "Important" artifacts (Defs.Treasure[...].RequiresCarry = true) must be physically carried to camp.
+Config.Artifacts = {
+	SpawnDelay = 1.3, -- seconds after discovery before the physical artifact appears (lets the reveal play first)
+	PickupReach = 14, -- studs from player to artifact for a pickup
+	DepositReach = 16, -- studs from player to the receiving table for a deposit
+	PlaceReach = 8, -- max horizontal distance a placed artifact may land from the player
+	CarryScale = 0.7, -- the held model is drawn at this fraction of its world size
+	CarryRotation = Vector3.new(90, 0, 0), -- degrees applied to the held model (tune after seeing the pose)
+	CarryGrip = CFrame.new(0, -0.8, 0), -- Tool.Grip for the held artifact
+	DisplaySeconds = 3, -- how long a deposited artifact sits on the receiving table
+}
+
+-- Fixed physical exit from the mine: a ladder shaft outside the destructible grid, on the camp (south) edge.
+Config.Exit = {
+	Enabled = true,
+	CenterX = -26, -- world X of the shaft centre (edges should land on cell boundaries: 4-stud multiples)
+	Width = 12,
+	Run = 8, -- studs the shaft extends south from the grid edge
+}
+
+Config.Shop = {
+	SequentialTools = true, -- a tool tier can only be bought once the previous tier is owned
+}
+
+-- Server-side balance telemetry (printed to the server Output). Used to measure blocks/min and cash/min.
+Config.Metrics = {
+	Enabled = true,
+	PrintInterval = 60, -- seconds per reporting window
 }
 
 Config.ReturnToCamp = {
@@ -70,7 +99,7 @@ Config.Data = {
 	Enabled = true, -- false = never touch DataStore (everything in memory)
 	StoreName = "DigAndRun_PlayerData_v1",
 	AutosaveInterval = 60,
-	CurrentVersion = 1,
+	CurrentVersion = 2, -- v2: eight-tier tool progression (see DataMigrations)
 }
 
 Config.RateLimits = { -- { max calls, per seconds }
@@ -78,6 +107,9 @@ Config.RateLimits = { -- { max calls, per seconds }
 	RequestPurchase = { 5, 2 },
 	ReturnToCamp = { 2, 5 },
 	ClientReady = { 3, 5 },
+	RequestEquip = { 5, 2 },
+	PlaceArtifact = { 3, 3 },
+	ThrowDynamite = { 4, 3 },
 }
 
 return Config

@@ -9,6 +9,7 @@ local Camera = require(Controllers.CameraController)
 local Effects = require(Controllers.EffectsController)
 local Dig = require(Controllers.DigController)
 local Interaction = require(Controllers.InteractionController)
+local Throw = require(Controllers.ThrowController)
 
 State.Init()
 UI.Init()
@@ -16,6 +17,7 @@ Camera.Init()
 Effects.Init()
 Dig.Init()
 Interaction.Init()
+Throw.Init()
 
 -- Ask for state until the server answers (data may still be loading).
 task.spawn(function()

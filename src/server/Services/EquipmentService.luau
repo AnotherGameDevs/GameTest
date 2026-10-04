@@ -3,55 +3,20 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Defs = require(ReplicatedStorage.Shared.Defs)
-local Config = require(ReplicatedStorage.Shared.Config)
+local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+local CarryRegistry = require(script.Parent.CarryRegistry)
 local DataService = require(script.Parent.DataService)
 
 local EquipmentService = {}
 
-local function buildShovel(toolId: string): Tool
-	local def = Defs.Tools[toolId]
-	local s = def.Scale
-	local P = Config.Palette
-
-	local tool = Instance.new("Tool")
-	tool.Name = "Shovel"
-	tool.CanBeDropped = false
-	tool.ManualActivationOnly = true
-	tool.RequiresHandle = true
+local function buildShovel(data): Tool
+	local def = Defs.Tools[data.Equipment.ToolId]
+	local skin = data.EquippedCosmetics and data.EquippedCosmetics.ToolSkin
+	-- appearance is resolved separately from stats: a skin can change the model but never the numbers
+	local tool = ToolModels.BuildTool(Appearances.Resolve(def, skin))
 	tool.ToolTip = def.DisplayName
-	tool:SetAttribute("ToolId", toolId)
-
-	local handle = Instance.new("Part")
-	handle.Name = "Handle"
-	handle.Size = Vector3.new(0.5, 4.2 * s, 0.5)
-	handle.Color = P.Dark
-	handle.Material = Enum.Material.Wood
-	handle.CanCollide = false
-	handle.Massless = true
-	handle.Parent = tool
-
-	local function add(name: string, size: Vector3, offset: Vector3, color: Color3)
-		local p = Instance.new("Part")
-		p.Name = name
-		p.Size = size
-		p.Color = color
-		p.Material = Enum.Material.SmoothPlastic
-		p.CanCollide = false
-		p.Massless = true
-		p.Parent = tool
-		local w = Instance.new("Weld")
-		w.Part0 = handle
-		w.Part1 = p
-		w.C0 = CFrame.new(offset)
-		w.Parent = p
-	end
-	add("Blade", Vector3.new(1.8 * s, 1.7 * s, 0.3 * s), Vector3.new(0, 2.5 * s, 0), def.Color)
-	add("Grip", Vector3.new(1.5 * s, 0.4, 0.4), Vector3.new(0, -2.1 * s, 0), P.Dark)
-	if def.DigRadius > 0 then
-		add("Spike", Vector3.new(0.5 * s, 0.9 * s, 0.4 * s), Vector3.new(0, 3.7 * s, 0), P.Gold)
-	end
-
-	tool.Grip = CFrame.new(0, -1.0 * s, 0)
+	tool:SetAttribute("ToolId", data.Equipment.ToolId)
 	return tool
 end
 
@@ -78,7 +43,10 @@ function EquipmentService.Refresh(player: Player)
 		return
 	end
 	clearTools(player)
-	local tool = buildShovel(data.Equipment.ToolId)
+	if CarryRegistry.IsCarrying(player) then
+		return -- the shovel stays stowed while carrying; it is rebuilt and re-equipped on place/deposit
+	end
+	local tool = buildShovel(data)
 	tool.Parent = player:WaitForChild("Backpack")
 	humanoid:EquipTool(tool)
 end
@@ -99,7 +67,8 @@ function EquipmentService.Init()
 			end
 			-- Keep the shovel in hand: if it ever gets unequipped, put it back next frame.
 			character.ChildRemoved:Connect(function(child)
-				if child:IsA("Tool") and child.Name == "Shovel" and child.Parent == player:FindFirstChild("Backpack") then
+				if child:IsA("Tool") and child.Name == "Shovel" and child.Parent == player:FindFirstChild("Backpack")
+					and not CarryRegistry.IsCarrying(player) then
 					task.defer(function()
 						local h = character:FindFirstChildOfClass("Humanoid")
 						if h and h.Health > 0 and child.Parent == player.Backpack then

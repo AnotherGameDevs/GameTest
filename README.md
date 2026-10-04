@@ -10,6 +10,11 @@
 Source of truth is the Rojo project (`default.project.json`, `src/`). Rebuild the place with:
 `rojo build default.project.json -o Build/DigAndRun.rbxlx`  — or `rojo serve` for live sync.
 
+## Tests (pure logic, no Roblox needed)
+`luau tests/artifact_test.luau` (artifact ownership/state machine) and `luau tests/migration_test.luau` (save migration).
+`python3 tools/economy_sim.py` prints the provisional economy model. Docs: `docs/TOOL_TIERS.md`, `docs/ART_STANDARD.md`,
+`docs/ARTIFACT_RECOVERY.md`.
+
 ## Layout
 - `src/shared`  Config (all balance), Defs (tools/backpacks/treasure/rarity), Grid, Remotes, Util
 - `src/server`  Services: Data, Site, Dig, Loot, Inventory, Economy, Equipment, State, WorldBuilder, RateLimiter, Analytics
