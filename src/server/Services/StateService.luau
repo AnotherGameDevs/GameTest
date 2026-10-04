@@ -9,6 +9,7 @@ local Defs = require(ReplicatedStorage.Shared.Defs)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
 local StateService = {}
+StateService.DevInfo = nil :: ((Player) -> any)? -- set by DevService; asks the SERVER whether this player is authorised
 local pending: { [Player]: boolean } = {}
 local stateRemote = Remotes.Get("PlayerState")
 
@@ -34,6 +35,7 @@ function StateService.Snapshot(player: Player)
 		OwnedTools = data.OwnedTools,
 		OwnedBackpacks = data.OwnedBackpacks,
 		Save = DataService.SaveInfo(player),
+		Dev = StateService.DevInfo and StateService.DevInfo(player) or nil, -- nil for ordinary players: the panel never exists for them
 		Stats = data.Stats,
 		Collection = data.Collection,
 		Display = data.Display,

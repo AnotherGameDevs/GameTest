@@ -72,6 +72,44 @@ if "StudioStoreName" not in ds or "ProfileStore.Save" not in ds or "ProfileStore
     problems.append("DataService must use ProfileStore and the isolated Studio store")
 if re.search(r"if isStudio\(\) then\s*return\s*end", ds.split("BindToClose")[1] if "BindToClose" in ds else ""):
     problems.append("DataService.BindToClose must also flush saves in Studio")
+# ---- equipment effects must never look at hidden rewards ----
+FORBIDDEN_FX = r"LootBoard|LootPlan|LootService|SiteService|TreasureModels|Defs\.Treasure|\bRarity\b|Rarity\.|\bPeek\b|TreasureId|\.Loot\b|RelicRules"
+for rel in ("shared/ToolFx.luau", "client/Controllers/ToolFxController.luau"):
+    c = code_of(rel)
+    if re.search(FORBIDDEN_FX, c):
+        problems.append(f"{rel}: tool effects must not read loot / rarity / treasure information (found {re.search(FORBIDDEN_FX, c).group(0)!r})")
+fxc = code_of("client/Controllers/EffectsController.luau")
+m = re.search(r"local function onHit\(.*?\nend\n", fxc, re.S)
+if not m:
+    problems.append("EffectsController: onHit not found")
+elif re.search(FORBIDDEN_FX, m.group(0)):
+    problems.append("EffectsController.onHit (the dig-result effect path) must not read loot / rarity / treasure information")
+mi = re.search(r"function Effects\.Impact\(.*?\nend\n", fxc, re.S)
+if not mi or re.search(FORBIDDEN_FX, mi.group(0)):
+    problems.append("EffectsController.Impact must exist and must not read loot information")
+# ---- developer test mode: server-authorised, never client-trusted, never written to a profile ----
+dev = code_of("server/Services/DevService.luau")
+hnd = dev[dev.index("local function handle"):] if "local function handle" in dev else ""
+if not hnd or hnd.find("accessFor(player)") < 0 or hnd.find("access.Allowed") < 0 or hnd.find("DevAccess.Permit") < 0 or not (hnd.find("accessFor(player)") < hnd.find("access.Allowed") < hnd.find("DevAccess.Validate") < hnd.find("DevAccess.Permit") < hnd.find("actions[action]")):
+    problems.append("DevService.handle must check access, then validate, then permit, before running any action")
+for path, text in files.items():
+    rel = os.path.relpath(path, root).replace(os.sep, "/")
+    c = "\n".join(l.split("--")[0] for l in text.splitlines())
+    if "DevRequest" in c and rel not in ("shared/Remotes.luau", "shared/Config.luau", "server/Services/DevService.luau", "client/Controllers/DevPanel.luau"):
+        problems.append(f"{rel}: only DevService (server) and DevPanel (client) may use the DevRequest remote")
+    if rel.startswith("client/") and re.search(r"AllowedUserIds|TestPlaceIds|IsStudio", c):
+        problems.append(f"{rel}: the client must not decide developer access (found an allowlist / IsStudio reference)")
+    if rel.startswith("server/Services/Dev") and rel != "server/Services/DevService.luau" and re.search(r"DataStoreService|UpdateAsync|SetAsync|ProfileStore", c):
+        problems.append(f"{rel}: developer helpers must never touch a DataStore")
+if re.search(r"DataStore|UpdateAsync|SetAsync|\.Save\(", dev):
+    problems.append("DevService must never save or touch a DataStore")
+if "ProfileOverlay.SaveSource" not in ds or re.search(r"DeepCopy\(p\.Data\)", ds.split("function DataService.Save")[1].split("local function load")[0]):
+    problems.append("DataService.Save must snapshot ProfileOverlay.SaveSource(p), never p.Data directly (test overlay must not be written)")
+if "ProfileOverlay.MarkDirty" not in ds:
+    problems.append("DataService.MarkDirty must go through ProfileOverlay.MarkDirty")
+for rel in ("server/Services/ArtifactService.luau", "server/Services/RelicService.luau"):
+    if "DevScenario.IsTest" not in code_of(rel):
+        problems.append(f"{rel}: deposit must refuse to pay a developer-created artifact into a normal profile (DevScenario)")
 bi = files[os.path.join(root, "shared", "BuildInfo.luau")]
 print("build id in source:", re.search(r'Id = "([^"]+)"', bi).group(1))
 print(f"checked {len(files)} files, {len(events)} remotes, {len(limits)} rate-limit keys")

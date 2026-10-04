@@ -93,6 +93,21 @@ function MineLifecycle:Update(now: number, depletion: number, players: number, h
 	return nil
 end
 
+-- A reset requested on purpose (developer test mode only; no client can reach this). It is exactly a scheduled reset that starts now: the same
+-- Warning -> Evacuating -> Regenerating -> Active path, only from Active (so it can never overlap or repeat a reset). `warningSeconds` shortens
+-- the countdown for testing.
+function MineLifecycle:RequestManual(now: number, warningSeconds: number?): boolean
+	if self.state ~= "Active" then
+		return false
+	end
+	self.state = "Warning"
+	self.reason = "Manual"
+	self.endsAt = now + math.max(warningSeconds or self.policy.WarningSeconds, 1)
+	self.resets += 1
+	self.lastTick = now
+	return true
+end
+
 function MineLifecycle:IsHolding(now: number): boolean
 	return self.state == "Warning" and now >= self.endsAt and self.heldSeconds < (self.policy.RelicHoldSeconds or 0)
 end

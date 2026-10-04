@@ -26,6 +26,7 @@ local EVENTS = {
 	"RelicFx", -- S->C  (kind, userId, position) hit / shove feedback
 	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
+	"DevRequest", -- C->S  (action, arg) developer test action; the SERVER re-checks DevAccess on every call, the client is never trusted
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
 }
 

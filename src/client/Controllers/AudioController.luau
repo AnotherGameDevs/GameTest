@@ -22,6 +22,7 @@ Audio.Sounds = {
 	Deposit = { Id = PING, Volume = 1.0, Pitch = 1.0, Notes = { 0.7, 0.9, 1.1, 1.4 }, NoteGap = 0.09, MinGap = 0.3 },
 	SetComplete = { Id = PING, Volume = 1.0, Pitch = 1.0, Notes = { 1.0, 1.25, 1.5, 2.0 }, NoteGap = 0.11, MinGap = 0.5 },
 	Error = { Id = "rbxasset://sounds/uuhhh.mp3", Volume = 0.4, Pitch = 1.2, MinGap = 0.25 },
+	Tick = { Id = "rbxasset://sounds/switch.wav", Volume = 0.3, Pitch = 1.0, MinGap = 0.1 }, -- mechanical accent for drills (placeholder id, same as UI)
 	UI = { Id = "rbxasset://sounds/switch.wav", Volume = 0.5, Pitch = 1.0, MinGap = 0.05 },
 }
 

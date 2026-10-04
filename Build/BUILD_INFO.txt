@@ -1,3 +1,3 @@
-file: Build/DigAndRun.rbxlx  size: 509784  sha256: 790d86da0c7702804ef245e08c478f02425fcd6d9629c4d8c3a306315b2d1875
-scripts in file: 79   src files checked: 79   build id in source: 20261004-1743-0abbbb4f   build id in file: 20261004-1743-0abbbb4f
+file: Build/DigAndRun.rbxlx  size: 583095  sha256: 26c1516452774e95b6a874aa170dd45ac1775d4878eee8f557f6105c3da54f15
+scripts in file: 87   src files checked: 87   build id in source: 20261004-1801-33f631b1   build id in file: 20261004-1801-33f631b1
 OK: every source script is present in the file, and the build id matches.

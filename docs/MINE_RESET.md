@@ -44,3 +44,9 @@ reveal models, block shake and remembered faces when `MineGeneration` changes.
 Verified: transition order, no overlap, requests refused from the deadline, new generation id, old-generation claims fail, min lifetime,
 scheduled timing, empty-server pause, no reset loops, recovery never deposits/duplicates and needs an owner pickup. NOT verified: the
 service in a live server (evacuation, models on the recovery pad, elevator reset, UI/audio, late-join display) — `docs/PLAYTEST_PLAN.md` #23-26.
+
+## Developer-requested reset (test mode only)
+`MineLifecycle:RequestManual(now, warningSeconds)` starts the **same** Warning → Evacuating → Regenerating → Active path early (reason `"Manual"`),
+only from `Active`, so it cannot overlap or repeat a reset. It is reachable only through `MineShiftService.RequestReset`, which only `DevService`
+calls after its server-side access check (Studio, or an allowlisted account on a configured test place). No client remote can start a reset.
+See `docs/DEVELOPER_MODE.md`.

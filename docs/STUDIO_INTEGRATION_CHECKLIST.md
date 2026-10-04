@@ -1,7 +1,7 @@
 # Studio integration checklist (one prioritised list)
 
-**File to open:** `Build/DigAndRun.rbxlx` (also delivered as `DigAndRun_build_20261004-1743-0abbbb4f.rbxlx`), branch `claude/amazing-albattani-9y7to1`.
-Build id **20261004-1743-0abbbb4f** — must appear in Pause menu (P) as `Build:` and in server Output; size 509,784 bytes, SHA-256 `790d86da0c7702804ef245e08c478f02425fcd6d9629c4d8c3a306315b2d1875` (see `Build/BUILD_INFO.txt`).
+**File to open:** `Build/DigAndRun.rbxlx` (also delivered as `DigAndRun_build_20261004-1801-33f631b1.rbxlx`), branch `claude/amazing-albattani-9y7to1`.
+Build id **20261004-1801-33f631b1** — must appear in Pause menu (P) as `Build:` and in server Output; size 583,095 bytes, SHA-256 `26c1516452774e95b6a874aa170dd45ac1775d4878eee8f557f6105c3da54f15` (see `Build/BUILD_INFO.txt`).
 If the build id shown differs you opened an older file. After editing code run `bash tools/build.sh` (stamps a new id, tests, builds, verifies every script is in the file).
 **Engine verification status: INCOMPLETE. Every row below is `not run` until you observe it.** Offline tests (`bash tests/run_all.sh`, `python3 tools/preflight.py`) do not count as engine checks.
 Stop at the first failing step in a section, copy the Output errors and tell me which step.
@@ -22,6 +22,9 @@ Test → Clients and Servers → 2 Players (1 for sections A–E). View → Outp
 * **Untouched dirt shows no artifact:** walk the whole mine at spawn, look at every exposed top-layer face and walls of the entrance cut; nothing recognisable as an artifact/coin/shard anywhere until a block is dug. Repeat after a mine reset and when joining a running server.
 * **SET COMPLETE banner:** complete a collection set; text fully visible at 1920×1080, 1366×768 and a small window (resize the Game window); centered, not over the crosshair, disappears after ~4 s, two completions queue; does not repeat on rejoin.
 * **Save notice:** with an unpublished/API-off session the HUD shows "Test session — progress will not save"; in the isolated test experience it does not. Then run the rejoin test in `docs/ISOLATED_TEST_EXPERIENCE.md`.
+
+### A3. Equipment effects and developer mode (priority 1c — all `not run`)
+Use the DEV panel (`\` or the amber DEV button; Studio only) to unlock everything, then run the Studio checks in **`docs/EFFECTS.md`** (7 tools) and **`docs/DEVELOPER_MODE.md`** (panel, isolation, relic helper, reset helper).
 
 ## B. Fresh player: mine, sell, purchase, rejoin
 | Step | Expected | Result |

@@ -11,6 +11,7 @@ local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
 local SaveMode = require(script.Parent.SaveMode)
 local ProfileStore = require(script.Parent.ProfileStore)
+local ProfileOverlay = require(script.Parent.ProfileOverlay)
 local SessionLock = require(script.Parent.SessionLock)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
@@ -94,7 +95,10 @@ local diagnostics = { LoadsOk = 0, LoadsFailed = 0, LockRefusals = 0, SavesOk = 
 
 local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
 local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
-local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean } } = {}
+-- Developer test overlay: while `Overlay` is true, `Data` (the table every service reads and writes through DataService.Get) holds TEST data and the
+-- player's real profile is parked, untouched, in `Normal`. Save/autosave/leave/shutdown always write `Normal` (never the overlay), and MarkDirty is a
+-- no-op during the overlay, so nothing granted in test mode can reach a DataStore.
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean, Overlay: boolean, Normal: any } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
 local lastSaveWarn: { [Player]: number } = {}
 local lastSaveLog: { [Player]: number } = {}
@@ -137,10 +141,7 @@ function DataService.Get(player: Player)
 end
 
 function DataService.MarkDirty(player: Player)
-	local p = profiles[player]
-	if p then
-		p.Dirty = true
-	end
+	ProfileOverlay.MarkDirty(profiles[player]) -- a no-op while the developer test overlay is active
 end
 
 -- Writes the profile. `release` also drops the session lock (player leaving / server closing).
@@ -164,7 +165,7 @@ function DataService.Save(player: Player, force: boolean?, release: boolean?): b
 	end
 	p.Saving = true
 	p.Dirty = false
-	local snapshot = Util.DeepCopy(p.Data)
+	local snapshot = Util.DeepCopy(ProfileOverlay.SaveSource(p)) -- the REAL profile, never the test overlay
 	local result = ProfileStore.Save(store, key(player), snapshot, release == true, storeCtx, 3)
 	local ok, lostLock, err = result.Ok, result.LostLock, result.Err
 	p.Saving = false
@@ -250,7 +251,7 @@ local function load(player: Player)
 	if not noSave then
 		diagnostics.LoadsOk += 1
 	end
-	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false }
+	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false, Overlay = false, Normal = nil }
 	for _, cb in ipairs(loadedCallbacks) do
 		task.spawn(cb, player, data)
 	end
@@ -315,9 +316,37 @@ function DataService.Init()
 	end)
 end
 
+-- Developer test overlay (docs/DEVELOPER_MODE.md). Callers must have passed DevAccess; these functions only manage the data swap. -----------
 -- Counters for the server Output / tests; contains no profile contents.
 function DataService.Diagnostics()
 	return table.clone(diagnostics)
+end
+
+function DataService.InTestMode(player: Player): boolean
+	return ProfileOverlay.Active(profiles[player])
+end
+
+-- Parks the real profile and starts the overlay from a copy of it (so test mode begins from your own progress).
+function DataService.EnterTestMode(player: Player): boolean
+	if ProfileOverlay.Enter(profiles[player]) then
+		print(("[DataService] TEST MODE ON for %s: the real profile is parked and will not be written by test actions."):format(player.Name))
+		return true
+	end
+	return false
+end
+
+-- Replaces the overlay with a brand-new default profile (still the overlay; the real profile is untouched).
+function DataService.FreshTestProfile(player: Player): boolean
+	return ProfileOverlay.Fresh(profiles[player], defaultData())
+end
+
+-- Drops the overlay and restores the real profile exactly as it was when test mode started.
+function DataService.ExitTestMode(player: Player): boolean
+	if ProfileOverlay.Exit(profiles[player]) then
+		print(("[DataService] TEST MODE OFF for %s: the real profile is restored."):format(player.Name))
+		return true
+	end
+	return false
 end
 
 function DataService.StorageMode(): string
@@ -330,7 +359,7 @@ function DataService.SaveInfo(player: Player)
 	if not p then
 		return nil
 	end
-	return { Saving = not p.NoSave, Reason = p.SaveReason, Mode = storageMode }
+	return { Saving = not p.NoSave, Reason = p.SaveReason, Mode = storageMode, Overlay = p.Overlay }
 end
 
 return DataService

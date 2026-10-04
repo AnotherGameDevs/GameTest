@@ -211,6 +211,19 @@ Config.Data = {
 	CurrentVersion = 3, -- v2: eight-tier tool progression; v3: collection display + onboarding progress
 }
 
+-- Developer test mode (docs/DEVELOPER_MODE.md). The SERVER decides who may use it (shared/DevAccess.luau); nothing here is read from a client.
+--   * Studio sessions: every player may use it (a Studio server is private to you).
+--   * Published servers: ONLY when game.PlaceId is in TestPlaceIds (your private TEST experience's place id) AND the player's UserId is in
+--     AllowedUserIds. Both lists are empty by default, so published access is OFF until you fill them in.
+--   * Shared-world actions (relic event, mine reset, artifact spawn) need the same condition, so they can never run on a production place.
+Config.Dev = {
+	AllowedUserIds = {}, -- <- put YOUR Roblox UserId here, e.g. { 123456789 }
+	TestPlaceIds = {}, -- <- put the PlaceId of your private TEST experience here, e.g. { 987654321 }
+	MaxCash = 1000000, -- largest single cash grant (test overlay only)
+	ResetWarningSeconds = 15, -- countdown used when the panel requests a mine reset (the normal reset uses Config.Reset.WarningSeconds)
+	ActionCooldown = 0.25, -- seconds between developer actions per player
+}
+
 Config.RateLimits = { -- { max calls, per seconds }
 	DigHit = { 14, 1 },
 	RequestPurchase = { 5, 2 },
@@ -227,6 +240,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	GuideDone = { 10, 5 },
 	GuideControl = { 3, 5 },
 	SetDisplay = { 6, 3 },
+	DevRequest = { 8, 2 },
 }
 
 return Config

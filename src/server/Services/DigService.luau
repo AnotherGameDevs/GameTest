@@ -116,7 +116,7 @@ local function handleHit(player: Player, x: any, y: any, z: any, gen: any)
 	DataService.MarkDirty(player)
 
 	-- Feedback to everyone nearby (cosmetic only)
-	local payload = { Digger = player.UserId, Hits = hits }
+	local payload = { Digger = player.UserId, Hits = hits, Tool = data.Equipment.ToolId } -- Tool: cosmetic profile choice only
 	for _, other in ipairs(Players:GetPlayers()) do
 		local oh = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
 		if other == player or (oh and (oh.Position - center).Magnitude <= Config.Dig.MaxBroadcastDistance) then

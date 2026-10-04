@@ -124,6 +124,20 @@ local function runReset()
 	jobRunning = false
 end
 
+-- Developer test mode only (DevService checks access first): starts the SAME reset path early, with an optional shorter countdown.
+-- Returns (true) or (false, reason). Refuses if a reset is already in flight, so it cannot stack or repeat.
+function MineShiftService.RequestReset(warningSeconds: number?): (boolean, string?)
+	if jobRunning or lifecycle:State() ~= "Active" then
+		return false, "a reset is already in progress"
+	end
+	if not lifecycle:RequestManual(os.clock(), warningSeconds) then
+		return false, "the mine is not in a state that can reset"
+	end
+	tellEveryone(("TEST: the mine resets in %d seconds. Leave through the ELEVATOR - it is the way out."):format(math.floor(math.max(warningSeconds or Config.Reset.WarningSeconds, 1))), "Danger")
+	publish(0)
+	return true
+end
+
 function MineShiftService.State(): string
 	return lifecycle:State()
 end

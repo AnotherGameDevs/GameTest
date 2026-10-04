@@ -16,6 +16,7 @@ local UI = require(script.Parent.UIController)
 local CameraController = require(script.Parent.CameraController)
 local Settings = require(script.Parent.Settings)
 local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+local ToolFx = require(ReplicatedStorage.Shared.ToolFx)
 
 local player = Players.LocalPlayer
 local Effects = {}
@@ -59,26 +60,39 @@ local function takeChunk(): Part
 	return p
 end
 
-local function spawnChunk(pos: Vector3, vel: Vector3, color: Color3, size: number, life: number)
+-- opts.Spark = a short bright spark (own, smaller cap: ToolFx.Caps.Sparks); opts.Gravity overrides FEEL.Gravity.
+local liveSparks = 0
+local function spawnChunk(pos: Vector3, vel: Vector3, color: Color3, size: number, life: number, opts: any?)
 	if #active >= FEEL.MaxChunks then
 		return
 	end
+	local spark = opts ~= nil and opts.Spark == true
+	if spark and liveSparks >= ToolFx.Caps.Sparks then
+		return
+	end
 	local p = takeChunk()
+	p.Material = spark and Enum.Material.Neon or Enum.Material.SmoothPlastic
+	if spark then
+		liveSparks += 1
+	end
 	p.Color = color
 	p.Size = Vector3.one * size
 	p.CFrame = CFrame.new(pos)
 	p.Parent = fxFolder
 	table.insert(active, {
-		Part = p, Pos = pos, Vel = vel, Size = size, Life = life, Age = 0,
+		Part = p, Pos = pos, Vel = vel, Size = size, Life = life, Age = 0, Spark = spark,
+		Gravity = opts ~= nil and opts.Gravity or nil,
 		Rot = CFrame.Angles(math.random() * 6, math.random() * 6, math.random() * 6),
 		Spin = Vector3.new(math.random() * 12 - 6, math.random() * 12 - 6, math.random() * 12 - 6),
 	})
 end
 
-local function burst(pos: Vector3, normal: Vector3, color: Color3, count: number, speed: number, size: number)
+-- `spread` > 1 widens the cone (broader debris burst); the default keeps the original shape.
+local function burst(pos: Vector3, normal: Vector3, color: Color3, count: number, speed: number, size: number, spread: number?)
+	local wide = spread or 1
 	for _ = 1, count do
 		local rand = Vector3.new(math.random() - 0.5, math.random() - 0.2, math.random() - 0.5)
-		local vel = (normal * 0.9 + rand * 1.4).Unit * speed * (0.5 + math.random())
+		local vel = (normal * (0.9 / wide) + rand * 1.4 * wide).Unit * speed * (0.5 + math.random())
 		local c = color:Lerp(Color3.new(1, 1, 1), math.random() * 0.15)
 		spawnChunk(pos, vel, c, size * (0.6 + math.random() * 0.8), 0.45 + math.random() * 0.35)
 	end
@@ -179,11 +193,14 @@ RunService.RenderStepped:Connect(function(dt)
 		local c = active[i]
 		c.Age += dt
 		if c.Age >= c.Life then
+			if c.Spark then
+				liveSparks -= 1
+			end
 			c.Part.Parent = nil
 			table.insert(pool, c.Part)
 			table.remove(active, i)
 		else
-			c.Vel += Vector3.new(0, -FEEL.Gravity * dt, 0)
+			c.Vel += Vector3.new(0, -(c.Gravity or FEEL.Gravity) * dt, 0)
 			c.Pos += c.Vel * dt
 			c.Rot *= CFrame.Angles(c.Spin.X * dt, c.Spin.Y * dt, c.Spin.Z * dt)
 			local k = 1 - (c.Age / c.Life) ^ 2
@@ -225,20 +242,71 @@ local function layerColorAt(y: number): Color3
 	return Defs.LayerAtCell(y).Color
 end
 
+-- Per-tool particle/sound behaviour lives in ToolFxController (profiles from shared/ToolFx). It registers itself here at Init; until it
+-- does (or if it failed to start) the plain dirt feedback below is used, so mining never loses its basic feedback.
+local fx: any = nil
+function Effects.SetFx(hooks: any)
+	fx = hooks
+end
+
+-- Shared helpers for ToolFxController (one chunk pool, one cap, one place that owns the parts).
+Effects.Burst = burst
+Effects.SpawnChunk = spawnChunk
+
+-- Drops every transient effect part now (death, respawn, unequip, menu/focus interruptions, new mine generation).
+function Effects.ClearTransient()
+	for i = #active, 1, -1 do
+		local c = active[i]
+		c.Part.Parent = nil
+		table.insert(pool, c.Part)
+		table.remove(active, i)
+	end
+	liveSparks = 0
+	kick = 0
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.CameraOffset = Vector3.zero
+	end
+end
+
 -- Instant, client-predicted feedback at the moment of a swing (before the server answers).
-function Effects.Impact(part: Part, hitPos: Vector3, normal: Vector3)
+function Effects.Impact(part: Part, hitPos: Vector3, normal: Vector3, toolId: string?)
 	local _, y = Grid.FromIndex(tonumber(part.Name) or 1)
 	shakeBlock(part)
-	burst(hitPos, normal, layerColorAt(y), FEEL.ImpactChunks, 14, 0.7)
-	Audio.Play("Impact", 0.9 + math.random() * 0.25)
+	if fx then
+		fx.Impact(toolId, Defs.LayerAtCell(y), hitPos, normal, true)
+	else
+		burst(hitPos, normal, layerColorAt(y), FEEL.ImpactChunks, 14, 0.7)
+		Audio.Play("Impact", 0.9 + math.random() * 0.25)
+	end
 	cameraKick(FEEL.CameraKickImpact)
 end
 
-local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, face: Enum.NormalId?)
+-- Which face of the cell at `center` looks towards `from` (used to place other players' effects on the side they are digging).
+local function faceToward(center: Vector3, from: Vector3?): Vector3
+	if not from then
+		return Vector3.yAxis
+	end
+	local d = from - center
+	local ax, ay, az = math.abs(d.X), math.abs(d.Y), math.abs(d.Z)
+	if ay >= ax and ay >= az then
+		return d.Y >= 0 and Vector3.yAxis or -Vector3.yAxis
+	elseif ax >= az then
+		return d.X >= 0 and Vector3.xAxis or -Vector3.xAxis
+	end
+	return d.Z >= 0 and Vector3.zAxis or -Vector3.zAxis
+end
+
+-- ctx = { Tool = server-reported tool id (or nil), Primary = first cell of this swing, Digger = Player? }. Everything here comes from the
+-- authoritative result: which cells were hit/broken. Nothing looks at what a block contains.
+local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, face: Enum.NormalId?, ctx: any)
 	local x, y, z = Grid.FromIndex(idx)
 	local center = Grid.CellCenter(x, y, z)
 	local site = Workspace:FindFirstChild("DigSite")
 	local part = site and site:FindFirstChild(tostring(idx))
+	local layer = Defs.LayerAtCell(y)
+	local diggerRoot = ctx.Digger and ctx.Digger.Character and ctx.Digger.Character:FindFirstChild("HumanoidRootPart")
+	local diggerPos = diggerRoot and (diggerRoot :: BasePart).Position or nil
 	if dead then
 		if part then
 			shaking[part] = nil
@@ -254,17 +322,25 @@ local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, fa
 				end
 			end
 		end
-		local color = layerColorAt(y)
-		burst(center, Vector3.yAxis, color, FEEL.BreakChunks, 24, 1.3)
-		Audio.Play("Break", 0.85 + math.random() * 0.3, mine and 1 or 0.5)
-		if mine then
+		if fx then
+			fx.Break(ctx.Tool, layer, center, mine, ctx.Primary, faceToward(center, diggerPos))
+		else
+			burst(center, Vector3.yAxis, layer.Color, FEEL.BreakChunks, 24, 1.3)
+			Audio.Play("Break", 0.85 + math.random() * 0.3, mine and 1 or 0.5)
+		end
+		if mine and ctx.Primary then
 			cameraKick(FEEL.CameraKickBreak)
 		end
 	elseif part then
 		applyDamage(part :: Part, frac, face)
 		if not mine then
 			shakeBlock(part :: Part)
-			Audio.Play("Impact", 0.9 + math.random() * 0.25, 0.4)
+			local n = faceToward(center, diggerPos)
+			if fx then
+				fx.Impact(ctx.Tool, layer, center + n * (Grid.CellSize / 2), n, false)
+			else
+				Audio.Play("Impact", 0.9 + math.random() * 0.25, 0.4)
+			end
 		end
 	end
 end
@@ -419,12 +495,22 @@ function Effects.Init()
 		end
 		table.clear(shaking)
 		table.clear(lastFace)
+		if fx then
+			fx.StopAll()
+		end
 	end)
 	Remotes.Get("DigResult").OnClientEvent:Connect(function(payload)
 		local mine = payload.Digger == player.UserId
-		for _, h in ipairs(payload.Hits) do
+		local digger = Players:GetPlayerByUserId(payload.Digger)
+		if fx and not mine and digger then
+			fx.OtherSwing(payload.Tool, digger) -- restrained third-person trail for nearby players' strikes
+		end
+		for i, h in ipairs(payload.Hits) do
 			local idx = h[1]
-			onHit(idx, h[2], h[3] == 1, mine, lastFace[idx])
+			-- cracks on extra cells are cosmetic and capped; a cell that actually broke is always handled
+			if i <= ToolFx.Caps.AreaCellsMax or h[3] == 1 then
+				onHit(idx, h[2], h[3] == 1, mine, lastFace[idx], { Tool = payload.Tool, Primary = i == 1, Digger = digger })
+			end
 			if h[3] == 1 then
 				lastFace[idx] = nil
 			end

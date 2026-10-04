@@ -24,6 +24,7 @@ local RelicRules = require(ReplicatedStorage.Shared.RelicRules)
 local RelicEvent = require(script.Parent.RelicEvent)
 local CarryRegistry = require(script.Parent.CarryRegistry)
 local DataService = require(script.Parent.DataService)
+local DevScenario = require(script.Parent.DevScenario)
 local StateService = require(script.Parent.StateService)
 local EquipmentService = require(script.Parent.EquipmentService)
 local ArtifactService = require(script.Parent.ArtifactService)
@@ -523,15 +524,22 @@ function RelicService.Deposit(player: Player)
 		return
 	end
 	local def = Defs.Treasure[event.TreasureId]
-	data.Cash += value
-	data.Stats.CashEarned += value
-	data.Stats.TreasureFound += 1
-	data.Stats.RelicsExtracted += 1
-	local _, completed = CollectionSpec.Register(data.Collection, event.TreasureId, os.time())
-	if completed then
-		setRemote:FireClient(player, completed, Defs.LayerName(completed))
+	if DevScenario.IsTest(event.Id) and not DataService.InTestMode(player) then
+		-- an event started from the developer panel pays out ONLY inside a test overlay, never into a normal profile
+		value = 0
+		say(player, "Test relic: it gives no reward outside Developer Test Mode.", "Info")
+	else
+		data.Cash += value
+		data.Stats.CashEarned += value
+		data.Stats.TreasureFound += 1
+		data.Stats.RelicsExtracted += 1
+		local _, completed = CollectionSpec.Register(data.Collection, event.TreasureId, os.time())
+		if completed then
+			setRemote:FireClient(player, completed, Defs.LayerName(completed))
+		end
+		DataService.MarkDirty(player)
 	end
-	DataService.MarkDirty(player)
+	DevScenario.Clear(event.Id)
 	removeCarryTool(player)
 	depositedRemote:FireClient(player, def.Name, value, true)
 	ArtifactService.ShowOnTable(event.TreasureId)
@@ -542,6 +550,11 @@ function RelicService.Deposit(player: Player)
 end
 
 -- Reset ----------------------------------------------------------------------------------------------------------------------------
+-- Id of the current/last event (developer panel marks it as a test event); nil when none exists.
+function RelicService.CurrentId(): string?
+	return event and event.Id or nil
+end
+
 function RelicService.IsActive(): boolean
 	return event ~= nil and event:IsActive()
 end

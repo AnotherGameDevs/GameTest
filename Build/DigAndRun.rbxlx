@@ -109,9 +109,9 @@ return BannerLayout
           <string name="Source"><![CDATA[-- Stamped by tools/stamp_build.py before every export (do not edit by hand). Shown in Settings and printed by the server at startup so
 -- you can tell exactly which build a Studio session is running. "unstamped" means the file was built without tools/build.sh.
 return {
-	Id = "20261004-1743-0abbbb4f",
-	Source = "git 679c114+uncommitted",
-	Time = "2026-10-04 17:43 UTC",
+	Id = "20261004-1801-33f631b1",
+	Source = "git d3a0b29+uncommitted",
+	Time = "2026-10-04 18:01 UTC",
 }
 ]]></string>
         </Properties>
@@ -502,6 +502,19 @@ Config.Data = {
 	CurrentVersion = 3, -- v2: eight-tier tool progression; v3: collection display + onboarding progress
 }
 
+-- Developer test mode (docs/DEVELOPER_MODE.md). The SERVER decides who may use it (shared/DevAccess.luau); nothing here is read from a client.
+--   * Studio sessions: every player may use it (a Studio server is private to you).
+--   * Published servers: ONLY when game.PlaceId is in TestPlaceIds (your private TEST experience's place id) AND the player's UserId is in
+--     AllowedUserIds. Both lists are empty by default, so published access is OFF until you fill them in.
+--   * Shared-world actions (relic event, mine reset, artifact spawn) need the same condition, so they can never run on a production place.
+Config.Dev = {
+	AllowedUserIds = {}, -- <- put YOUR Roblox UserId here, e.g. { 123456789 }
+	TestPlaceIds = {}, -- <- put the PlaceId of your private TEST experience here, e.g. { 987654321 }
+	MaxCash = 1000000, -- largest single cash grant (test overlay only)
+	ResetWarningSeconds = 15, -- countdown used when the panel requests a mine reset (the normal reset uses Config.Reset.WarningSeconds)
+	ActionCooldown = 0.25, -- seconds between developer actions per player
+}
+
 Config.RateLimits = { -- { max calls, per seconds }
 	DigHit = { 14, 1 },
 	RequestPurchase = { 5, 2 },
@@ -518,6 +531,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	GuideDone = { 10, 5 },
 	GuideControl = { 3, 5 },
 	SetDisplay = { 6, 3 },
+	DevRequest = { 8, 2 },
 }
 
 return Config
@@ -1940,6 +1954,7 @@ local EVENTS = {
 	"RelicFx", -- S->C  (kind, userId, position) hit / shove feedback
 	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
+	"DevRequest", -- C->S  (action, arg) developer test action; the SERVER re-checks DevAccess on every call, the client is never trusted
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
 }
 
@@ -2031,6 +2046,201 @@ return SettingsSpec
         </Properties>
       </Item>
       <Item class="ModuleScript" referent="20">
+        <Properties>
+          <string name="Name">ToolFx</string>
+          <string name="Source"><![CDATA[-- Effect PROFILES for the mining tools: purely cosmetic data, one entry per tool in Defs.Tools. Stats (power, rate, reach, splash) live in
+-- Defs and are never touched here. Pure, so tests/tool_fx_test.luau can check it outside Roblox.
+--
+-- What an effect may depend on: the tool id (from the server's result), the layer of the cell that was hit or broken (Soil/Clay/Stone/Ruins),
+-- and how many cells the server says were affected. It must NEVER depend on a block's hidden reward, rarity or loot assignment: no function in
+-- this file or in ToolFxController takes loot information (guarded by tests and tools/preflight.py).
+--
+-- Colours are hex strings (converted by the client). Mapping to the catalogue (seven tools -> seven profiles, in tier order):
+--   1 Rusty Shovel -> Starter          2 Digging Shovel -> Improved hand tool   3 Heavy Shovel -> Reinforced
+--   4 Power Shovel -> Professional     5 Jackhammer -> Heavy excavation         6 Drill -> Industrial
+--   7 Industrial Drill -> Best tool
+-- To re-assign a profile to another tool, change the key only.
+local ToolFx = {}
+
+ToolFx.Caps = {
+	Chunks = 140, -- live dirt/debris parts (client total)
+	Sparks = 22, -- live spark parts
+	Rings = 2, -- live ground rings
+	Streaks = 2, -- live cutting streaks
+	LightsFor = 0, -- no point lights are ever created by tool effects
+	OtherPlayerChunkScale = 0.5, -- other players' effects are a restrained version of your own
+	OtherPlayerMaxDistance = 90, -- studs: further than this, other players' tool effects are skipped
+	AreaCellsMax = 4, -- most cells that get area feedback from one swing
+}
+
+local EARTH = "9A7B5A"
+local TEAL, BRASS = "41BDAE", "D4A24A"
+
+ToolFx.Profiles = {
+	rusty_shovel = {
+		Name = "Starter",
+		Dirt = { Impact = 3, Break = 8, Speed = 11, BreakSpeed = 20, Size = 0.55, BreakSize = 1.0 },
+		Puff = { Color = EARTH, Size = 1.4 }, -- small earthy puff at the impact point
+		Sound = { Impact = { Pitch = 0.95, Volume = 0.8 }, Break = { Pitch = 0.95, Volume = 0.85 } }, -- dry
+		MinGap = { Puff = 0.12 },
+	},
+	digging_shovel = {
+		Name = "Improved hand tool",
+		Dirt = { Impact = 4, Break = 10, Speed = 15, BreakSpeed = 23, Size = 0.6, BreakSize = 1.1 },
+		Puff = { Color = EARTH, Size = 1.7 },
+		Sound = { Impact = { Pitch = 1.12, Volume = 0.85 }, Break = { Pitch = 1.05, Volume = 0.9 } }, -- sharper
+		Trail = { Color = "D8DEE6", Width = 0.35, Lifetime = 0.12, Transparency = 0.45 }, -- short blade trail, strike only
+		MinGap = { Puff = 0.1 },
+	},
+	heavy_shovel = {
+		Name = "Reinforced",
+		Dirt = { Impact = 5, Break = 14, Speed = 14, BreakSpeed = 26, Size = 0.75, BreakSize = 1.35, Spread = 1.5 }, -- broader burst
+		Puff = { Color = EARTH, Size = 2.2 },
+		Sound = { Impact = { Pitch = 0.7, Volume = 1.0 }, Break = { Pitch = 0.72, Volume = 1.0 } }, -- heavier
+		MinGap = { Puff = 0.15 },
+	},
+	power_shovel = {
+		Name = "Professional",
+		Dirt = { Impact = 4, Break = 12, Speed = 15, BreakSpeed = 25, Size = 0.65, BreakSize = 1.2 },
+		Puff = { Color = EARTH, Size = 1.8 },
+		Sound = { Impact = { Pitch = 1.0, Volume = 0.85 }, Break = { Pitch = 1.0, Volume = 0.95 } },
+		Trail = { Color = TEAL, Width = 0.3, Lifetime = 0.1, Transparency = 0.4 },
+		Streak = { Color = TEAL, Length = 3.2, Time = 0.14 }, -- crisp cutting streak on the strike
+		Area = "controlled",
+		MinGap = { Puff = 0.12, Streak = 0.2 },
+	},
+	jackhammer = {
+		Name = "Heavy excavation",
+		Dirt = { Impact = 5, Break = 15, Speed = 15, BreakSpeed = 27, Size = 0.9, BreakSize = 1.6, Spread = 1.3 }, -- chunkier debris
+		Puff = { Color = EARTH, Size = 2.0 },
+		Ring = { Color = "C9B89A", Radius = 3.4, Time = 0.22, On = "both", MinGap = 0.3 }, -- brief ground-level impact ring
+		Sound = { Impact = { Pitch = 0.62, Volume = 0.95 }, Break = { Pitch = 0.62, Volume = 1.0 } },
+		Area = "controlled",
+		MinGap = { Puff = 0.12, Ring = 0.3 },
+	},
+	drill = {
+		Name = "Industrial",
+		Dirt = { Impact = 3, Break = 11, Speed = 14, BreakSpeed = 24, Size = 0.6, BreakSize = 1.1 },
+		Puff = { Color = EARTH, Size = 1.5 },
+		Sparks = { Color = "FFB347", Count = 4, Speed = 17, Layers = { Stone = true, Ruins = true }, MinGap = 0.12 }, -- sparks only on stone / ruins
+		Sound = { Impact = { Pitch = 1.3, Volume = 0.8 }, Break = { Pitch = 0.9, Volume = 0.95 }, Tick = { Pitch = 1.9, Volume = 0.3, MinGap = 0.18 } }, -- mechanical accent
+		Area = "controlled",
+		MinGap = { Puff = 0.14, Sparks = 0.12 },
+	},
+	industrial_drill = {
+		Name = "Best tool",
+		Dirt = { Impact = 3, Break = 8, Speed = 14, BreakSpeed = 24, Size = 0.55, BreakSize = 1.0 }, -- clean: fewer, tidier pieces
+		Puff = { Color = "BFD8D2", Size = 1.4 },
+		Sparks = { Color = BRASS, Count = 4, Speed = 18, Layers = { Stone = true, Ruins = true }, MinGap = 0.14 },
+		Ring = { Color = TEAL, Radius = 2.4, Time = 0.18, On = "impact", MinGap = 0.28, Flat = true }, -- teal strike ring
+		Streak = { Color = BRASS, Length = 3.6, Time = 0.14 },
+		Accent = { Color = TEAL, Count = 5 }, -- teal/brass break burst
+		Trail = { Color = TEAL, Width = 0.32, Lifetime = 0.11, Transparency = 0.4 },
+		Sound = { Impact = { Pitch = 1.15, Volume = 0.85 }, Break = { Pitch = 1.1, Volume = 0.95 }, Tick = { Pitch = 1.6, Volume = 0.3, MinGap = 0.2 } },
+		Area = "controlled",
+		MinGap = { Puff = 0.14, Sparks = 0.14, Ring = 0.28, Streak = 0.22 },
+	},
+}
+
+-- Not a tool: the plain dirt feedback used for blocks broken by something that is not a mining tool (dynamite) and for an unknown id.
+ToolFx.Generic = {
+	Name = "Generic",
+	Dirt = { Impact = 4, Break = 10, Speed = 14, BreakSpeed = 24, Size = 0.7, BreakSize = 1.3 },
+	Puff = { Color = EARTH, Size = 1.6 },
+	Sound = { Impact = { Pitch = 1.0, Volume = 0.8 }, Break = { Pitch = 1.0, Volume = 0.9 } },
+	MinGap = { Puff = 0.12 },
+}
+
+-- Profile for a tool id; an unknown id (a future tool, dynamite, a bad payload) gets the generic dirt feedback rather than erroring.
+function ToolFx.For(toolId: any)
+	return ToolFx.Profiles[toolId] or ToolFx.Generic
+end
+
+-- The strike part of a swing of total length `duration`, as (start, length) in seconds. Matches the viewmodel thrust (30%..50% of the
+-- swing, ViewmodelMath.Swing) and the third-person grip tween; a short tail lets the trail finish. Never longer than MaxStrike.
+ToolFx.MaxStrike = 0.2
+function ToolFx.StrikeWindow(duration: number): (number, number)
+	local d = math.max(duration, 0.1)
+	return d * 0.28, math.min(d * 0.26, ToolFx.MaxStrike)
+end
+
+-- Does this effect kind apply on this layer? Sparks only on stone/ruins; dirt on every layer. `layerId` comes from the cell's DEPTH only.
+function ToolFx.SparksOn(profile, layerId: string): boolean
+	return profile.Sparks ~= nil and profile.Sparks.Layers[layerId] == true
+end
+
+-- How many extra cells get feedback for a result: exactly the cells the server reported (minus the first), capped. A tool that did not
+-- affect several cells never gets area feedback, whatever its profile says.
+function ToolFx.AreaCells(profile, affected: number): number
+	if affected <= 1 then
+		return 0
+	end
+	return math.min(affected - 1, ToolFx.Caps.AreaCellsMax - 1)
+end
+
+-- Time-based gate: true if `key` may fire at `now` given its minimum gap; records the firing. `state` is a plain table.
+function ToolFx.Gate(state, key: string, now: number, minGap: number): boolean
+	local last = state[key]
+	if last and now - last < minGap then
+		return false
+	end
+	state[key] = now
+	return true
+end
+
+-- Gap (seconds) the profile asks for between two firings of `kind`, never shorter than a floor so very fast tools cannot flood the screen.
+function ToolFx.GapFor(profile, kind: string): number
+	local floor = 0.08
+	local gap = profile.MinGap and profile.MinGap[kind] or 0.1
+	return math.max(gap, floor)
+end
+
+-- Where the blade trail is anchored on a tool, from the REAL part spec (the same spec the held tool and viewmodel are built from).
+-- Returns two points across the working end (tool space: +Y forward, +X width) and the tip. `parts` is the spec's Parts list;
+-- `names` is spec.Checks.WorkingEnd. Falls back to the model's furthest-forward part if a name is missing.
+function ToolFx.RigPoints(parts, names)
+	local function extent(p)
+		local r = p.Offset
+		local hx, hy, hz = p.Size.X / 2, p.Size.Y / 2, p.Size.Z / 2
+		local rx, ry, rz = r.RightVector, r.UpVector, r.LookVector -- the part's local axes in tool space
+		local ex = math.abs(rx.X) * hx + math.abs(ry.X) * hy + math.abs(rz.X) * hz
+		local ey = math.abs(rx.Y) * hx + math.abs(ry.Y) * hy + math.abs(rz.Y) * hz
+		return ex, ey, r.Position
+	end
+	local topY, widthSum, count, centreX = -1e9, 0, 0, 0
+	local wanted = {}
+	for _, n in ipairs(names or {}) do
+		wanted[n] = true
+	end
+	for _, p in ipairs(parts) do
+		if wanted[p.Name] then
+			local ex, ey, c = extent(p)
+			topY = math.max(topY, c.Y + ey)
+			widthSum = math.max(widthSum, ex)
+			centreX += c.X
+			count += 1
+		end
+	end
+	if count == 0 then
+		for _, p in ipairs(parts) do
+			local _, ey, c = extent(p)
+			if c.Y + ey > topY then
+				topY = c.Y + ey
+			end
+		end
+		widthSum = 0.5
+		count = 1
+	end
+	local half = math.clamp(widthSum * 0.9, 0.25, 1.1)
+	local cx = centreX / count
+	return { A = { X = cx - half, Y = topY, Z = 0 }, B = { X = cx + half, Y = topY, Z = 0 }, Tip = { X = cx, Y = topY, Z = 0 } }
+end
+
+return ToolFx
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="21">
         <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
@@ -2394,7 +2604,7 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="21">
+      <Item class="ModuleScript" referent="22">
         <Properties>
           <string name="Name">TreasureModels</string>
           <string name="Source"><![CDATA[-- Artifact models. ONE source of truth: these part specs drive the discovery reveal, the carried artifact (world and
@@ -2784,7 +2994,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="22">
+      <Item class="ModuleScript" referent="23">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -2834,7 +3044,7 @@ return Util
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="23">
+      <Item class="ModuleScript" referent="24">
         <Properties>
           <string name="Name">ViewmodelMath</string>
           <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
@@ -2911,15 +3121,15 @@ return ViewmodelMath
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="24">
+  <Item class="ServerScriptService" referent="25">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="25">
+    <Item class="Folder" referent="26">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="26">
+      <Item class="Script" referent="27">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -2947,6 +3157,7 @@ local ElevatorService = require(Services.ElevatorService)
 local CollectionService = require(Services.CollectionService)
 local MineShiftService = require(Services.MineShiftService)
 local RelicService = require(Services.RelicService)
+local DevService = require(Services.DevService)
 
 WorldBuilder.Build()
 SiteService.Generate() -- fresh server-only loot seed (never the constant Config.Site.Seed)
@@ -2964,6 +3175,7 @@ for name, init in pairs({
 	Collection = CollectionService.Init,
 	MineShift = MineShiftService.Init,
 	Relic = RelicService.Init,
+	Dev = DevService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then
@@ -2985,11 +3197,11 @@ print(("[%s] Server ready. Build %s (source %s, built %s)"):format(Config.GameNa
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="27">
+      <Item class="Folder" referent="28">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -3007,7 +3219,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -3160,7 +3372,7 @@ return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -3187,6 +3399,7 @@ local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
 local CarryRegistry = require(script.Parent.CarryRegistry)
 local DataService = require(script.Parent.DataService)
+local DevScenario = require(script.Parent.DevScenario)
 local StateService = require(script.Parent.StateService)
 local EquipmentService = require(script.Parent.EquipmentService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
@@ -3373,22 +3586,33 @@ local function finishCarry(player: Player, recId: string)
 end
 
 -- Discovery ----------------------------------------------------------------------------------------------------
-function ArtifactService.Discover(player: Player, treasureId: string, cellIndex: number): boolean
+-- `nearPlayer` (developer test mode only): place it beside the player instead of in a mine cell. Returns (true, recordId).
+function ArtifactService.Discover(player: Player, treasureId: string, cellIndex: number?, nearPlayer: boolean?): (boolean, string?)
 	local def = Defs.Treasure[treasureId]
 	if not def or not def.RequiresCarry or not DataService.Get(player) then
-		return false
+		return false, nil
 	end
-	local x, y, z = Grid.FromIndex(cellIndex)
-	local center = Grid.CellCenter(x, y, z)
 	local size = artifactSize(treasureId)
-
-	-- Prefer the cell it was found in (visible + accessible, never inside remaining dirt); otherwise near the player.
-	local cf = findResting({ center, center + Vector3.new(1, 0, 0), center - Vector3.new(1, 0, 0),
-		center + Vector3.new(0, 0, 1), center - Vector3.new(0, 0, 1) }, size)
-	if not cf then
+	local center: Vector3
+	local cf: CFrame?
+	if nearPlayer or not cellIndex then
 		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 3.5), size)
+		if not hrp then
+			return false, nil
+		end
+		center = hrp.Position
+		cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 4), size)
+	else
+		local x, y, z = Grid.FromIndex(cellIndex)
+		center = Grid.CellCenter(x, y, z)
+		-- Prefer the cell it was found in (visible + accessible, never inside remaining dirt); otherwise near the player.
+		cf = findResting({ center, center + Vector3.new(1, 0, 0), center - Vector3.new(1, 0, 0),
+			center + Vector3.new(0, 0, 1), center - Vector3.new(0, 0, 1) }, size)
+		if not cf then
+			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 3.5), size)
+			end
 		end
 	end
 	local position = cf and cf.Position or (center + Vector3.new(0, size.Y / 2 - Grid.CellSize / 2 + 0.05, 0))
@@ -3397,7 +3621,7 @@ function ArtifactService.Discover(player: Player, treasureId: string, cellIndex:
 	task.delay(Config.Artifacts.SpawnDelay, spawnWorldModel, rec.Id)
 	say(player, "Important artifact found - carry it to camp.", "Good")
 	AnalyticsService.Log(player, "ArtifactDiscovered", { id = rec.Id, treasure = treasureId })
-	return true
+	return true, rec.Id
 end
 
 -- Pickup ---------------------------------------------------------------------------------------------------------
@@ -3529,16 +3753,25 @@ function ArtifactService.Deposit(player: Player)
 		return
 	end
 	local def = Defs.Treasure[rec.TreasureId]
-	data.Cash += value
-	data.Stats.CashEarned += value
-	data.Stats.TreasureFound += 1
-	data.Stats.RelicsExtracted += 1
-	local isNew, completed = CollectionSpec.Register(data.Collection, rec.TreasureId, os.time())
-	if completed then
-		Remotes.Get("SetCompleted"):FireClient(player, completed, Defs.LayerName(completed))
+	local isNew = false
+	if DevScenario.IsTest(rec.Id) and not DataService.InTestMode(player) then
+		-- created by the developer panel: it pays out ONLY inside a test overlay, never into a normal profile
+		value = 0
+		say(player, "Test artifact: it gives no reward outside Developer Test Mode.", "Info")
+	else
+		data.Cash += value
+		data.Stats.CashEarned += value
+		data.Stats.TreasureFound += 1
+		data.Stats.RelicsExtracted += 1
+		local completed
+		isNew, completed = CollectionSpec.Register(data.Collection, rec.TreasureId, os.time())
+		if completed then
+			Remotes.Get("SetCompleted"):FireClient(player, completed, Defs.LayerName(completed))
+		end
+		DataService.MarkDirty(player)
+		MetricsService.Sold(player, value, 1)
 	end
-	DataService.MarkDirty(player)
-	MetricsService.Sold(player, value, 1)
+	DevScenario.Clear(rec.Id)
 
 	finishCarry(player, rec.Id)
 	depositedRemote:FireClient(player, def.Name, value, isNew)
@@ -3733,7 +3966,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -3776,7 +4009,7 @@ return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">CollectionService</string>
             <string name="Source"><![CDATA[-- Player-facing progress that is just saved flags: the camp-shelf selection and first-time hint progress. The server
@@ -3864,7 +4097,7 @@ return CollectionService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -3998,7 +4231,7 @@ return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -4014,6 +4247,7 @@ local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
 local SaveMode = require(script.Parent.SaveMode)
 local ProfileStore = require(script.Parent.ProfileStore)
+local ProfileOverlay = require(script.Parent.ProfileOverlay)
 local SessionLock = require(script.Parent.SessionLock)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
@@ -4097,7 +4331,10 @@ local diagnostics = { LoadsOk = 0, LoadsFailed = 0, LockRefusals = 0, SavesOk = 
 
 local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
 local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
-local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean } } = {}
+-- Developer test overlay: while `Overlay` is true, `Data` (the table every service reads and writes through DataService.Get) holds TEST data and the
+-- player's real profile is parked, untouched, in `Normal`. Save/autosave/leave/shutdown always write `Normal` (never the overlay), and MarkDirty is a
+-- no-op during the overlay, so nothing granted in test mode can reach a DataStore.
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean, Overlay: boolean, Normal: any } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
 local lastSaveWarn: { [Player]: number } = {}
 local lastSaveLog: { [Player]: number } = {}
@@ -4140,10 +4377,7 @@ function DataService.Get(player: Player)
 end
 
 function DataService.MarkDirty(player: Player)
-	local p = profiles[player]
-	if p then
-		p.Dirty = true
-	end
+	ProfileOverlay.MarkDirty(profiles[player]) -- a no-op while the developer test overlay is active
 end
 
 -- Writes the profile. `release` also drops the session lock (player leaving / server closing).
@@ -4167,7 +4401,7 @@ function DataService.Save(player: Player, force: boolean?, release: boolean?): b
 	end
 	p.Saving = true
 	p.Dirty = false
-	local snapshot = Util.DeepCopy(p.Data)
+	local snapshot = Util.DeepCopy(ProfileOverlay.SaveSource(p)) -- the REAL profile, never the test overlay
 	local result = ProfileStore.Save(store, key(player), snapshot, release == true, storeCtx, 3)
 	local ok, lostLock, err = result.Ok, result.LostLock, result.Err
 	p.Saving = false
@@ -4253,7 +4487,7 @@ local function load(player: Player)
 	if not noSave then
 		diagnostics.LoadsOk += 1
 	end
-	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false }
+	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false, Overlay = false, Normal = nil }
 	for _, cb in ipairs(loadedCallbacks) do
 		task.spawn(cb, player, data)
 	end
@@ -4318,9 +4552,37 @@ function DataService.Init()
 	end)
 end
 
+-- Developer test overlay (docs/DEVELOPER_MODE.md). Callers must have passed DevAccess; these functions only manage the data swap. -----------
 -- Counters for the server Output / tests; contains no profile contents.
 function DataService.Diagnostics()
 	return table.clone(diagnostics)
+end
+
+function DataService.InTestMode(player: Player): boolean
+	return ProfileOverlay.Active(profiles[player])
+end
+
+-- Parks the real profile and starts the overlay from a copy of it (so test mode begins from your own progress).
+function DataService.EnterTestMode(player: Player): boolean
+	if ProfileOverlay.Enter(profiles[player]) then
+		print(("[DataService] TEST MODE ON for %s: the real profile is parked and will not be written by test actions."):format(player.Name))
+		return true
+	end
+	return false
+end
+
+-- Replaces the overlay with a brand-new default profile (still the overlay; the real profile is untouched).
+function DataService.FreshTestProfile(player: Player): boolean
+	return ProfileOverlay.Fresh(profiles[player], defaultData())
+end
+
+-- Drops the overlay and restores the real profile exactly as it was when test mode started.
+function DataService.ExitTestMode(player: Player): boolean
+	if ProfileOverlay.Exit(profiles[player]) then
+		print(("[DataService] TEST MODE OFF for %s: the real profile is restored."):format(player.Name))
+		return true
+	end
+	return false
 end
 
 function DataService.StorageMode(): string
@@ -4333,14 +4595,547 @@ function DataService.SaveInfo(player: Player)
 	if not p then
 		return nil
 	end
-	return { Saving = not p.NoSave, Reason = p.SaveReason, Mode = storageMode }
+	return { Saving = not p.NoSave, Reason = p.SaveReason, Mode = storageMode, Overlay = p.Overlay }
 end
 
 return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="35">
+        <Item class="ModuleScript" referent="36">
+          <Properties>
+            <string name="Name">DevAccess</string>
+            <string name="Source"><![CDATA[-- Who may use developer test mode, and which requests are well-formed. Pure (tests/dev_mode_test.luau). The inputs come from the SERVER
+-- (RunService:IsStudio(), game.PlaceId, player.UserId, Config.Dev); nothing here ever reads a value supplied by a client except the
+-- request itself, which is validated against a fixed whitelist.
+local DevAccess = {}
+
+-- action -> { World = changes the shared world (needs World access and Test Mode), Needs = "Test" (personal overlay must be active) }
+DevAccess.Actions = {
+	Enter = { },
+	Exit = { },
+	UnlockAll = { Needs = "Test" },
+	Equip = { Needs = "Test" },
+	GrantCash = { Needs = "Test" },
+	UnlockCollection = { Needs = "Test" },
+	Reveal = { Needs = "Test" }, -- cosmetic reveal only
+	FreshProfile = { Needs = "Test" },
+	Teleport = { Needs = "Test" }, -- moves only the requesting player, via existing landing positions
+	SpawnArtifact = { Needs = "Test", World = true }, -- personal / relic artifacts exist in the shared world
+	StartRelic = { Needs = "Test", World = true },
+	ResetMine = { Needs = "Test", World = true },
+}
+
+local function isId(n: any): boolean
+	return type(n) == "number" and n == math.floor(n) and n > 0 and n < 2 ^ 53
+end
+
+local function contains(list: any, value: any): boolean
+	if type(list) ~= "table" or not isId(value) then
+		return false
+	end
+	for _, v in ipairs(list) do
+		if v == value then
+			return true
+		end
+	end
+	return false
+end
+
+-- ctx = { IsStudio, PlaceId, UserId, AllowedUserIds, TestPlaceIds }
+-- returns { Allowed, World, Env = "studio" | "test-place" | "production", Reason }
+function DevAccess.Resolve(ctx)
+	if ctx.IsStudio == true then
+		return { Allowed = true, World = true, Env = "studio", Reason = "studio" }
+	end
+	local placeOk = contains(ctx.TestPlaceIds, ctx.PlaceId)
+	local userOk = contains(ctx.AllowedUserIds, ctx.UserId)
+	if placeOk and userOk then
+		return { Allowed = true, World = true, Env = "test-place", Reason = "allowlisted" }
+	end
+	return { Allowed = false, World = false, Env = placeOk and "test-place" or "production",
+		Reason = placeOk and "not-allowlisted" or "not-a-test-place" }
+end
+
+-- Validates (action, arg) from a remote. Returns (true, cleanArg) or (false, reason). `defs` = { Tools, Backpacks, Treasure, StopCount, MaxCash }.
+function DevAccess.Validate(action: any, arg: any, defs)
+	if type(action) ~= "string" or DevAccess.Actions[action] == nil then
+		return false, "unknown-action"
+	end
+	if action == "Equip" then
+		if type(arg) ~= "table" or type(arg.Kind) ~= "string" or type(arg.Id) ~= "string" then
+			return false, "bad-argument"
+		end
+		if arg.Kind == "Tool" and defs.Tools[arg.Id] then
+			return true, { Kind = "Tool", Id = arg.Id }
+		elseif arg.Kind == "Backpack" and defs.Backpacks[arg.Id] then
+			return true, { Kind = "Backpack", Id = arg.Id }
+		end
+		return false, "unknown-item"
+	elseif action == "GrantCash" then
+		if type(arg) ~= "number" or arg ~= arg or arg < 1 or arg == math.huge then
+			return false, "bad-argument"
+		end
+		return true, math.floor(math.min(arg, defs.MaxCash))
+	elseif action == "SpawnArtifact" or action == "Reveal" then
+		if type(arg) ~= "string" or not defs.Treasure[arg] then
+			return false, "unknown-item"
+		end
+		return true, arg
+	elseif action == "Teleport" then
+		if type(arg) ~= "number" or arg ~= math.floor(arg) or arg < 1 or arg > defs.StopCount then
+			return false, "bad-argument"
+		end
+		return true, arg
+	end
+	return true, nil -- every other action takes no argument; anything sent is ignored
+end
+
+-- Whether a validated action may run given the player's access and mode. Returns (true) or (false, reason).
+function DevAccess.Permit(action: string, access, inTestMode: boolean)
+	local def = DevAccess.Actions[action]
+	if not def then
+		return false, "unknown-action"
+	end
+	if not access or not access.Allowed then
+		return false, "not-allowed"
+	end
+	if def.Needs == "Test" and not inTestMode then
+		return false, "test-mode-required"
+	end
+	if def.World and not access.World then
+		return false, "world-actions-not-allowed"
+	end
+	return true
+end
+
+-- One line telling the developer what kind of session this is (shown in the panel). `save` = DataService.SaveInfo (no profile contents).
+function DevAccess.SessionLabel(save): string
+	if type(save) ~= "table" then
+		return "Loading"
+	end
+	if save.Saving == false then
+		return "Temporary session - progress will not save"
+	elseif save.Mode == "studio-test-store" then
+		return "Isolated test store - progress saves to the TEST store"
+	end
+	return "Normal play - production store"
+end
+
+return DevAccess
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="37">
+          <Properties>
+            <string name="Name">DevProfile</string>
+            <string name="Source"><![CDATA[-- Pure data operations on a PLAYER PROFILE TABLE used by developer test mode (tests/dev_mode_test.luau). They are only ever applied to the
+-- in-memory TEST OVERLAY (DataService keeps the real profile aside, untouched, and never saves the overlay). Nothing here touches a DataStore.
+local DevProfile = {}
+
+function DevProfile.UnlockAllEquipment(data, defs)
+	for id in pairs(defs.Tools) do
+		data.OwnedTools[id] = true
+	end
+	for id in pairs(defs.Backpacks) do
+		data.OwnedBackpacks[id] = true
+	end
+	for id, def in pairs(defs.Consumables or {}) do
+		data.Consumables[id] = def.MaxCarry -- e.g. a full set of dynamite
+	end
+end
+
+-- Equips an owned/unlocked tool or backpack. Returns false when the id is unknown (nothing changes).
+function DevProfile.Equip(data, kind: string, id: string, defs): boolean
+	if kind == "Tool" and defs.Tools[id] then
+		data.OwnedTools[id] = true
+		data.Equipment.ToolId = id
+		return true
+	elseif kind == "Backpack" and defs.Backpacks[id] then
+		data.OwnedBackpacks[id] = true
+		data.Equipment.BackpackId = id
+		return true
+	end
+	return false
+end
+
+function DevProfile.GrantCash(data, amount: number, maxCash: number): number
+	local n = math.floor(math.clamp(amount, 0, maxCash))
+	data.Cash += n
+	return n
+end
+
+-- Adds every collection entry (count 1 where missing) and fills the camp shelf up to its slot count, for previewing UI and displays.
+function DevProfile.UnlockCollection(data, collectionSpec, defs, now: number, slots: number)
+	local ids = {}
+	for id in pairs(defs.Treasure) do
+		table.insert(ids, id)
+	end
+	table.sort(ids)
+	for _, id in ipairs(ids) do
+		if not data.Collection[id] then
+			collectionSpec.Register(data.Collection, id, now)
+		end
+	end
+	local shelf = {}
+	for _, id in ipairs(ids) do
+		if #shelf < slots then
+			table.insert(shelf, id)
+		end
+	end
+	data.Display = collectionSpec.SanitizeDisplay(shelf, data.Collection)
+end
+
+return DevProfile
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="38">
+          <Properties>
+            <string name="Name">DevScenario</string>
+            <string name="Source"><![CDATA[-- Remembers which shared-world artifacts / relic events were created by the developer panel, so that a reward for one can never be paid
+-- into a profile that is NOT in test mode. A leaf module (no requires): RelicService / ArtifactService ask it at deposit time.
+local DevScenario = {}
+
+local marked: { [string]: boolean } = {}
+
+function DevScenario.Mark(id: string?)
+	if id then
+		marked[id] = true
+	end
+end
+
+function DevScenario.IsTest(id: string?): boolean
+	return id ~= nil and marked[id] == true
+end
+
+function DevScenario.Clear(id: string?)
+	if id then
+		marked[id] = nil
+	end
+end
+
+function DevScenario.Reset()
+	table.clear(marked)
+end
+
+return DevScenario
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="39">
+          <Properties>
+            <string name="Name">DevService</string>
+            <string name="Source"><![CDATA[-- Developer test mode (docs/DEVELOPER_MODE.md). SERVER-authorised: every request re-checks DevAccess from server-side facts (RunService:IsStudio(),
+-- game.PlaceId, player.UserId, Config.Dev). The client's panel is only a convenience; a hand-fired remote from an ordinary player is ignored.
+--
+-- What it does NOT do:
+--   * It never writes a profile. Personal actions run on the in-memory TEST OVERLAY (DataService.EnterTestMode), which is never saved; the real
+--     profile is parked untouched and restored on exit.
+--   * It never bypasses rules. Artifacts are created through the existing ArtifactService / RelicService / InventoryService paths, so pickup, carry,
+--     deposit and PvP validation still apply. A reward from a panel-created artifact or relic is paid only into a profile that is itself in test mode.
+--   * It cannot touch a public production mine: world actions need a Studio server or a place listed in Config.Dev.TestPlaceIds (plus the player in
+--     AllowedUserIds). Both lists are empty by default, so a published server grants nobody anything until you fill them in.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
+
+local DataService = require(script.Parent.DataService)
+local StateService = require(script.Parent.StateService)
+local EquipmentService = require(script.Parent.EquipmentService)
+local InventoryService = require(script.Parent.InventoryService)
+local ArtifactService = require(script.Parent.ArtifactService)
+local RelicService = require(script.Parent.RelicService)
+local MineShiftService = require(script.Parent.MineShiftService)
+local MineState = require(script.Parent.MineState)
+local CarryRegistry = require(script.Parent.CarryRegistry)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+local WorldElevator = require(script.Parent.WorldElevator)
+local RateLimiter = require(script.Parent.RateLimiter)
+local DevAccess = require(script.Parent.DevAccess)
+local DevProfile = require(script.Parent.DevProfile)
+local DevScenario = require(script.Parent.DevScenario)
+
+local DevService = {}
+
+local notifyRemote = Remotes.Get("Notify")
+local treasureRemote = Remotes.Get("TreasureFound")
+local lastAction: { [Player]: number } = {}
+local deniedLogged: { [Player]: boolean } = {}
+
+local function accessFor(player: Player)
+	return DevAccess.Resolve({
+		IsStudio = RunService:IsStudio(),
+		PlaceId = game.PlaceId,
+		UserId = player.UserId,
+		AllowedUserIds = Config.Dev.AllowedUserIds,
+		TestPlaceIds = Config.Dev.TestPlaceIds,
+	})
+end
+
+local function say(player: Player, text: string, kind: string?)
+	notifyRemote:FireClient(player, "[TEST] " .. text, kind or "Info")
+end
+
+local function frontOf(player: Player, studs: number): Vector3?
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return nil
+	end
+	return (hrp :: BasePart).Position + (hrp :: BasePart).CFrame.LookVector * studs
+end
+
+local function relicTreasureId(): string?
+	for id, def in pairs(Defs.Treasure) do
+		if def.Relic then
+			return id
+		end
+	end
+	return nil
+end
+
+-- Starts a contested relic event through the existing RelicService state machine (the same call the real discovery makes).
+local function startRelic(player: Player, treasureId: string)
+	if RelicService.IsActive() then
+		say(player, "A relic event is already active on this server.", "Danger")
+		return
+	end
+	local pos = frontOf(player, 6)
+	if not pos then
+		return
+	end
+	if not RelicService.Discover(player, treasureId, pos) then
+		say(player, "The relic event could not start (mine resetting, or events disabled).", "Danger")
+		return
+	end
+	DevScenario.Mark(RelicService.CurrentId())
+	treasureRemote:FireClient(player, { Id = treasureId, Position = pos, Stored = false, Carry = true, Relic = true, IsNew = false })
+	say(player, "Relic event started. Its reward is paid only to a player in test mode.", "Good")
+end
+
+local actions: { [string]: (Player, any) -> () } = {}
+
+function actions.Enter(player)
+	if DataService.EnterTestMode(player) then
+		StateService.Push(player)
+		say(player, "DEVELOPER TEST MODE ON. Your real profile is parked and will not be changed or saved.", "Good")
+	end
+end
+
+function actions.Exit(player)
+	if CarryRegistry.IsCarrying(player) then
+		say(player, "Place or deposit what you are carrying before leaving test mode.", "Danger")
+		return
+	end
+	if DataService.ExitTestMode(player) then
+		EquipmentService.Refresh(player)
+		StateService.Push(player)
+		say(player, "Test mode OFF. Your real profile is restored.", "Good")
+	end
+end
+
+function actions.UnlockAll(player)
+	local data = DataService.Get(player)
+	DevProfile.UnlockAllEquipment(data, Defs)
+	StateService.Push(player)
+	say(player, "All tools and backpacks unlocked (test profile only).", "Good")
+end
+
+function actions.Equip(player, arg)
+	if arg.Kind == "Tool" and CarryRegistry.IsCarrying(player) then
+		say(player, "Place your artifact down before switching tools.", "Danger")
+		return
+	end
+	local data = DataService.Get(player)
+	if DevProfile.Equip(data, arg.Kind, arg.Id, Defs) then
+		StateService.Push(player)
+		if arg.Kind == "Tool" then
+			EquipmentService.Refresh(player)
+		end
+		say(player, "Equipped " .. (arg.Kind == "Tool" and Defs.Tools[arg.Id].DisplayName or Defs.Backpacks[arg.Id].DisplayName) .. ".", "Good")
+	end
+end
+
+function actions.GrantCash(player, amount)
+	local n = DevProfile.GrantCash(DataService.Get(player), amount, Config.Dev.MaxCash)
+	StateService.Push(player)
+	say(player, ("Granted $%d test cash."):format(n), "Good")
+end
+
+function actions.UnlockCollection(player)
+	DevProfile.UnlockCollection(DataService.Get(player), CollectionSpec, Defs, os.time(), Config.Collection.DisplaySlots)
+	StateService.Push(player)
+	say(player, "Collection entries unlocked and shelf filled (test profile only).", "Good")
+end
+
+function actions.FreshProfile(player)
+	if DataService.FreshTestProfile(player) then
+		EquipmentService.Refresh(player)
+		StateService.Push(player)
+		say(player, "Fresh test profile. Your real profile is untouched.", "Good")
+	end
+end
+
+-- Inspection only: plays the normal reveal at a point in front of you. Adds nothing to the backpack or collection.
+function actions.Reveal(player, treasureId)
+	local pos = frontOf(player, 5)
+	if pos then
+		treasureRemote:FireClient(player, { Id = treasureId, Position = pos, Stored = false, Carry = false, IsNew = false })
+	end
+end
+
+-- Each artifact goes through the flow that belongs to its kind, exactly as a real find would.
+function actions.SpawnArtifact(player, treasureId)
+	local def = Defs.Treasure[treasureId]
+	local kind = Defs.KindOf(def)
+	if not MineState.Accepting() then
+		say(player, "The mine is resetting. Try again in a moment.", "Danger")
+		return
+	end
+	if kind == "Relic" then
+		startRelic(player, treasureId)
+	elseif kind == "Personal" then
+		local ok, recId = ArtifactService.Discover(player, treasureId, nil, true)
+		if ok then
+			DevScenario.Mark(recId)
+			local pos = frontOf(player, 5) or Vector3.zero
+			treasureRemote:FireClient(player, { Id = treasureId, Position = pos, Stored = false, Carry = true, IsNew = false })
+			say(player, "Personal artifact spawned beside you: pick it up and carry it to camp.", "Good")
+		else
+			say(player, "Could not place the artifact here.", "Danger")
+		end
+	else
+		local data = DataService.Get(player)
+		local stored = InventoryService.Add(player, treasureId)
+		local isNew = false
+		if stored then
+			isNew = CollectionSpec.Register(data.Collection, treasureId, os.time())
+		end
+		treasureRemote:FireClient(player, { Id = treasureId, Position = frontOf(player, 5) or Vector3.zero, Stored = stored, IsNew = isNew })
+		StateService.Push(player)
+		say(player, stored and "Ordinary artifact added to your test backpack." or "Test backpack is full.", stored and "Good" or "Danger")
+	end
+end
+
+function actions.StartRelic(player)
+	local id = relicTreasureId()
+	if not id then
+		say(player, "No relic is defined.", "Danger")
+		return
+	end
+	if not MineState.Accepting() then
+		say(player, "The mine is resetting. Try again in a moment.", "Danger")
+		return
+	end
+	startRelic(player, id)
+end
+
+-- Existing positions only: the camp spawn, and the elevator landing of each layer (the same platforms players use to leave the mine).
+function actions.Teleport(player, stop)
+	if CarryRegistry.IsCarrying(player) then
+		say(player, "You cannot teleport while carrying an artifact (the same rule as Return to Camp).", "Danger")
+		return
+	end
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return
+	end
+	local target: Vector3?
+	if stop == 1 then
+		target = WorldBuilder.SpawnCFrame.Position
+	else
+		local landing = Workspace:FindFirstChild("Landing" .. (stop - 1), true)
+		target = landing and (landing :: BasePart).Position + Vector3.new(0, 4, 0) or nil
+	end
+	if not target then
+		say(player, "That position does not exist in this world.", "Danger")
+		return
+	end
+	(hrp :: BasePart).AssemblyLinearVelocity = Vector3.zero
+	;(char :: Model):PivotTo(CFrame.new(target))
+	say(player, "Moved to " .. (WorldElevator.StopNames[stop] or "?") .. ".", "Good")
+end
+
+function actions.ResetMine(player)
+	local ok, why = MineShiftService.RequestReset(Config.Dev.ResetWarningSeconds)
+	say(player, ok and "Mine reset requested through the normal reset lifecycle." or ("Reset not started: " .. tostring(why)), ok and "Good" or "Danger")
+end
+
+local function handle(player: Player, action: any, arg: any)
+	if not RateLimiter.Check(player, "DevRequest") then
+		return
+	end
+	local access = accessFor(player) -- recomputed from server facts on EVERY call; nothing the client sends is consulted
+	if not access.Allowed then
+		if not deniedLogged[player] then
+			deniedLogged[player] = true
+			warn(("[DevService] %s tried a developer action without access (%s)."):format(player.Name, access.Reason))
+		end
+		return
+	end
+	local now = os.clock()
+	if now - (lastAction[player] or 0) < Config.Dev.ActionCooldown then
+		return
+	end
+	lastAction[player] = now
+	local ok, clean = DevAccess.Validate(action, arg, {
+		Tools = Defs.Tools, Backpacks = Defs.Backpacks, Treasure = Defs.Treasure,
+		StopCount = #WorldElevator.StopTops, MaxCash = Config.Dev.MaxCash,
+	})
+	if not ok then
+		return
+	end
+	local permitted, why = DevAccess.Permit(action, access, DataService.InTestMode(player))
+	if not permitted then
+		if why == "test-mode-required" then
+			say(player, "Enter Test Mode first.", "Danger")
+		end
+		return
+	end
+	if not DataService.Get(player) then
+		return
+	end
+	local fn = actions[action]
+	if fn then
+		local okRun, err = pcall(fn, player, clean)
+		if not okRun then
+			warn(("[DevService] action %s failed: %s"):format(action, tostring(err)))
+			say(player, "Action failed: " .. tostring(err), "Danger")
+		end
+	end
+end
+
+function DevService.Init()
+	StateService.DevInfo = function(player: Player)
+		local access = accessFor(player)
+		if not access.Allowed then
+			return nil
+		end
+		return { Allowed = true, Active = DataService.InTestMode(player), World = access.World, Env = access.Env,
+			Session = DevAccess.SessionLabel(DataService.SaveInfo(player)) }
+	end
+	Remotes.Get("DevRequest").OnServerEvent:Connect(handle)
+	Players.PlayerRemoving:Connect(function(player)
+		lastAction[player] = nil
+		deniedLogged[player] = nil
+	end)
+	print(("[DevService] developer test mode: %s"):format(RunService:IsStudio() and "available (Studio)"
+		or (#Config.Dev.AllowedUserIds > 0 and #Config.Dev.TestPlaceIds > 0) and "available to allowlisted accounts on this test place"
+		or "OFF (no allowlisted accounts / test place configured)"))
+end
+
+return DevService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="40">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -4461,7 +5256,7 @@ local function handleHit(player: Player, x: any, y: any, z: any, gen: any)
 	DataService.MarkDirty(player)
 
 	-- Feedback to everyone nearby (cosmetic only)
-	local payload = { Digger = player.UserId, Hits = hits }
+	local payload = { Digger = player.UserId, Hits = hits, Tool = data.Equipment.ToolId } -- Tool: cosmetic profile choice only
 	for _, other in ipairs(Players:GetPlayers()) do
 		local oh = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
 		if other == player or (oh and (oh.Position - center).Magnitude <= Config.Dig.MaxBroadcastDistance) then
@@ -4487,7 +5282,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -4654,7 +5449,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -4886,7 +5681,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="43">
           <Properties>
             <string name="Name">ElevatorService</string>
             <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
@@ -5063,7 +5858,7 @@ return ElevatorService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="44">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -5166,7 +5961,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -5233,7 +6028,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="46">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -5326,7 +6121,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="42">
+        <Item class="ModuleScript" referent="47">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -5423,7 +6218,7 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="43">
+        <Item class="ModuleScript" referent="48">
           <Properties>
             <string name="Name">MineDetails</string>
             <string name="Source"><![CDATA[-- Builds the small remnants on a mine cell's exposed face. Every detail part is a CHILD of the cell's own Part, so when
@@ -5475,7 +6270,7 @@ return MineDetails
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="44">
+        <Item class="ModuleScript" referent="49">
           <Properties>
             <string name="Name">MineLifecycle</string>
             <string name="Source"><![CDATA[-- The mine's reset lifecycle as a pure state machine (no Roblox APIs; tests/loot_reset_test.luau).
@@ -5573,6 +6368,21 @@ function MineLifecycle:Update(now: number, depletion: number, players: number, h
 	return nil
 end
 
+-- A reset requested on purpose (developer test mode only; no client can reach this). It is exactly a scheduled reset that starts now: the same
+-- Warning -> Evacuating -> Regenerating -> Active path, only from Active (so it can never overlap or repeat a reset). `warningSeconds` shortens
+-- the countdown for testing.
+function MineLifecycle:RequestManual(now: number, warningSeconds: number?): boolean
+	if self.state ~= "Active" then
+		return false
+	end
+	self.state = "Warning"
+	self.reason = "Manual"
+	self.endsAt = now + math.max(warningSeconds or self.policy.WarningSeconds, 1)
+	self.resets += 1
+	self.lastTick = now
+	return true
+end
+
 function MineLifecycle:IsHolding(now: number): boolean
 	return self.state == "Warning" and now >= self.endsAt and self.heldSeconds < (self.policy.RelicHoldSeconds or 0)
 end
@@ -5605,7 +6415,7 @@ return MineLifecycle
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="45">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">MineShiftService</string>
             <string name="Source"><![CDATA[-- The mine reset ("Fresh Dig"), docs/MINE_RESET.md. Extends the earlier refresh; there is exactly one reset system.
@@ -5734,6 +6544,20 @@ local function runReset()
 	jobRunning = false
 end
 
+-- Developer test mode only (DevService checks access first): starts the SAME reset path early, with an optional shorter countdown.
+-- Returns (true) or (false, reason). Refuses if a reset is already in flight, so it cannot stack or repeat.
+function MineShiftService.RequestReset(warningSeconds: number?): (boolean, string?)
+	if jobRunning or lifecycle:State() ~= "Active" then
+		return false, "a reset is already in progress"
+	end
+	if not lifecycle:RequestManual(os.clock(), warningSeconds) then
+		return false, "the mine is not in a state that can reset"
+	end
+	tellEveryone(("TEST: the mine resets in %d seconds. Leave through the ELEVATOR - it is the way out."):format(math.floor(math.max(warningSeconds or Config.Reset.WarningSeconds, 1))), "Danger")
+	publish(0)
+	return true
+end
+
 function MineShiftService.State(): string
 	return lifecycle:State()
 end
@@ -5775,7 +6599,7 @@ return MineShiftService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="46">
+        <Item class="ModuleScript" referent="51">
           <Properties>
             <string name="Name">MineState</string>
             <string name="Source"><![CDATA[-- Tiny shared holder of the mine's lifecycle state, so DigService / ArtifactService / DynamiteService can ask
@@ -5825,7 +6649,92 @@ return MineState
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="47">
+        <Item class="ModuleScript" referent="52">
+          <Properties>
+            <string name="Name">ProfileOverlay</string>
+            <string name="Source"><![CDATA[-- The developer test OVERLAY on a profile record, as pure functions (tests/dev_mode_test.luau runs them against a fake DataStore). DataService
+-- uses exactly these. A profile record is { Data, Normal, Overlay, Dirty, ... }:
+--   * Data    = the table every service reads/writes (DataService.Get). In test mode it holds TEST data; the table itself is never replaced.
+--   * Normal  = the player's REAL profile, parked untouched while the overlay is active.
+--   * Writes (autosave, leave, shutdown) take their snapshot from SaveSource(): always the real profile, never the overlay.
+local ProfileOverlay = {}
+
+local function deepCopy(t: any): any
+	if type(t) ~= "table" then
+		return t
+	end
+	local c = {}
+	for k, v in pairs(t) do
+		c[k] = deepCopy(v)
+	end
+	return c
+end
+
+-- Makes `dst` hold exactly the contents of `src` (deep copy) WITHOUT replacing the `dst` table, so every service that already holds a
+-- reference to the profile table keeps seeing the current profile.
+local function replaceInPlace(dst: any, src: any)
+	for k in pairs(dst) do
+		dst[k] = nil
+	end
+	for k, v in pairs(src) do
+		dst[k] = deepCopy(v)
+	end
+end
+ProfileOverlay.ReplaceInPlace = replaceInPlace
+
+function ProfileOverlay.Active(p): boolean
+	return p ~= nil and p.Overlay == true
+end
+
+-- Parks the real profile and starts the overlay (a copy of it, or a fresh default profile when `freshData` is given).
+function ProfileOverlay.Enter(p, freshData: any?): boolean
+	if not p or p.Overlay then
+		return false
+	end
+	p.Normal = deepCopy(p.Data)
+	p.Overlay = true
+	if freshData then
+		replaceInPlace(p.Data, freshData)
+	end
+	return true
+end
+
+function ProfileOverlay.Fresh(p, freshData: any): boolean
+	if not p or not p.Overlay then
+		return false
+	end
+	replaceInPlace(p.Data, freshData)
+	return true
+end
+
+-- Restores the real profile exactly as it was when the overlay started.
+function ProfileOverlay.Exit(p): boolean
+	if not p or not p.Overlay or not p.Normal then
+		return false
+	end
+	replaceInPlace(p.Data, p.Normal)
+	p.Normal = nil
+	p.Overlay = false
+	return true
+end
+
+-- What a save may write: the real profile.
+function ProfileOverlay.SaveSource(p)
+	return p.Normal or p.Data
+end
+
+-- Overlay changes never make the real profile "dirty".
+function ProfileOverlay.MarkDirty(p)
+	if p and not p.Overlay then
+		p.Dirty = true
+	end
+end
+
+return ProfileOverlay
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="53">
           <Properties>
             <string name="Name">ProfileStore</string>
             <string name="Source"><![CDATA[-- The DataStore protocol for ONE player profile, separated from DataService so it can be exercised against a fake store
@@ -5902,7 +6811,7 @@ return ProfileStore
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="48">
+        <Item class="ModuleScript" referent="54">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -5951,7 +6860,7 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="49">
+        <Item class="ModuleScript" referent="55">
           <Properties>
             <string name="Name">RelicEvent</string>
             <string name="Source"><![CDATA[-- The contested server relic as a pure state machine (no Roblox APIs; tests/relic_test.luau).
@@ -6065,7 +6974,7 @@ return RelicEvent
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="50">
+        <Item class="ModuleScript" referent="56">
           <Properties>
             <string name="Name">RelicService</string>
             <string name="Source"><![CDATA[-- The contested server relic (docs/RELIC_PVP.md): a single, explicit PvP carry-home event.
@@ -6094,6 +7003,7 @@ local RelicRules = require(ReplicatedStorage.Shared.RelicRules)
 local RelicEvent = require(script.Parent.RelicEvent)
 local CarryRegistry = require(script.Parent.CarryRegistry)
 local DataService = require(script.Parent.DataService)
+local DevScenario = require(script.Parent.DevScenario)
 local StateService = require(script.Parent.StateService)
 local EquipmentService = require(script.Parent.EquipmentService)
 local ArtifactService = require(script.Parent.ArtifactService)
@@ -6593,15 +7503,22 @@ function RelicService.Deposit(player: Player)
 		return
 	end
 	local def = Defs.Treasure[event.TreasureId]
-	data.Cash += value
-	data.Stats.CashEarned += value
-	data.Stats.TreasureFound += 1
-	data.Stats.RelicsExtracted += 1
-	local _, completed = CollectionSpec.Register(data.Collection, event.TreasureId, os.time())
-	if completed then
-		setRemote:FireClient(player, completed, Defs.LayerName(completed))
+	if DevScenario.IsTest(event.Id) and not DataService.InTestMode(player) then
+		-- an event started from the developer panel pays out ONLY inside a test overlay, never into a normal profile
+		value = 0
+		say(player, "Test relic: it gives no reward outside Developer Test Mode.", "Info")
+	else
+		data.Cash += value
+		data.Stats.CashEarned += value
+		data.Stats.TreasureFound += 1
+		data.Stats.RelicsExtracted += 1
+		local _, completed = CollectionSpec.Register(data.Collection, event.TreasureId, os.time())
+		if completed then
+			setRemote:FireClient(player, completed, Defs.LayerName(completed))
+		end
+		DataService.MarkDirty(player)
 	end
-	DataService.MarkDirty(player)
+	DevScenario.Clear(event.Id)
 	removeCarryTool(player)
 	depositedRemote:FireClient(player, def.Name, value, true)
 	ArtifactService.ShowOnTable(event.TreasureId)
@@ -6612,6 +7529,11 @@ function RelicService.Deposit(player: Player)
 end
 
 -- Reset ----------------------------------------------------------------------------------------------------------------------------
+-- Id of the current/last event (developer panel marks it as a test event); nil when none exists.
+function RelicService.CurrentId(): string?
+	return event and event.Id or nil
+end
+
 function RelicService.IsActive(): boolean
 	return event ~= nil and event:IsActive()
 end
@@ -6739,7 +7661,7 @@ return RelicService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="51">
+        <Item class="ModuleScript" referent="57">
           <Properties>
             <string name="Name">SaveMode</string>
             <string name="Source"><![CDATA[-- Pure decision: what DataService may do with a player's profile after trying to load it (tests/saving_test.luau).
@@ -6782,7 +7704,7 @@ return SaveMode
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="52">
+        <Item class="ModuleScript" referent="58">
           <Properties>
             <string name="Name">SessionLock</string>
             <string name="Source"><![CDATA[-- Pure session-lock rules for DataService (tests/saving_test.luau). A profile records which server (JobId) owns it and when it last
@@ -6804,7 +7726,7 @@ return SessionLock
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="53">
+        <Item class="ModuleScript" referent="59">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -6840,7 +7762,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="54">
+        <Item class="ModuleScript" referent="60">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -7189,7 +8111,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="55">
+        <Item class="ModuleScript" referent="61">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -7203,6 +8125,7 @@ local Defs = require(ReplicatedStorage.Shared.Defs)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
 local StateService = {}
+StateService.DevInfo = nil :: ((Player) -> any)? -- set by DevService; asks the SERVER whether this player is authorised
 local pending: { [Player]: boolean } = {}
 local stateRemote = Remotes.Get("PlayerState")
 
@@ -7228,6 +8151,7 @@ function StateService.Snapshot(player: Player)
 		OwnedTools = data.OwnedTools,
 		OwnedBackpacks = data.OwnedBackpacks,
 		Save = DataService.SaveInfo(player),
+		Dev = StateService.DevInfo and StateService.DevInfo(player) or nil, -- nil for ordinary players: the panel never exists for them
 		Stats = data.Stats,
 		Collection = data.Collection,
 		Display = data.Display,
@@ -7256,7 +8180,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="56">
+        <Item class="ModuleScript" referent="62">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -7318,7 +8242,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="57">
+        <Item class="ModuleScript" referent="63">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -7424,7 +8348,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="58">
+        <Item class="ModuleScript" referent="64">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -7834,7 +8758,7 @@ return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="59">
+        <Item class="ModuleScript" referent="65">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -8071,7 +8995,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="60">
+        <Item class="ModuleScript" referent="66">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -8174,7 +9098,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="61">
+        <Item class="ModuleScript" referent="67">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -8305,23 +9229,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="62">
+  <Item class="StarterPlayer" referent="68">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="63">
+    <Item class="StarterPlayerScripts" referent="69">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="64">
+      <Item class="Folder" referent="70">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="65">
+        <Item class="Folder" referent="71">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="66">
+          <Item class="ModuleScript" referent="72">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -8348,6 +9272,7 @@ Audio.Sounds = {
 	Deposit = { Id = PING, Volume = 1.0, Pitch = 1.0, Notes = { 0.7, 0.9, 1.1, 1.4 }, NoteGap = 0.09, MinGap = 0.3 },
 	SetComplete = { Id = PING, Volume = 1.0, Pitch = 1.0, Notes = { 1.0, 1.25, 1.5, 2.0 }, NoteGap = 0.11, MinGap = 0.5 },
 	Error = { Id = "rbxasset://sounds/uuhhh.mp3", Volume = 0.4, Pitch = 1.2, MinGap = 0.25 },
+	Tick = { Id = "rbxasset://sounds/switch.wav", Volume = 0.3, Pitch = 1.0, MinGap = 0.1 }, -- mechanical accent for drills (placeholder id, same as UI)
 	UI = { Id = "rbxasset://sounds/switch.wav", Volume = 0.5, Pitch = 1.0, MinGap = 0.05 },
 }
 
@@ -8429,7 +9354,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="67">
+          <Item class="ModuleScript" referent="73">
             <Properties>
               <string name="Name">BannerQueue</string>
               <string name="Source"><![CDATA[-- One announcement banner for every big popup (sales, secured artifacts, completed collection sets). Replaces the old fixed-size popup
@@ -8574,7 +9499,7 @@ return BannerQueue
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="68">
+          <Item class="ModuleScript" referent="74">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -8590,6 +9515,7 @@ Bindings.PlaceArtifact = Enum.KeyCode.X
 Bindings.ThrowDynamite = Enum.KeyCode.G
 Bindings.Menu = Enum.KeyCode.P
 Bindings.Journal = Enum.KeyCode.J
+Bindings.DevPanel = Enum.KeyCode.BackSlash -- developer test panel (only exists for server-authorised accounts)
 Bindings.RelicStrike = Enum.KeyCode.F -- contested relic only: strike the carrier / shove attackers (never a mining click)
 
 function Bindings.Name(keyCode: Enum.KeyCode): string
@@ -8606,7 +9532,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="69">
+          <Item class="ModuleScript" referent="75">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -8914,7 +9840,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="70">
+          <Item class="ModuleScript" referent="76">
             <Properties>
               <string name="Name">CampShelf</string>
               <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
@@ -9049,7 +9975,7 @@ return CampShelf
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="71">
+          <Item class="ModuleScript" referent="77">
             <Properties>
               <string name="Name">CollectionUI</string>
               <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
@@ -9271,7 +10197,333 @@ return CollectionUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="72">
+          <Item class="ModuleScript" referent="78">
+            <Properties>
+              <string name="Name">DevPanel</string>
+              <string name="Source"><![CDATA[-- Developer test panel (docs/DEVELOPER_MODE.md). This is only a front end: the SERVER decides who may use developer mode (it puts `Dev` in the player
+-- state only for authorised accounts) and re-checks permission on every request. The panel does not exist for ordinary players: nothing is built
+-- until the server says `Dev.Allowed`, and a hand-fired DevRequest from anyone else is ignored by the server.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Util = require(ReplicatedStorage.Shared.Util)
+
+local State = require(script.Parent.State)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
+local K = require(script.Parent.UIKit)
+
+local P = Config.Palette
+local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
+local T = K.Tokens
+local AMBER = Color3.fromHex("E8A33D")
+
+local DevPanel = {}
+
+local gui: ScreenGui? = nil
+local indicator: any = nil
+local indicatorText: any = nil
+local devButton: any = nil
+local window: any = nil
+local statusLabel: any = nil
+local sessionLabel: any = nil
+local enterBtn: any = nil
+local exitBtn: any = nil
+local list: any = nil
+local open = false
+local built = false
+local selectedTreasure: string = "old_coin"
+local treasureButtons: { [string]: TextButton } = {}
+local toolButtons: { [string]: TextButton } = {}
+local packButtons: { [string]: TextButton } = {}
+local requiresTest: { TextButton } = {}
+
+local function send(action: string, arg: any?)
+	Remotes.Get("DevRequest"):FireServer(action, arg)
+end
+
+local function section(title: string, order: number)
+	label(list, title:upper(), 15, AMBER, { Size = UDim2.new(1, -8, 0, 22), LayoutOrder = order, TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1 })
+end
+
+local function row(order: number, height: number?): Frame
+	local f = mk("Frame", { Size = UDim2.new(1, -8, 0, height or 34), BackgroundTransparency = 1, LayoutOrder = order }, list)
+	mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, f)
+	return f
+end
+
+local function action(parent: Instance, text: string, width: number, act: string, arg: any?, needsTest: boolean?): TextButton
+	local b = K.flatButton(parent, text, UDim2.new(0, width, 1, 0), UDim2.new(), AMBER)
+	b.TextSize = 14
+	b.TextWrapped = true
+	b.Activated:Connect(function()
+		-- `arg` may be a function so a button can send a value that is only known at click time (the selected artifact)
+		send(act, type(arg) == "function" and arg() or arg)
+	end)
+	if needsTest ~= false then
+		table.insert(requiresTest, b)
+	end
+	return b
+end
+
+local function build(parentGui: ScreenGui)
+	gui = parentGui
+
+	-- Always-visible indicator while the test overlay is active ---------------------------------------------------------------
+	indicator = mk("Frame", { Name = "DevIndicator", Size = UDim2.fromOffset(330, 26), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 4),
+		BackgroundColor3 = Color3.fromHex("4A1F1A"), BackgroundTransparency = 0.1, Visible = false }, parentGui)
+	corner(indicator, 8)
+	stroke(indicator, P.Danger, 2)
+	indicatorText = label(indicator, "DEVELOPER TEST MODE", 15, P.Cream, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
+
+	devButton = mk("TextButton", { Name = "DevButton", Text = "DEV", Size = UDim2.fromOffset(44, 28), Position = UDim2.new(1, -54, 0, 122), Font = K.Font,
+		TextSize = 15, TextColor3 = P.Dark, BackgroundColor3 = AMBER, AutoButtonColor = true, Visible = false }, parentGui)
+	corner(devButton, 8)
+	stroke(devButton, P.Dark, 2)
+	devButton.Activated:Connect(function()
+		DevPanel.Toggle()
+	end)
+
+	-- Window -------------------------------------------------------------------------------------------------------------------
+	window = mk("Frame", { Name = "DevPanel", Size = UDim2.fromOffset(440, 560), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = T.Panel, BackgroundTransparency = 0.03, Visible = false, Active = true }, parentGui)
+	corner(window, 12)
+	stroke(window, AMBER, 2)
+	K.fit(window, 440, 560)
+	label(window, "DEVELOPER TEST MODE", 22, AMBER, { Size = UDim2.new(1, -60, 0, 28), Position = UDim2.fromOffset(16, 8), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1 })
+	statusLabel = label(window, "", 14, P.Cream, { Size = UDim2.new(1, -32, 0, 18), Position = UDim2.fromOffset(16, 38), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1 })
+	sessionLabel = label(window, "", 13, K.Muted, { Size = UDim2.new(1, -32, 0, 18), Position = UDim2.fromOffset(16, 56), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1 })
+	local close = K.flatButton(window, "X", UDim2.fromOffset(34, 30), UDim2.new(1, -44, 0, 8), T.Line)
+	close.Activated:Connect(function()
+		DevPanel.Close()
+	end)
+
+	list = mk("ScrollingFrame", { Size = UDim2.new(1, -24, 1, -92), Position = UDim2.fromOffset(12, 80), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, window)
+	mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+
+	local o = 0
+	local function nextOrder(): number
+		o += 1
+		return o
+	end
+
+	section("Mode", nextOrder())
+	local r = row(nextOrder())
+	enterBtn = action(r, "ENTER TEST MODE", 200, "Enter", nil, false)
+	exitBtn = action(r, "EXIT TEST MODE", 200, "Exit", nil, false)
+	local rf = row(nextOrder())
+	action(rf, "FRESH TEST PROFILE", 200, "FreshProfile")
+	label(rf, "real profile stays untouched", 12, K.Muted, { Size = UDim2.new(0, 200, 1, 0), TextWrapped = true, TextStrokeTransparency = 1 })
+
+	section("Equipment", nextOrder())
+	local ru = row(nextOrder())
+	action(ru, "UNLOCK ALL EQUIPMENT", 410, "UnlockAll")
+	for _, id in ipairs(Defs.ToolsByTier) do
+		local def = Defs.Tools[id]
+		local rr = row(nextOrder(), 30)
+		local b = action(rr, ("T%d  %s"):format(def.Tier, def.DisplayName), 410, "Equip", { Kind = "Tool", Id = id })
+		toolButtons[id] = b
+	end
+	local packOrder = {}
+	for id in pairs(Defs.Backpacks) do
+		table.insert(packOrder, id)
+	end
+	table.sort(packOrder, function(a, b)
+		return Defs.Backpacks[a].Order < Defs.Backpacks[b].Order
+	end)
+	for _, id in ipairs(packOrder) do
+		local def = Defs.Backpacks[id]
+		local rr = row(nextOrder(), 30)
+		packButtons[id] = action(rr, ("%s  (%d slots)"):format(def.DisplayName, def.Capacity), 410, "Equip", { Kind = "Backpack", Id = id })
+	end
+
+	section("Cash", nextOrder())
+	local rc = row(nextOrder())
+	for _, amount in ipairs({ 1000, 10000, 100000 }) do
+		action(rc, "+" .. Util.FormatCashShort(amount), 96, "GrantCash", amount)
+	end
+	local box = mk("TextBox", { Size = UDim2.fromOffset(100, 34), BackgroundColor3 = T.PanelLight, TextColor3 = P.Cream, Font = K.Font, TextSize = 15,
+		PlaceholderText = "amount", Text = "", ClearTextOnFocus = false }, rc)
+	corner(box, 6)
+	box.FocusLost:Connect(function(enter)
+		local n = tonumber(box.Text)
+		if enter and n then
+			send("GrantCash", n)
+		end
+	end)
+
+	section("Collection and displays", nextOrder())
+	local rl = row(nextOrder())
+	action(rl, "UNLOCK ALL ENTRIES + FILL SHELF", 410, "UnlockCollection")
+
+	section("Artifacts  (pick one, then act)", nextOrder())
+	local ids = {}
+	for id in pairs(Defs.Treasure) do
+		table.insert(ids, id)
+	end
+	table.sort(ids, function(a, b)
+		local da, db = Defs.Treasure[a], Defs.Treasure[b]
+		local ra, rb = Defs.Rarity[da.Rarity].Order, Defs.Rarity[db.Rarity].Order
+		if ra ~= rb then
+			return ra < rb
+		end
+		return a < b
+	end)
+	for _, id in ipairs(ids) do
+		local def = Defs.Treasure[id]
+		local rr = row(nextOrder(), 28)
+		local b = K.flatButton(rr, ("%s  -  %s  -  %s"):format(def.Name, def.Rarity, Defs.KindOf(def)), UDim2.new(0, 410, 1, 0), UDim2.new(), T.Line)
+		b.TextSize = 14
+		b.Activated:Connect(function()
+			selectedTreasure = id
+			DevPanel.Refresh()
+		end)
+		treasureButtons[id] = b
+	end
+	local ra = row(nextOrder())
+	local function selected()
+		return selectedTreasure
+	end
+	action(ra, "SPAWN SELECTED (its own flow)", 200, "SpawnArtifact", selected)
+	action(ra, "REVEAL ONLY (inspect)", 200, "Reveal", selected)
+
+	section("Relic event (two players to test PvP)", nextOrder())
+	local rr = row(nextOrder())
+	action(rr, "START SERVER RELIC EVENT", 410, "StartRelic")
+
+	section("Move to a layer (existing landings)", nextOrder())
+	local rt = row(nextOrder())
+	action(rt, "CAMP", 78, "Teleport", 1)
+	for i, layer in ipairs(Config.Layers) do
+		action(rt, layer.Name, 78, "Teleport", i + 1)
+	end
+
+	section("Mine", nextOrder())
+	local rm = row(nextOrder())
+	action(rm, "REQUEST MINE RESET (normal lifecycle)", 410, "ResetMine")
+end
+
+local function apply(d)
+	local dev = d.Dev
+	if not dev or not dev.Allowed then
+		if indicator then
+			indicator.Visible = false
+		end
+		if devButton then
+			devButton.Visible = false
+		end
+		if open then
+			DevPanel.Close()
+		end
+		return
+	end
+	if not built and gui then
+		built = true
+		build(gui :: ScreenGui)
+	end
+	if not built then
+		return
+	end
+	indicator.Visible = dev.Active == true
+	;devButton.Visible = true
+	;statusLabel.Text = dev.Active and "TEST OVERLAY ACTIVE - nothing here is saved" or "Test mode OFF - your real profile is active"
+	;statusLabel.TextColor3 = dev.Active and P.Danger or K.Good
+	;sessionLabel.Text = "Session: " .. tostring(dev.Session)
+	;indicatorText.Text = dev.Active and "DEVELOPER TEST MODE  -  nothing is saved" or "DEVELOPER TEST MODE"
+	;enterBtn.Visible = not dev.Active
+	;exitBtn.Visible = dev.Active
+	for _, b in ipairs(requiresTest) do
+		b.AutoButtonColor = dev.Active
+		b.TextTransparency = dev.Active and 0 or 0.55
+	end
+	-- selection highlights (what is equipped / owned right now in the overlay)
+	for id, b in pairs(toolButtons) do
+		local s = b:FindFirstChildOfClass("UIStroke")
+		if s then
+			s.Color = (d.ToolId == id) and P.Teal or AMBER
+			s.Thickness = (d.ToolId == id) and 3 or 2
+		end
+		b.TextColor3 = (d.OwnedTools and d.OwnedTools[id]) and P.Cream or K.Muted
+	end
+	for id, b in pairs(packButtons) do
+		local s = b:FindFirstChildOfClass("UIStroke")
+		if s then
+			s.Color = (d.BackpackId == id) and P.Teal or AMBER
+			s.Thickness = (d.BackpackId == id) and 3 or 2
+		end
+		b.TextColor3 = (d.OwnedBackpacks and d.OwnedBackpacks[id]) and P.Cream or K.Muted
+	end
+end
+
+function DevPanel.Refresh()
+	for id, b in pairs(treasureButtons) do
+		local s = b:FindFirstChildOfClass("UIStroke")
+		if s then
+			s.Color = (id == selectedTreasure) and P.Teal or T.Line
+			s.Thickness = (id == selectedTreasure) and 3 or 2
+		end
+	end
+end
+
+function DevPanel.Open()
+	if not built or open then
+		return
+	end
+	open = true
+	;window.Visible = true
+	InputMode.OpenMenu("dev")
+	DevPanel.Refresh()
+end
+
+function DevPanel.Close()
+	if not open then
+		return
+	end
+	open = false
+	if window then
+		window.Visible = false
+	end
+	InputMode.CloseMenu("dev")
+end
+
+function DevPanel.Toggle()
+	if open then
+		DevPanel.Close()
+	else
+		DevPanel.Open()
+	end
+end
+
+function DevPanel.SelectedTreasure(): string
+	return selectedTreasure
+end
+
+function DevPanel.Build(parentGui: ScreenGui)
+	gui = parentGui
+end
+
+function DevPanel.Init()
+	State.Connect(apply)
+	UserInputService.InputBegan:Connect(function(input)
+		if input.KeyCode == Bindings.DevPanel and built and not UserInputService:GetFocusedTextBox() then
+			DevPanel.Toggle()
+		end
+	end)
+end
+
+return DevPanel
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="79">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -9295,6 +10547,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Effects = require(script.Parent.EffectsController)
+local ToolFxController = require(script.Parent.ToolFxController)
 local InputMode = require(script.Parent.InputMode)
 local CameraController = require(script.Parent.CameraController)
 local Viewmodel = require(script.Parent.ViewmodelController)
@@ -9581,8 +10834,9 @@ local function onStep()
 		faceTarget(target.Part.Position)
 	end
 	swing(interval)
+	ToolFxController.Swing(State.Data.ToolId, interval) -- trail only during the strike, on the assembled tool
 	Effects.NoteFace(target.Part, target.Normal)
-	Effects.Impact(target.Part, target.Position, target.Normal)
+	Effects.Impact(target.Part, target.Position, target.Normal, State.Data.ToolId)
 end
 
 function DigController.Init()
@@ -9702,7 +10956,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="73">
+          <Item class="ModuleScript" referent="80">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -9723,6 +10977,7 @@ local UI = require(script.Parent.UIController)
 local CameraController = require(script.Parent.CameraController)
 local Settings = require(script.Parent.Settings)
 local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+local ToolFx = require(ReplicatedStorage.Shared.ToolFx)
 
 local player = Players.LocalPlayer
 local Effects = {}
@@ -9766,26 +11021,39 @@ local function takeChunk(): Part
 	return p
 end
 
-local function spawnChunk(pos: Vector3, vel: Vector3, color: Color3, size: number, life: number)
+-- opts.Spark = a short bright spark (own, smaller cap: ToolFx.Caps.Sparks); opts.Gravity overrides FEEL.Gravity.
+local liveSparks = 0
+local function spawnChunk(pos: Vector3, vel: Vector3, color: Color3, size: number, life: number, opts: any?)
 	if #active >= FEEL.MaxChunks then
 		return
 	end
+	local spark = opts ~= nil and opts.Spark == true
+	if spark and liveSparks >= ToolFx.Caps.Sparks then
+		return
+	end
 	local p = takeChunk()
+	p.Material = spark and Enum.Material.Neon or Enum.Material.SmoothPlastic
+	if spark then
+		liveSparks += 1
+	end
 	p.Color = color
 	p.Size = Vector3.one * size
 	p.CFrame = CFrame.new(pos)
 	p.Parent = fxFolder
 	table.insert(active, {
-		Part = p, Pos = pos, Vel = vel, Size = size, Life = life, Age = 0,
+		Part = p, Pos = pos, Vel = vel, Size = size, Life = life, Age = 0, Spark = spark,
+		Gravity = opts ~= nil and opts.Gravity or nil,
 		Rot = CFrame.Angles(math.random() * 6, math.random() * 6, math.random() * 6),
 		Spin = Vector3.new(math.random() * 12 - 6, math.random() * 12 - 6, math.random() * 12 - 6),
 	})
 end
 
-local function burst(pos: Vector3, normal: Vector3, color: Color3, count: number, speed: number, size: number)
+-- `spread` > 1 widens the cone (broader debris burst); the default keeps the original shape.
+local function burst(pos: Vector3, normal: Vector3, color: Color3, count: number, speed: number, size: number, spread: number?)
+	local wide = spread or 1
 	for _ = 1, count do
 		local rand = Vector3.new(math.random() - 0.5, math.random() - 0.2, math.random() - 0.5)
-		local vel = (normal * 0.9 + rand * 1.4).Unit * speed * (0.5 + math.random())
+		local vel = (normal * (0.9 / wide) + rand * 1.4 * wide).Unit * speed * (0.5 + math.random())
 		local c = color:Lerp(Color3.new(1, 1, 1), math.random() * 0.15)
 		spawnChunk(pos, vel, c, size * (0.6 + math.random() * 0.8), 0.45 + math.random() * 0.35)
 	end
@@ -9886,11 +11154,14 @@ RunService.RenderStepped:Connect(function(dt)
 		local c = active[i]
 		c.Age += dt
 		if c.Age >= c.Life then
+			if c.Spark then
+				liveSparks -= 1
+			end
 			c.Part.Parent = nil
 			table.insert(pool, c.Part)
 			table.remove(active, i)
 		else
-			c.Vel += Vector3.new(0, -FEEL.Gravity * dt, 0)
+			c.Vel += Vector3.new(0, -(c.Gravity or FEEL.Gravity) * dt, 0)
 			c.Pos += c.Vel * dt
 			c.Rot *= CFrame.Angles(c.Spin.X * dt, c.Spin.Y * dt, c.Spin.Z * dt)
 			local k = 1 - (c.Age / c.Life) ^ 2
@@ -9932,20 +11203,71 @@ local function layerColorAt(y: number): Color3
 	return Defs.LayerAtCell(y).Color
 end
 
+-- Per-tool particle/sound behaviour lives in ToolFxController (profiles from shared/ToolFx). It registers itself here at Init; until it
+-- does (or if it failed to start) the plain dirt feedback below is used, so mining never loses its basic feedback.
+local fx: any = nil
+function Effects.SetFx(hooks: any)
+	fx = hooks
+end
+
+-- Shared helpers for ToolFxController (one chunk pool, one cap, one place that owns the parts).
+Effects.Burst = burst
+Effects.SpawnChunk = spawnChunk
+
+-- Drops every transient effect part now (death, respawn, unequip, menu/focus interruptions, new mine generation).
+function Effects.ClearTransient()
+	for i = #active, 1, -1 do
+		local c = active[i]
+		c.Part.Parent = nil
+		table.insert(pool, c.Part)
+		table.remove(active, i)
+	end
+	liveSparks = 0
+	kick = 0
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.CameraOffset = Vector3.zero
+	end
+end
+
 -- Instant, client-predicted feedback at the moment of a swing (before the server answers).
-function Effects.Impact(part: Part, hitPos: Vector3, normal: Vector3)
+function Effects.Impact(part: Part, hitPos: Vector3, normal: Vector3, toolId: string?)
 	local _, y = Grid.FromIndex(tonumber(part.Name) or 1)
 	shakeBlock(part)
-	burst(hitPos, normal, layerColorAt(y), FEEL.ImpactChunks, 14, 0.7)
-	Audio.Play("Impact", 0.9 + math.random() * 0.25)
+	if fx then
+		fx.Impact(toolId, Defs.LayerAtCell(y), hitPos, normal, true)
+	else
+		burst(hitPos, normal, layerColorAt(y), FEEL.ImpactChunks, 14, 0.7)
+		Audio.Play("Impact", 0.9 + math.random() * 0.25)
+	end
 	cameraKick(FEEL.CameraKickImpact)
 end
 
-local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, face: Enum.NormalId?)
+-- Which face of the cell at `center` looks towards `from` (used to place other players' effects on the side they are digging).
+local function faceToward(center: Vector3, from: Vector3?): Vector3
+	if not from then
+		return Vector3.yAxis
+	end
+	local d = from - center
+	local ax, ay, az = math.abs(d.X), math.abs(d.Y), math.abs(d.Z)
+	if ay >= ax and ay >= az then
+		return d.Y >= 0 and Vector3.yAxis or -Vector3.yAxis
+	elseif ax >= az then
+		return d.X >= 0 and Vector3.xAxis or -Vector3.xAxis
+	end
+	return d.Z >= 0 and Vector3.zAxis or -Vector3.zAxis
+end
+
+-- ctx = { Tool = server-reported tool id (or nil), Primary = first cell of this swing, Digger = Player? }. Everything here comes from the
+-- authoritative result: which cells were hit/broken. Nothing looks at what a block contains.
+local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, face: Enum.NormalId?, ctx: any)
 	local x, y, z = Grid.FromIndex(idx)
 	local center = Grid.CellCenter(x, y, z)
 	local site = Workspace:FindFirstChild("DigSite")
 	local part = site and site:FindFirstChild(tostring(idx))
+	local layer = Defs.LayerAtCell(y)
+	local diggerRoot = ctx.Digger and ctx.Digger.Character and ctx.Digger.Character:FindFirstChild("HumanoidRootPart")
+	local diggerPos = diggerRoot and (diggerRoot :: BasePart).Position or nil
 	if dead then
 		if part then
 			shaking[part] = nil
@@ -9961,17 +11283,25 @@ local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, fa
 				end
 			end
 		end
-		local color = layerColorAt(y)
-		burst(center, Vector3.yAxis, color, FEEL.BreakChunks, 24, 1.3)
-		Audio.Play("Break", 0.85 + math.random() * 0.3, mine and 1 or 0.5)
-		if mine then
+		if fx then
+			fx.Break(ctx.Tool, layer, center, mine, ctx.Primary, faceToward(center, diggerPos))
+		else
+			burst(center, Vector3.yAxis, layer.Color, FEEL.BreakChunks, 24, 1.3)
+			Audio.Play("Break", 0.85 + math.random() * 0.3, mine and 1 or 0.5)
+		end
+		if mine and ctx.Primary then
 			cameraKick(FEEL.CameraKickBreak)
 		end
 	elseif part then
 		applyDamage(part :: Part, frac, face)
 		if not mine then
 			shakeBlock(part :: Part)
-			Audio.Play("Impact", 0.9 + math.random() * 0.25, 0.4)
+			local n = faceToward(center, diggerPos)
+			if fx then
+				fx.Impact(ctx.Tool, layer, center + n * (Grid.CellSize / 2), n, false)
+			else
+				Audio.Play("Impact", 0.9 + math.random() * 0.25, 0.4)
+			end
 		end
 	end
 end
@@ -10126,12 +11456,22 @@ function Effects.Init()
 		end
 		table.clear(shaking)
 		table.clear(lastFace)
+		if fx then
+			fx.StopAll()
+		end
 	end)
 	Remotes.Get("DigResult").OnClientEvent:Connect(function(payload)
 		local mine = payload.Digger == player.UserId
-		for _, h in ipairs(payload.Hits) do
+		local digger = Players:GetPlayerByUserId(payload.Digger)
+		if fx and not mine and digger then
+			fx.OtherSwing(payload.Tool, digger) -- restrained third-person trail for nearby players' strikes
+		end
+		for i, h in ipairs(payload.Hits) do
 			local idx = h[1]
-			onHit(idx, h[2], h[3] == 1, mine, lastFace[idx])
+			-- cracks on extra cells are cosmetic and capped; a cell that actually broke is always handled
+			if i <= ToolFx.Caps.AreaCellsMax or h[3] == 1 then
+				onHit(idx, h[2], h[3] == 1, mine, lastFace[idx], { Tool = payload.Tool, Primary = i == 1, Digger = digger })
+			end
 			if h[3] == 1 then
 				lastFace[idx] = nil
 			end
@@ -10145,7 +11485,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="74">
+          <Item class="ModuleScript" referent="81">
             <Properties>
               <string name="Name">GuideController</string>
               <string name="Source"><![CDATA[-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
@@ -10333,7 +11673,7 @@ return GuideController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="75">
+          <Item class="ModuleScript" referent="82">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -10409,7 +11749,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="76">
+          <Item class="ModuleScript" referent="83">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -10491,7 +11831,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="77">
+          <Item class="ModuleScript" referent="84">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -10814,7 +12154,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="78">
+          <Item class="ModuleScript" referent="85">
             <Properties>
               <string name="Name">RelicController</string>
               <string name="Source"><![CDATA[-- Client side of the contested relic (docs/RELIC_PVP.md). Everything shown here is read from server-published Workspace attributes
@@ -11172,7 +12512,7 @@ return RelicController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="79">
+          <Item class="ModuleScript" referent="86">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -11245,7 +12585,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="80">
+          <Item class="ModuleScript" referent="87">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -11362,7 +12702,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="81">
+          <Item class="ModuleScript" referent="88">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
@@ -11897,7 +13237,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="82">
+          <Item class="ModuleScript" referent="89">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -11911,7 +13251,7 @@ local State = {
 		Cash = 0, Reputation = 0, Count = 0, Capacity = 1, BackpackValue = 0,
 		ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId,
 		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any, Settings = {} :: any,
-		Save = nil :: any, Collection = {} :: any, Display = {} :: any, Guide = {} :: any, GuideBase = {} :: any, Stats = {} :: any,
+		Save = nil :: any, Dev = nil :: any, Collection = {} :: any, Display = {} :: any, Guide = {} :: any, GuideBase = {} :: any, Stats = {} :: any,
 	},
 	Loaded = false,
 }
@@ -11943,7 +13283,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="83">
+          <Item class="ModuleScript" referent="90">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -12019,7 +13359,520 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="84">
+          <Item class="ModuleScript" referent="91">
+            <Properties>
+              <string name="Name">ToolFxController</string>
+              <string name="Source"><![CDATA[-- Per-tool mining effects: swing trail, impact puff / chips / sparks / ring / streak, break bursts, and the matching sounds.
+-- All data comes from shared/ToolFx profiles (cosmetic only: no stat is read or changed here). What it reacts to:
+--   * Swing (local, immediate): the trail on the assembled tool, enabled ONLY for the strike part of the swing.
+--   * Impact (local prediction at swing time; other players' hits arrive from the server result): chips, puff, sound, ring, streak, sparks.
+--   * Break (server result): the debris burst and the break sound, plus a small chip burst for each EXTRA cell the server reports.
+-- It is told the tool id, the LAYER of the cell (from its depth) and positions. It is never given a block's contents, so nothing here can
+-- reveal a hidden reward, rarity or loot assignment.
+-- Cleanup: trails are disabled by StopOwn()/StopAll() (menus, focus loss, carrying, unequip, tool change, death, respawn, new mine); every
+-- ring/streak part has a failsafe lifetime; chunks and sparks are capped and pooled in EffectsController.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local ToolFx = require(ReplicatedStorage.Shared.ToolFx)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+local ViewmodelMath = require(ReplicatedStorage.Shared.ViewmodelMath)
+
+local Effects = require(script.Parent.EffectsController)
+local Audio = require(script.Parent.AudioController)
+local CameraController = require(script.Parent.CameraController)
+local InputMode = require(script.Parent.InputMode)
+local State = require(script.Parent.State)
+
+local player = Players.LocalPlayer
+local Fx = {}
+
+local gate: { [string]: number } = {} -- local player's effect gates
+local otherGate: { [string]: number } = {} -- shared gate for everyone else's restrained effects
+local otherSwingGate: any = setmetatable({}, { __mode = "k" }) -- per other player: trail pulses
+local rings: { Part } = {}
+local streaks: { Part } = {}
+local liveTrails: { [Trail]: number } = {} -- trail -> time it must be off by
+local trailToken: any = setmetatable({}, { __mode = "k" })
+local puffPart: Part? = nil
+local puffEmitter: ParticleEmitter? = nil
+
+local function hex(s: string): Color3
+	return Color3.fromHex(s)
+end
+
+local function now(): number
+	return os.clock()
+end
+
+local function rand(a: number, b: number): number
+	return a + math.random() * (b - a)
+end
+
+local function localRoot(): BasePart?
+	local c = player.Character
+	return c and c:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+-- Other players' effects are skipped when they are far from the local player.
+local function nearEnough(pos: Vector3): boolean
+	local root = localRoot()
+	return root ~= nil and (root.Position - pos).Magnitude <= ToolFx.Caps.OtherPlayerMaxDistance
+end
+
+-- Puff: ONE reused emitter that emits a couple of soft particles at a point. Never emits continuously (Rate = 0). --------------------
+local function ensurePuff()
+	if puffPart and puffPart.Parent and puffEmitter then
+		return
+	end
+	local p = Instance.new("Part")
+	p.Name = "PuffEmitter"
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CastShadow = false
+	p.Transparency = 1
+	p.Size = Vector3.one * 0.2
+	p.Parent = Effects.GetFolder()
+	local e = Instance.new("ParticleEmitter")
+	e.Rate = 0
+	e.Texture = "rbxasset://textures/particles/smoke_main.dds"
+	e.Lifetime = NumberRange.new(0.3, 0.5)
+	e.Speed = NumberRange.new(2, 5)
+	e.SpreadAngle = Vector2.new(55, 55)
+	e.Drag = 3
+	e.LightEmission = 0
+	e.LightInfluence = 1
+	e.Rotation = NumberRange.new(0, 360)
+	e.RotSpeed = NumberRange.new(-60, 60)
+	e.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(1, 1) })
+	e.EmissionDirection = Enum.NormalId.Front
+	e.Parent = p
+	puffPart, puffEmitter = p, e
+end
+
+local function emitPuff(color: Color3, size: number, pos: Vector3, normal: Vector3, count: number)
+	ensurePuff()
+	local part, e = puffPart :: Part, puffEmitter :: ParticleEmitter
+	part.CFrame = CFrame.lookAt(pos + normal * 0.1, pos + normal)
+	e.Color = ColorSequence.new(color)
+	e.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size * 0.35), NumberSequenceKeypoint.new(1, size) })
+	e:Emit(math.clamp(count, 1, 3))
+end
+
+-- Ring: a flat circle (UIStroke on a thin part's face) that grows and fades. At most Caps.Rings alive. ---------------------------------
+local function dropFrom(list: { Part }, part: Part)
+	local i = table.find(list, part)
+	if i then
+		table.remove(list, i)
+	end
+	part:Destroy()
+end
+
+local function spawnRing(pos: Vector3, normal: Vector3, colorHex: string, radius: number, time: number)
+	if #rings >= ToolFx.Caps.Rings then
+		return
+	end
+	local p = Instance.new("Part")
+	p.Name = "FxRing"
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CastShadow = false
+	p.Transparency = 1
+	p.Size = Vector3.new(0.6, 0.6, 0.05)
+	p.CFrame = CFrame.lookAt(pos + normal * 0.06, pos + normal) -- the part's Front face looks along the normal
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	gui.CanvasSize = Vector2.new(128, 128)
+	gui.LightInfluence = 0
+	gui.Parent = p
+	local f = Instance.new("Frame")
+	f.Size = UDim2.fromScale(1, 1)
+	f.BackgroundTransparency = 1
+	f.Parent = gui
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(1, 0)
+	c.Parent = f
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 5
+	stroke.Color = hex(colorHex)
+	stroke.Transparency = 0.35
+	stroke.Parent = f
+	p.Parent = Effects.GetFolder()
+	table.insert(rings, p)
+	local info = TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	TweenService:Create(p, info, { Size = Vector3.new(radius * 2, radius * 2, 0.05) }):Play()
+	local tw = TweenService:Create(stroke, info, { Transparency = 1 })
+	tw:Play()
+	tw.Completed:Once(function()
+		dropFrom(rings, p)
+	end)
+	Debris:AddItem(p, time + 0.6) -- failsafe
+end
+
+-- Streak: one thin bright bar next to (never on) the aim point that shrinks away. At most Caps.Streaks alive. -------------------------
+local function spawnStreak(pos: Vector3, normal: Vector3, colorHex: string, length: number, time: number)
+	if #streaks >= ToolFx.Caps.Streaks then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	-- a diagonal across the face, offset along its own perpendicular so the aim point itself stays clear
+	local right = cam.CFrame.RightVector
+	local along = (right * 0.8 + cam.CFrame.UpVector * 0.55)
+	along = (along - normal * along:Dot(normal))
+	if along.Magnitude < 0.05 then
+		return
+	end
+	along = along.Unit
+	local across = normal:Cross(along)
+	local centre = pos + normal * 0.08 + across * 1.1
+	local p = Instance.new("Part")
+	p.Name = "FxStreak"
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CastShadow = false
+	p.Material = Enum.Material.Neon
+	p.Color = hex(colorHex)
+	p.Transparency = 0.3
+	p.Size = Vector3.new(0.07, 0.07, length)
+	p.CFrame = CFrame.lookAt(centre, centre + along)
+	p.Parent = Effects.GetFolder()
+	table.insert(streaks, p)
+	local tw = TweenService:Create(p, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+		{ Size = Vector3.new(0.02, 0.02, length * 0.25), Transparency = 1 })
+	tw:Play()
+	tw.Completed:Once(function()
+		dropFrom(streaks, p)
+	end)
+	Debris:AddItem(p, time + 0.5)
+end
+
+local function spawnSparks(spec, pos: Vector3, normal: Vector3, scale: number)
+	local n = math.max(1, math.floor(spec.Count * scale + 0.5))
+	local color = hex(spec.Color)
+	for _ = 1, n do
+		local rnd = Vector3.new(rand(-1, 1), rand(-0.3, 1), rand(-1, 1))
+		local vel = (normal * 1.2 + rnd).Unit * spec.Speed * rand(0.6, 1.1)
+		Effects.SpawnChunk(pos, vel, color, 0.16, rand(0.18, 0.32), { Spark = true, Gravity = 40 })
+	end
+end
+
+local function volumeFor(mine: boolean): number
+	return mine and 1 or 0.4
+end
+
+-- Impact ---------------------------------------------------------------------------------------------------------------------------------
+function Fx.Impact(toolId: string?, layer: any, pos: Vector3, normal: Vector3, mine: boolean)
+	if not mine and not nearEnough(pos) then
+		return
+	end
+	local profile = ToolFx.For(toolId)
+	local g = mine and gate or otherGate
+	local t = now()
+	local scale = mine and 1 or ToolFx.Caps.OtherPlayerChunkScale
+	local dirt = profile.Dirt
+
+	Effects.Burst(pos, normal, layer.Color, math.max(1, math.floor(dirt.Impact * scale + 0.5)), dirt.Speed, dirt.Size, dirt.Spread)
+	if profile.Puff and ToolFx.Gate(g, "Puff", t, ToolFx.GapFor(profile, "Puff")) then
+		emitPuff(hex(profile.Puff.Color):Lerp(layer.Color, 0.45), profile.Puff.Size * (mine and 1 or 0.7), pos, normal, 1)
+	end
+	local s = profile.Sound.Impact
+	Audio.Play("Impact", s.Pitch * rand(0.94, 1.08), s.Volume * volumeFor(mine))
+	local tick = profile.Sound.Tick
+	if tick and mine and ToolFx.Gate(g, "Tick", t, tick.MinGap or 0.2) then
+		Audio.Play("Tick", tick.Pitch, tick.Volume)
+	end
+	if ToolFx.SparksOn(profile, layer.Id) and ToolFx.Gate(g, "Sparks", t, ToolFx.GapFor(profile, "Sparks")) then
+		spawnSparks(profile.Sparks, pos, normal, scale)
+	end
+	-- the larger accents are the local player's own; other players get the restrained set above
+	if mine then
+		local ring = profile.Ring
+		if ring and (ring.On == "impact" or ring.On == "both") and ToolFx.Gate(g, "Ring", t, ToolFx.GapFor(profile, "Ring")) then
+			spawnRing(pos, normal, ring.Color, ring.Radius, ring.Time)
+		end
+		local streak = profile.Streak
+		if streak and ToolFx.Gate(g, "Streak", t, ToolFx.GapFor(profile, "Streak")) then
+			spawnStreak(pos, normal, streak.Color, streak.Length, streak.Time)
+		end
+	end
+end
+
+-- Break: `primary` is the swing's own target; extra cells (area tools, dynamite) get a small chip burst only, one per cell the server reports.
+function Fx.Break(toolId: string?, layer: any, center: Vector3, mine: boolean, primary: boolean, normal: Vector3)
+	if not mine and not nearEnough(center) then
+		return
+	end
+	local profile = ToolFx.For(toolId)
+	local g = mine and gate or otherGate
+	local t = now()
+	local scale = mine and 1 or ToolFx.Caps.OtherPlayerChunkScale
+	local dirt = profile.Dirt
+	if not primary then
+		Effects.Burst(center, normal, layer.Color, math.max(1, math.floor(dirt.Break * 0.25 * scale + 0.5)), dirt.BreakSpeed * 0.8, dirt.BreakSize * 0.7, dirt.Spread)
+		return
+	end
+	Effects.Burst(center, Vector3.yAxis, layer.Color, math.max(2, math.floor(dirt.Break * scale + 0.5)), dirt.BreakSpeed, dirt.BreakSize, dirt.Spread)
+	local accent = profile.Accent
+	if accent then
+		Effects.Burst(center, Vector3.yAxis, hex(accent.Color), math.max(1, math.floor(accent.Count * scale + 0.5)), dirt.BreakSpeed * 0.9, 0.45)
+	end
+	if ToolFx.SparksOn(profile, layer.Id) and ToolFx.Gate(g, "BreakSparks", t, ToolFx.GapFor(profile, "Sparks")) then
+		spawnSparks(profile.Sparks, center, normal, scale)
+	end
+	local s = profile.Sound.Break
+	Audio.Play("Break", s.Pitch * rand(0.94, 1.08), s.Volume * volumeFor(mine))
+	local ring = profile.Ring
+	if mine and ring and ring.On == "both" and ToolFx.Gate(g, "Ring", t, ToolFx.GapFor(profile, "Ring")) then
+		spawnRing(center + normal * (Grid.CellSize / 2), normal, ring.Color, ring.Radius, ring.Time)
+	end
+end
+
+-- Trails ---------------------------------------------------------------------------------------------------------------------------------------
+-- The trail rig is built from the SAME part spec as the held tool / viewmodel (ToolFx.RigPoints), so it sits on the real working end.
+local function ensureTrail(container: Instance, appearanceId: string, profile: any, scale: number): Trail?
+	local existing = container:FindFirstChild("FxTrail", true)
+	if existing then
+		return existing :: Trail
+	end
+	local cfg = profile.Trail
+	if not cfg then
+		return nil
+	end
+	local handle = container:FindFirstChild("Handle", true)
+	if not handle or not handle:IsA("BasePart") then
+		return nil
+	end
+	local spec = ToolModels.GetSpec(appearanceId)
+	local pts = ToolFx.RigPoints(spec.Parts, spec.Checks and spec.Checks.WorkingEnd)
+	local half = math.min((pts.B.X - pts.A.X) / 2, cfg.Width)
+	local a0, a1 = Instance.new("Attachment"), Instance.new("Attachment")
+	a0.Name, a1.Name = "FxTrailA", "FxTrailB"
+	a0.Position = Vector3.new(pts.Tip.X - half, pts.Tip.Y, 0) * scale
+	a1.Position = Vector3.new(pts.Tip.X + half, pts.Tip.Y, 0) * scale
+	a0.Parent, a1.Parent = handle, handle
+	local trail = Instance.new("Trail")
+	trail.Name = "FxTrail"
+	trail.Attachment0, trail.Attachment1 = a0, a1
+	trail.Color = ColorSequence.new(hex(cfg.Color))
+	trail.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, cfg.Transparency), NumberSequenceKeypoint.new(1, 1) })
+	trail.Lifetime = cfg.Lifetime
+	trail.MinLength = 0.05
+	trail.FaceCamera = true
+	trail.LightEmission = 0
+	trail.Enabled = false -- only ever on during a strike
+	trail.Parent = handle
+	return trail
+end
+
+local function trailOff(trail: Trail)
+	trail.Enabled = false
+	liveTrails[trail] = nil
+end
+
+-- Turns the trail on for [delay, delay + length] seconds from now, then off. A newer pulse supersedes an older one.
+local function pulse(trail: Trail, delay: number, length: number)
+	local token = (trailToken[trail] or 0) + 1
+	trailToken[trail] = token
+	task.delay(delay, function()
+		if trailToken[trail] ~= token or not trail.Parent then
+			return
+		end
+		trail.Enabled = true
+		liveTrails[trail] = now() + length + 0.05
+		task.delay(length, function()
+			if trailToken[trail] == token and trail.Parent then
+				trailOff(trail)
+			end
+		end)
+	end)
+end
+
+local function heldAppearance(): string?
+	local char = player.Character
+	local tool = char and char:FindFirstChild("Shovel")
+	local id = tool and (tool :: Instance):GetAttribute("AppearanceId")
+	return type(id) == "string" and id or nil
+end
+
+-- Local player's swing: called by DigController at the moment a swing starts (before the server answers).
+function Fx.Swing(toolId: string?, interval: number)
+	local profile = ToolFx.For(toolId)
+	if not profile.Trail or not ToolFx.Gate(gate, "Trail", now(), 0.1) then
+		return
+	end
+	local appearance = heldAppearance()
+	local char = player.Character
+	if not appearance or not char then
+		return
+	end
+	local container: Instance?
+	local scale = 1
+	if CameraController.IsActive() then
+		container = Workspace.CurrentCamera and Workspace.CurrentCamera:FindFirstChild("ToolViewmodel")
+		scale = ViewmodelMath.Scale
+	else
+		container = char:FindFirstChild("Shovel")
+	end
+	if not container then
+		return
+	end
+	local trail = ensureTrail(container, appearance, profile, scale)
+	if trail then
+		local delay, length = ToolFx.StrikeWindow(math.min(interval, 0.5))
+		pulse(trail, delay, length)
+	end
+end
+
+-- Another player's strike (from the server result): a short restrained trail on THEIR held tool, only if they are close.
+function Fx.OtherSwing(toolId: string?, digger: Player)
+	local def = toolId and Defs.Tools[toolId]
+	local profile = ToolFx.For(toolId)
+	local char = digger.Character
+	local tool = char and char:FindFirstChild("Shovel")
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not def or not profile.Trail or not tool or not root or not nearEnough((root :: BasePart).Position) then
+		return
+	end
+	local g = otherSwingGate[digger]
+	if not g then
+		g = {}
+		otherSwingGate[digger] = g
+	end
+	if not ToolFx.Gate(g, "Trail", now(), 0.25) then
+		return
+	end
+	local appearance = (tool :: Instance):GetAttribute("AppearanceId")
+	if type(appearance) ~= "string" then
+		return
+	end
+	local trail = ensureTrail(tool :: Instance, appearance, profile, 1)
+	if trail then
+		local delay, length = ToolFx.StrikeWindow(math.min(1 / def.Rate, 0.5))
+		pulse(trail, delay, length)
+	end
+end
+
+-- Cleanup -----------------------------------------------------------------------------------------------------------------------------------
+local function disableTrailsUnder(root: Instance?)
+	if not root then
+		return
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("Trail") and d.Name == "FxTrail" then
+			trailToken[d] = (trailToken[d] or 0) + 1 -- cancels any pending pulse
+			trailOff(d)
+		end
+	end
+end
+
+-- The local player's own tool effects stop now: trails off, rings/streaks gone, no pending pulses. (Menus, focus loss, carrying, unequip.)
+function Fx.StopOwn()
+	for trail in pairs(liveTrails) do
+		trailToken[trail] = (trailToken[trail] or 0) + 1
+		trailOff(trail)
+	end
+	disableTrailsUnder(player.Character)
+	disableTrailsUnder(Workspace.CurrentCamera)
+	for i = #rings, 1, -1 do
+		local p = rings[i]
+		table.remove(rings, i)
+		p:Destroy()
+	end
+	for i = #streaks, 1, -1 do
+		local p = streaks[i]
+		table.remove(streaks, i)
+		p:Destroy()
+	end
+	if puffEmitter then
+		puffEmitter:Clear()
+	end
+	table.clear(gate)
+end
+
+-- Everything: also the airborne debris and sparks (death, respawn, a new mine).
+function Fx.StopAll()
+	Fx.StopOwn()
+	table.clear(otherGate)
+	Effects.ClearTransient()
+end
+
+-- Test/inspection hooks (counts of live effect objects; no gameplay use).
+function Fx.Counts()
+	local trails = 0
+	for trail in pairs(liveTrails) do
+		if trail.Enabled then
+			trails += 1
+		end
+	end
+	return { Rings = #rings, Streaks = #streaks, Trails = trails }
+end
+
+function Fx.Init()
+	Effects.SetFx(Fx)
+
+	-- safety net: a trail left on for any reason is forced off once its strike window is over
+	RunService.Heartbeat:Connect(function()
+		local t = now()
+		for trail, offAt in pairs(liveTrails) do
+			if t > offAt or not trail:IsDescendantOf(Workspace) then
+				trailOff(trail)
+			end
+		end
+	end)
+
+	local function onCharacter(char: Model)
+		Fx.StopAll() -- respawn: nothing from the previous life survives
+		local hum = char:WaitForChild("Humanoid", 10)
+		if hum then
+			(hum :: Humanoid).Died:Connect(Fx.StopAll)
+		end
+		char.ChildRemoved:Connect(function(child)
+			if child:IsA("Tool") then
+				Fx.StopOwn() -- unequipped / replaced / stowed for carrying
+			end
+		end)
+	end
+	player.CharacterAdded:Connect(onCharacter)
+	player.CharacterRemoving:Connect(Fx.StopAll)
+	if player.Character then
+		task.spawn(onCharacter, player.Character)
+	end
+
+	local lastTool: string? = nil
+	State.Connect(function(d)
+		if d.Carrying or (lastTool and d.ToolId ~= lastTool) then
+			Fx.StopOwn()
+		end
+		lastTool = d.ToolId
+	end)
+	InputMode.OnChanged(Fx.StopOwn) -- a menu opened / free cursor toggled
+	GuiService.MenuOpened:Connect(Fx.StopOwn)
+	UserInputService.WindowFocusReleased:Connect(Fx.StopOwn)
+end
+
+return Fx
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="92">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -12042,6 +13895,7 @@ local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
 local ShopUI = require(script.Parent.ShopUI)
 local PauseMenu = require(script.Parent.PauseMenu)
+local DevPanel = require(script.Parent.DevPanel)
 local CollectionUI = require(script.Parent.CollectionUI)
 local Banner = require(script.Parent.BannerQueue)
 local Guide = require(script.Parent.GuideController)
@@ -12325,6 +14179,7 @@ local function build()
 	Banner.Build(gui)
 	PauseMenu.Build(gui)
 	PauseMenu.BuildGearButton(gui)
+	DevPanel.Build(gui) -- builds nothing until the server marks this account as authorised
 	CollectionUI.Build(gui)
 	CollectionUI.OnOpened(function()
 		Guide.Dismiss("collection")
@@ -12531,7 +14386,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="85">
+          <Item class="ModuleScript" referent="93">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -12645,7 +14500,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="86">
+          <Item class="ModuleScript" referent="94">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -12790,7 +14645,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="87">
+        <Item class="LocalScript" referent="95">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
@@ -12802,6 +14657,7 @@ local State = require(Controllers.State)
 local UI = require(Controllers.UIController)
 local Camera = require(Controllers.CameraController)
 local Effects = require(Controllers.EffectsController)
+local ToolFxController = require(Controllers.ToolFxController)
 local InputMode = require(Controllers.InputMode)
 local Settings = require(Controllers.Settings)
 local Viewmodel = require(Controllers.ViewmodelController)
@@ -12811,6 +14667,7 @@ local Throw = require(Controllers.ThrowController)
 local Guide = require(Controllers.GuideController)
 local CampShelf = require(Controllers.CampShelf)
 local Relic = require(Controllers.RelicController)
+local DevPanel = require(Controllers.DevPanel)
 
 State.Init()
 InputMode.Init()
@@ -12823,11 +14680,13 @@ Relic.Init()
 Camera.Init()
 Viewmodel.Init()
 Effects.Init()
+ToolFxController.Init()
 Dig.Init()
 Interaction.Init()
 Throw.Init()
 Guide.Init()
 CampShelf.Init()
+DevPanel.Init()
 
 -- Ask for state until the server answers (data may still be loading).
 task.spawn(function()

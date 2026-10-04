@@ -19,6 +19,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Effects = require(script.Parent.EffectsController)
+local ToolFxController = require(script.Parent.ToolFxController)
 local InputMode = require(script.Parent.InputMode)
 local CameraController = require(script.Parent.CameraController)
 local Viewmodel = require(script.Parent.ViewmodelController)
@@ -305,8 +306,9 @@ local function onStep()
 		faceTarget(target.Part.Position)
 	end
 	swing(interval)
+	ToolFxController.Swing(State.Data.ToolId, interval) -- trail only during the strike, on the assembled tool
 	Effects.NoteFace(target.Part, target.Normal)
-	Effects.Impact(target.Part, target.Position, target.Normal)
+	Effects.Impact(target.Part, target.Position, target.Normal, State.Data.ToolId)
 end
 
 function DigController.Init()

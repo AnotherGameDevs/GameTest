@@ -7,8 +7,9 @@ so replace them with audio you own or have a licence for. Where each cue is trig
 ## Cue list
 | Cue (`Audio.Sounds` key) | Played when | Current placeholder (id / pitch / volume) | Intended sound | Asset needed |
 |---|---|---|---|---|
-| `Impact` | each pickaxe/shovel hit on a block; relic strike | `rbxasset://sounds/action_jump_land.mp3` · 0.8× · 0.8 | dull thud of metal on packed earth; slight variation by layer | 3-4 short (0.1-0.3 s) hit variations, mono |
+| `Impact` | each pickaxe/shovel hit on a block (pitch/volume per tool from `ToolFx` profiles: dry starter, sharp improved, heavy reinforced, ...); relic strike | `rbxasset://sounds/action_jump_land.mp3` · 0.8× · 0.8 | dull thud of metal on packed earth; slight variation by layer | 3-4 short (0.1-0.3 s) hit variations, mono |
 | `Break` | a block breaks; dynamite blast layer; relic hit/shove effect | `rbxasset://sounds/snap.mp3` · 0.7× · 0.9 | crumble / crack of earth or rock | 3 variations (soil, clay/stone, ruins), 0.3-0.5 s |
+| `Tick` | drill tiers (Drill, Industrial Drill) on impact, at most every ~0.2 s | `rbxasset://sounds/switch.wav` (same as `UI`) · 1.6-1.9× · 0.3 | small mechanical click / ratchet | 1 short (0.1 s) |
 | `Coin` | Common treasure reveal | `electronicpingshort.wav` · 1.3× · 0.5 | small metallic tink | 1 short (0.2 s) |
 | `Reveal` (rarity ladder, `PlayReveal`) | Uncommon → Mythic reveals; pitch/notes rise with rarity | `electronicpingshort.wav` · 1.0× · 0.8, 1-4 stacked notes | discovery sparkle, increasingly rich per rarity | 4 stingers: Uncommon, Rare, Epic, Legendary (0.5-1.5 s) |
 | `Sell` | auto-sale in the sell zone | `electronicpingshort.wav` · 3-note arpeggio 0.8/1.0/1.25 | coins pouring into a till | 1 (0.6-1 s) |

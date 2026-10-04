@@ -22,6 +22,7 @@ local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
 local CarryRegistry = require(script.Parent.CarryRegistry)
 local DataService = require(script.Parent.DataService)
+local DevScenario = require(script.Parent.DevScenario)
 local StateService = require(script.Parent.StateService)
 local EquipmentService = require(script.Parent.EquipmentService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
@@ -208,22 +209,33 @@ local function finishCarry(player: Player, recId: string)
 end
 
 -- Discovery ----------------------------------------------------------------------------------------------------
-function ArtifactService.Discover(player: Player, treasureId: string, cellIndex: number): boolean
+-- `nearPlayer` (developer test mode only): place it beside the player instead of in a mine cell. Returns (true, recordId).
+function ArtifactService.Discover(player: Player, treasureId: string, cellIndex: number?, nearPlayer: boolean?): (boolean, string?)
 	local def = Defs.Treasure[treasureId]
 	if not def or not def.RequiresCarry or not DataService.Get(player) then
-		return false
+		return false, nil
 	end
-	local x, y, z = Grid.FromIndex(cellIndex)
-	local center = Grid.CellCenter(x, y, z)
 	local size = artifactSize(treasureId)
-
-	-- Prefer the cell it was found in (visible + accessible, never inside remaining dirt); otherwise near the player.
-	local cf = findResting({ center, center + Vector3.new(1, 0, 0), center - Vector3.new(1, 0, 0),
-		center + Vector3.new(0, 0, 1), center - Vector3.new(0, 0, 1) }, size)
-	if not cf then
+	local center: Vector3
+	local cf: CFrame?
+	if nearPlayer or not cellIndex then
 		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 3.5), size)
+		if not hrp then
+			return false, nil
+		end
+		center = hrp.Position
+		cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 4), size)
+	else
+		local x, y, z = Grid.FromIndex(cellIndex)
+		center = Grid.CellCenter(x, y, z)
+		-- Prefer the cell it was found in (visible + accessible, never inside remaining dirt); otherwise near the player.
+		cf = findResting({ center, center + Vector3.new(1, 0, 0), center - Vector3.new(1, 0, 0),
+			center + Vector3.new(0, 0, 1), center - Vector3.new(0, 0, 1) }, size)
+		if not cf then
+			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				cf = findResting(ringAround(hrp.Position, hrp.CFrame.LookVector, 3.5), size)
+			end
 		end
 	end
 	local position = cf and cf.Position or (center + Vector3.new(0, size.Y / 2 - Grid.CellSize / 2 + 0.05, 0))
@@ -232,7 +244,7 @@ function ArtifactService.Discover(player: Player, treasureId: string, cellIndex:
 	task.delay(Config.Artifacts.SpawnDelay, spawnWorldModel, rec.Id)
 	say(player, "Important artifact found - carry it to camp.", "Good")
 	AnalyticsService.Log(player, "ArtifactDiscovered", { id = rec.Id, treasure = treasureId })
-	return true
+	return true, rec.Id
 end
 
 -- Pickup ---------------------------------------------------------------------------------------------------------
@@ -364,16 +376,25 @@ function ArtifactService.Deposit(player: Player)
 		return
 	end
 	local def = Defs.Treasure[rec.TreasureId]
-	data.Cash += value
-	data.Stats.CashEarned += value
-	data.Stats.TreasureFound += 1
-	data.Stats.RelicsExtracted += 1
-	local isNew, completed = CollectionSpec.Register(data.Collection, rec.TreasureId, os.time())
-	if completed then
-		Remotes.Get("SetCompleted"):FireClient(player, completed, Defs.LayerName(completed))
+	local isNew = false
+	if DevScenario.IsTest(rec.Id) and not DataService.InTestMode(player) then
+		-- created by the developer panel: it pays out ONLY inside a test overlay, never into a normal profile
+		value = 0
+		say(player, "Test artifact: it gives no reward outside Developer Test Mode.", "Info")
+	else
+		data.Cash += value
+		data.Stats.CashEarned += value
+		data.Stats.TreasureFound += 1
+		data.Stats.RelicsExtracted += 1
+		local completed
+		isNew, completed = CollectionSpec.Register(data.Collection, rec.TreasureId, os.time())
+		if completed then
+			Remotes.Get("SetCompleted"):FireClient(player, completed, Defs.LayerName(completed))
+		end
+		DataService.MarkDirty(player)
+		MetricsService.Sold(player, value, 1)
 	end
-	DataService.MarkDirty(player)
-	MetricsService.Sold(player, value, 1)
+	DevScenario.Clear(rec.Id)
 
 	finishCarry(player, rec.Id)
 	depositedRemote:FireClient(player, def.Name, value, isNew)
