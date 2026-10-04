@@ -17,10 +17,17 @@ local RateLimiter = require(Services.RateLimiter)
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
 
-DataService.Init()
-EquipmentService.Init()
-DigService.Init()
-EconomyService.Init()
+for name, init in pairs({
+	Data = DataService.Init,
+	Equipment = EquipmentService.Init,
+	Dig = DigService.Init,
+	Economy = EconomyService.Init,
+}) do
+	local ok, err = pcall(init)
+	if not ok then
+		warn(("[Main] %sService failed to start: %s"):format(name, tostring(err)))
+	end
+end
 
 DataService.OnLoaded(function(player)
 	StateService.Push(player)

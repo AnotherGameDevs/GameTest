@@ -50,9 +50,17 @@ local function migrate(data)
 	Util.Reconcile(data, defaultData())
 end
 
+-- GetDataStore throws in an unpublished place, so it must never run unprotected.
 local store
 if Config.Data.Enabled then
-	store = DataStoreService:GetDataStore(Config.Data.StoreName)
+	local ok, result = pcall(function()
+		return DataStoreService:GetDataStore(Config.Data.StoreName)
+	end)
+	if ok then
+		store = result
+	else
+		warn("[DataService] DataStore unavailable (publish the place to enable saving). Running without saving. " .. tostring(result))
+	end
 end
 
 local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean } } = {}
@@ -65,12 +73,17 @@ end
 
 local function attempt(fn: () -> any, tries: number)
 	local ok, result
+	if RunService:IsStudio() then
+		tries = 1 -- fail fast in Studio so a missing API permission doesn't delay loading
+	end
 	for i = 1, tries do
 		ok, result = pcall(fn)
 		if ok then
 			return true, result
 		end
-		task.wait(i)
+		if i < tries then
+			task.wait(i)
+		end
 	end
 	return false, result
 end
