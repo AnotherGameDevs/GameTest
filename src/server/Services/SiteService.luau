@@ -1,6 +1,7 @@
 -- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
 -- *exposed* cells (those touching air), so the instance count stays tiny even for a big site.
--- Generation is seeded, so the site can be reset/regenerated cleanly (future "Excavation Shift").
+-- Each generation has TWO seeds: a fresh server-only LOOT seed (placement of rewards and pockets, never sent anywhere) and a
+-- cosmetic seed (colour variation and remnants). Reset timing and the state machine live in MineShiftService / MineLifecycle.
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -8,18 +9,23 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local MineStyle = require(ReplicatedStorage.Shared.MineStyle)
+local LootPlan = require(ReplicatedStorage.Shared.LootPlan)
+local LootBoard = require(ReplicatedStorage.Shared.LootBoard)
 local MineDetails = require(script.Parent.MineDetails)
 
 local SiteService = {}
 
 local health: { number } = {}
 local maxHealth: { number } = {}
-local loot: { [number]: string } = {}
+local board = LootBoard.new(0, {})
 local parts: { [number]: Part } = {}
 local pocketOf: { [number]: string } = {} -- cell -> discovery pocket kind
 local detailBuilt: { [number]: boolean } = {}
 local liveDetails = 0
+local liveDetailParts = 0
+local detailPartCount: { [number]: number } = {}
 local currentSeed = 0
+local generationCounts: { [string]: number } = {}
 local folder: Folder
 local generation = 0
 local dugTotal = 0
@@ -47,12 +53,12 @@ local function ensureDetail(idx: number)
 	if not part or detailBuilt[idx] or (health[idx] or 0) <= 0 then
 		return
 	end
-	if liveDetails >= Config.Mine.MaxDetails then
+	if liveDetails >= Config.Mine.MaxDetails or liveDetailParts >= Config.Mine.MaxDetailParts then
 		return
 	end
 	local x, y, z = Grid.FromIndex(idx)
 	local layer = Defs.LayerAtCell(y)
-	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, loot[idx], pocketOf[idx])
+	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, board:Peek(idx), pocketOf[idx])
 	if not spec then
 		return
 	end
@@ -60,10 +66,16 @@ local function ensureDetail(idx: number)
 	for i = 0, 5 do
 		local face = (spec.FaceRot + i) % 6 + 1
 		if faceOpen(x, y, z, face) and not (isExitWall and face == 3) then
-			local n = MineDetails.Build(spec.Kind, spec.Variant, part, part.Position, FACE_NORMALS[face])
+			local specs = MineDetails.Specs(spec, Defs.Treasure)
+			if #specs == 0 or liveDetailParts + #specs > Config.Mine.MaxDetailParts then
+				return
+			end
+			local n = MineDetails.Build(specs, spec.Tell and "tell" or spec.Kind, part, part.Position, FACE_NORMALS[face])
 			if n > 0 then
 				detailBuilt[idx] = true
+				detailPartCount[idx] = n
 				liveDetails += 1
+				liveDetailParts += n
 			end
 			return
 		end
@@ -103,53 +115,52 @@ function SiteService.IsExitWall(x: number, z: number): boolean
 	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + 1e-3
 end
 
-function SiteService.Generate(seedIn: number?)
+-- Builds a brand-new mine. `lootSeed` defaults to a FRESH random server-only value (never a constant, never derived from
+-- the cosmetic seed or sent to clients); `cosmeticSeed` only varies colours/remnants. Returns the new generation number.
+function SiteService.Generate(lootSeedIn: number?, cosmeticSeedIn: number?)
 	generation += 1
-	local seed: number = seedIn or Config.Site.Seed
+	local lootSeed: number = lootSeedIn or Random.new():NextInteger(1, 2147483646)
+	local cosmeticSeed: number = cosmeticSeedIn or (Config.Site.Seed + generation * 7919)
 	if folder then
 		folder:Destroy()
 	end
 	folder = Instance.new("Folder")
 	folder.Name = "DigSite"
+	folder:SetAttribute("Generation", generation)
 	folder.Parent = Workspace
 
 	table.clear(health)
 	table.clear(maxHealth)
-	table.clear(loot)
 	table.clear(parts)
 	table.clear(pocketOf)
 	table.clear(detailBuilt)
+	table.clear(detailPartCount)
 	liveDetails = 0
-	currentSeed = seed
+	liveDetailParts = 0
+	currentSeed = cosmeticSeed
 	table.clear(dugByLayer)
 	table.clear(cellsByLayer)
 	dugTotal = 0
 	generatedAt = os.clock()
 
-	local rng = Random.new(seed)
 	for idx = 1, Grid.Count do
 		local _, y = Grid.FromIndex(idx)
 		local layer = Defs.LayerAtCell(y)
 		health[idx] = layer.Health
-		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 		maxHealth[idx] = layer.Health
-		if rng:NextNumber() < layer.TreasureChance then
-			local id = Defs.PickTreasure(layer.Id, rng)
-			if id then
-				loot[idx] = id
-			end
-		end
+		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 	end
 
-	-- Discovery pockets: compact, seeded, tier-appropriate arrangements (pottery cache / fossil patch / broken masonry).
-	-- Their cells get a pocket tint, and their loot is the pocket's own (replacing whatever was rolled for those cells).
-	for _, pocket in ipairs(MineStyle.Pockets(seed)) do
+	-- Reward placement: rolled ONCE here (layer tables, per-generation limits on important artifacts, random pockets) from
+	-- the fresh loot seed. A rejoining player never triggers this; only a completed reset does.
+	local plan = LootPlan.Generate(Random.new(lootSeed), lootSeed)
+	board = LootBoard.new(generation, plan.Loot)
+	for _, pocket in ipairs(plan.Pockets) do
 		for _, c in ipairs(pocket.Cells) do
-			local pidx = Grid.ToIndex(c[1], c[2], c[3])
-			pocketOf[pidx] = pocket.Kind
-			loot[pidx] = c[4]
+			pocketOf[Grid.ToIndex(c[1], c[2], c[3])] = pocket.Kind
 		end
 	end
+	generationCounts = plan.Counts
 
 	-- Instance only the cells that start exposed: the top surface row, plus the wall of cells facing the exit shaft
 	-- (open air beyond the grid edge), so players can dig through to the ladder from any depth.
@@ -162,18 +173,32 @@ function SiteService.Generate(seedIn: number?)
 	return generation
 end
 
--- Depletion figures used by the Fresh Dig refresh (docs/MINE_SHIFT.md). Fractions are of ALL cells / of a layer's cells.
-function SiteService.Depletion()
-	local byLayer = {}
-	for layerId, total in pairs(cellsByLayer) do
-		byLayer[layerId] = (dugByLayer[layerId] or 0) / math.max(total, 1)
+-- Depletion for the reset policy: the fraction of DIGGABLE cells already removed, where diggable = layers that a tool of
+-- tier `maxTier` (the best tool among players online) can break. Also the whole-mine fraction and the generation's age.
+function SiteService.Depletion(maxTier: number?)
+	local tier = maxTier or 1
+	local dug, total = 0, 0
+	for _, layer in ipairs(Config.Layers) do
+		if (layer.MinToolTier or 1) <= tier then
+			dug += dugByLayer[layer.Id] or 0
+			total += cellsByLayer[layer.Id] or 0
+		end
 	end
 	return {
+		Diggable = dug / math.max(total, 1),
 		Total = dugTotal / math.max(Grid.Count, 1),
-		ByLayer = byLayer,
 		AgeMinutes = (os.clock() - generatedAt) / 60,
 		Generation = generation,
 	}
+end
+
+function SiteService.Generation(): number
+	return generation
+end
+
+-- Counts of each treasure buried in this generation (server-side diagnostics only; never replicated).
+function SiteService.BuriedCounts(): { [string]: number }
+	return generationCounts
 end
 
 function SiteService.IsAlive(idx: number): boolean
@@ -202,13 +227,14 @@ function SiteService.Damage(idx: number, amount: number): (number, boolean, stri
 		local _, dy = Grid.FromIndex(idx)
 		local lid = Defs.LayerAtCell(dy).Id
 		dugByLayer[lid] = (dugByLayer[lid] or 0) + 1
-		local treasure = loot[idx]
-		loot[idx] = nil
+		local treasure = board:Claim(idx, generation) -- exactly once, only for this generation
 		local part = parts[idx]
 		parts[idx] = nil
 		if detailBuilt[idx] then
 			detailBuilt[idx] = nil
 			liveDetails -= 1
+			liveDetailParts -= detailPartCount[idx] or 0
+			detailPartCount[idx] = nil
 		end
 		if part then
 			part:Destroy()

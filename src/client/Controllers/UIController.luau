@@ -277,6 +277,12 @@ local function build()
 	refs.depth = label(depth, "SURFACE", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 30), Position = UDim2.fromOffset(0, 4) })
 	refs.layer = label(depth, "BASE CAMP", 15, P.Gold, { Size = UDim2.new(1, 0, 0, 18), Position = UDim2.fromOffset(0, 33), TextStrokeTransparency = 1 })
 
+	-- Compact mine status (under the buttons, top right): reset countdown / state. Driven by Workspace attributes that the
+	-- server maintains, so a player who joins mid-countdown sees the correct state and time immediately.
+	refs.mine = panel(gui, UDim2.fromOffset(170, 48), UDim2.new(1, -180, 0, 122))
+	refs.mineTitle = label(refs.mine, "MINE", 12, K.Muted, { Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 3), TextStrokeTransparency = 1 })
+	refs.mineTime = label(refs.mine, "--:--", 22, P.Cream, { Size = UDim2.new(1, 0, 0, 26), Position = UDim2.fromOffset(0, 18) })
+
 	-- Treasure cards (left, mid)
 	refs.cards = mk("Frame", { Size = UDim2.fromOffset(260, 300), Position = UDim2.new(0, 10, 0.5, -60), BackgroundTransparency = 1 }, gui)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 6) }, refs.cards)
@@ -320,6 +326,58 @@ local function build()
 		Guide.Dismiss("collection")
 	end)
 	Guide.Build(gui)
+end
+
+-- Mine reset status ---------------------------------------------------------------------------------------------------
+local function clock(seconds: number): string
+	seconds = math.max(math.floor(seconds + 0.5), 0)
+	return ("%d:%02d"):format(seconds // 60, seconds % 60)
+end
+
+local lastTick = -1
+local mineAcc = 0
+function UI.StepMineStatus(dt: number)
+	mineAcc += dt
+	if mineAcc < 0.2 then
+		return
+	end
+	mineAcc = 0
+	local state = Workspace:GetAttribute("MineState") or "Active"
+	local now = Workspace:GetServerTimeNow()
+	local banner = refs.shift
+	if state == "Warning" then
+		local left = math.max((Workspace:GetAttribute("MineEndsAt") or now) - now, 0)
+		local final = left <= Config.Reset.FinalCountdownSeconds
+		refs.mineTitle.Text = "MINE RESETS IN"
+		refs.mineTime.Text = clock(left)
+		refs.mineTime.TextColor3 = final and P.Danger or P.Gold
+		banner.Text = final and ("RESET IN %d - GET OUT NOW!"):format(math.ceil(left))
+			or ("MINE RESETS IN %ds - leave by the ELEVATOR"):format(math.ceil(left))
+		banner.TextColor3 = final and P.Danger or P.Gold
+		banner.Visible = true
+		local whole = math.ceil(left)
+		if final and whole ~= lastTick then
+			lastTick = whole
+			Audio.Play("Error", 1.4, 0.8) -- one tick per second in the final countdown
+		end
+	elseif state == "Evacuating" or state == "Regenerating" then
+		refs.mineTitle.Text = "MINE"
+		refs.mineTime.Text = state == "Evacuating" and "EVACUATING" or "REBUILDING"
+		refs.mineTime.TextColor3 = P.Danger
+		refs.mineTime.TextSize = 18
+		banner.Text = state == "Evacuating" and "Moving everyone out of the mine..." or "Rebuilding the mine..."
+		banner.TextColor3 = P.Danger
+		banner.Visible = true
+	else
+		local resetAt = Workspace:GetAttribute("MineResetAt") or 0
+		local dug = Workspace:GetAttribute("MineDug") or 0
+		refs.mineTitle.Text = ("MINE %d%% DUG  -  RESET IN"):format(dug)
+		refs.mineTime.Text = resetAt > 0 and clock(resetAt - now) or "--:--"
+		refs.mineTime.TextColor3 = P.Cream
+		refs.mineTime.TextSize = 22
+		banner.Visible = false
+		lastTick = -1
+	end
 end
 
 function UI.GetGui(): ScreenGui
@@ -366,30 +424,6 @@ function UI.Init()
 			showPopup("SET COMPLETE!", layerName .. " COLLECTION", "SetComplete")
 		end)
 	end)
-	Remotes.Get("MineShift").OnClientEvent:Connect(function(phase: string, seconds: number?)
-		local l = refs.shift
-		refs.shiftToken = (refs.shiftToken or 0) + 1
-		local token = refs.shiftToken
-		if phase == "Warning" then
-			l.Text = ("FRESH DIG IN %ds - leave the mine!"):format(seconds or 0)
-			l.TextColor3 = (seconds or 0) <= 10 and P.Danger or P.Gold
-			l.Visible = true
-		elseif phase == "Deferred" then
-			l.Text = "FRESH DIG waiting for artifact carriers..."
-			l.TextColor3 = P.Gold
-			l.Visible = true
-		else
-			l.Text = "THE MINE HAS BEEN REFRESHED!"
-			l.TextColor3 = P.Teal
-			l.Visible = true
-			Audio.Play("Buy")
-			task.delay(5, function()
-				if refs.shiftToken == token then
-					l.Visible = false
-				end
-			end)
-		end
-	end)
 	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
 		if reason == "CARRYING" then
 			-- rejected: the cooldown is NOT consumed, so do not touch returnReadyAt
@@ -434,6 +468,7 @@ function UI.Init()
 			shownCash += (math.abs(diff) < 1) and diff or diff * math.min(1, dt * 8)
 			refs.cash.Text = Util.FormatCash(shownCash)
 		end
+		UI.StepMineStatus(dt)
 		-- depth readout + auto-close shop when walking away
 		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 		if hrp then

@@ -22,7 +22,7 @@ Config.Site = {
 	SizeZ = 24,
 	Depth = 20, -- cells deep (four layers of five rows, 20 studs each)
 	Center = Vector3.new(0, 0, 0), -- world XZ centre of the site, Y of the surface
-	Seed = 1337, -- change for a different (seeded) layout
+	Seed = 1337, -- base for COSMETIC variation only (colours/remnants). Loot is placed from a fresh random server-only seed per generation.
 	StudsPerMeter = 3.5, -- for the depth readout
 	BorderHeight = 6, -- decorative rim
 }
@@ -67,6 +67,7 @@ Config.Camp = {
 	ShopPosition = Vector3.new(20, 0, 88),
 	ShopReach = 34, -- server-side purchase range (the client closes the shop at 30)
 	ReceivingPosition = Vector3.new(24, 0, 73), -- artifact receiving table (a short walk from the elevator exit)
+	RecoveryPosition = Vector3.new(-14, 0, 59), -- owner-claimed recovery area beside the mine entrance gate, far outside the deposit zone
 	LostFoundPosition = Vector3.new(31, 0, 73), -- beside the table
 	-- Declared footprints (half-extents on X and Z) of what each builder actually builds; used by the layout test and
 	-- by any future placement tool. Keep in step with WorldCamp.
@@ -74,6 +75,7 @@ Config.Camp = {
 		Shop = { Center = Vector3.new(20, 0, 88), HalfX = 7.0, HalfZ = 4.8 },
 		Appraisal = { Center = Vector3.new(-18, 0, 70), HalfX = 6.5, HalfZ = 4.2 },
 		Receiving = { Center = Vector3.new(24, 0, 73), HalfX = 3.7, HalfZ = 2.6 },
+		Recovery = { Center = Vector3.new(-14, 0, 59), HalfX = 4.0, HalfZ = 2.8 },
 		Shelf = { Center = Vector3.new(-30, 0, 96), HalfX = 1.2, HalfZ = 4.9 }, -- personal display (client-side, Config.Collection)
 	},
 	-- Required clear spaces (checked by tests/camp_layout_test.luau)
@@ -109,26 +111,46 @@ Config.Collection = {
 	ShelfReach = 12, -- the shelf is only built/visible when the player is this close
 }
 
+-- Imported artifact meshes (docs/ARTIFACT_MESHES.md). EMPTY until the OBJ files in assets/artifact_meshes/ have been imported in
+-- Roblox Studio and uploaded. While an artifact has no entry here the game uses its primitive-part model, which is a
+-- documented FALLBACK for the artifacts listed in TreasureModels.MeshRequired (their silhouette requirement is not met by parts).
+-- Entry: Config.MeshAssets[treasureId] = { { Name = "outer", MeshId = "rbxassetid://123", Color = "B5683F", Material = "SmoothPlastic",
+--   Size = Vector3.new(x, y, z) (the mesh's native bounding size in studs, from assets/artifact_meshes/manifest.json) }, ... }
+Config.MeshAssets = {}
+
 -- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
 Config.Mine = {
+	TellChance = { Common = 0.35, Uncommon = 0.5, Rare = 0.65, Epic = 1, Legendary = 1 }, -- chance a buried reward shows part of ITSELF once its face is exposed
+	TellProtrude = 0.7, -- studs of the real artifact that stand out of the wall
 	AmbientChance = { Soil = 0.07, Clay = 0.06, Stone = 0.07, Ruins = 0.07 }, -- chance an exposed non-loot cell carries an ambient remnant
-	TellChance = 0.45, -- chance a cell holding one of the "tellable" rewards shows its real reward when its face is exposed
 	PocketChance = 0.55, -- chance a non-loot cell INSIDE a pocket carries that pocket's remnant
-	MaxDetails = 220, -- hard cap on live detail objects in the whole mine
+	MaxDetails = 160, -- hard cap on live detail objects in the whole mine
+	MaxDetailParts = 1800, -- ...and on the parts they use
 	Pockets = { Cache = 3, Fossil = 3, Masonry = 2 }, -- discovery pockets per generation
 }
 
--- Shared-mine replenishment ("Fresh Dig", docs/MINE_SHIFT.md).
-Config.Shift = {
+-- Mine reset lifecycle (docs/MINE_RESET.md). One server-controlled state machine:
+--   Active -> Warning -> Evacuating -> Regenerating -> Active.
+-- PROVISIONAL playtest values. Nothing a client sends can start, delay or repeat a reset.
+Config.Reset = {
 	Enabled = true,
-	TriggerFraction = 0.55, -- fraction of ALL cells dug that triggers a refresh
-	DeepLayerFraction = 0.70, -- ...or this fraction of the deepest layer dug (nothing left to reach)
-	MaxAgeMinutes = 60, -- ...or the mine is this old and at least MinFractionForAge of it has been dug
-	MinFractionForAge = 0.10,
-	CheckInterval = 5, -- seconds between depletion checks
-	WarningSeconds = 45, -- countdown shown to everyone before the refresh
-	CarryDeferSeconds = 120, -- how long a refresh waits for carriers still inside the mine before dropping their artifact
-	SeedStep = 7919, -- each refresh uses Seed + count * SeedStep
+	IntervalMinutes = 20, -- scheduled reset after this much ACTIVE time (the clock pauses while the server is empty)
+	DepletionFraction = 0.70, -- earlier reset once this fraction of the DIGGABLE cells is gone (diggable = layers the best online tool can break)
+	MinLifetimeMinutes = 10, -- depletion can never trigger a reset before the generation is this old
+	WarningSeconds = 60, -- countdown before the reset; the last 10 s are called out
+	FinalCountdownSeconds = 10,
+	EvacuateSeconds = 3, -- pause between "stop accepting requests" and the new mine (players are moved, artifacts recovered)
+	CheckInterval = 1,
+}
+
+-- Buried loot (docs/LOOT.md). Placement is rolled ONCE per mine generation from a fresh server-only seed.
+Config.Loot = {
+	-- Important (carry-home) artifacts: at most this many exist in one generation (each is claimed once). Extra rolls become
+	-- ordinary finds. Individually configurable.
+	ImportantLimits = { fossil_claw = 4, golden_scarab = 2, sun_mask = 1 },
+	DefaultImportantLimit = 2,
+	ExitClearCells = 2, -- important artifacts keep this many cells away from the elevator shaft side of the grid
+	ReplaceTries = 8,
 }
 
 Config.Shop = {
@@ -168,6 +190,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
+	ArtifactPickup = { 4, 3 },
 	GuideDone = { 10, 5 },
 	GuideControl = { 3, 5 },
 	SetDisplay = { 6, 3 },

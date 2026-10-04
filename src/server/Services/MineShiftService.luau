@@ -1,99 +1,151 @@
--- "Fresh Dig": replenishes the shared mine when it is exhausted (docs/MINE_SHIFT.md).
---   1. Watch depletion (Config.Shift). When the mine is mostly dug out, or its deepest layer is, or it is old and
---      substantially dug, start a countdown and tell every player.
---   2. At zero: wait (up to Config.Shift.CarryDeferSeconds) for anyone still CARRYING an artifact inside the mine; after
---      that their artifact is dropped like any other loss. Resting artifacts inside the mine are moved to Lost & Found
---      (never deleted). Players inside the mine volume are moved to the camp spawn.
---   3. Regenerate the grid with a new seed. The exit shaft/elevator are outside the grid and untouched.
+-- The mine reset ("Fresh Dig"), docs/MINE_RESET.md. Extends the earlier refresh; there is exactly one reset system.
+-- The pure state machine is MineLifecycle: Active -> Warning -> Evacuating -> Regenerating -> Active. This service feeds it
+-- the clock, depletion and player count, and performs the side effects of each transition:
+--   Warn        publish the countdown (Workspace attributes, so late joiners get state + remaining time automatically)
+--   Evacuate    stop accepting mining / pickups / throws (MineState), recover artifacts to the recovery area, move players out
+--   Regenerate  rebuild the mine from a FRESH loot seed, put the elevator back at the surface, bump the generation
+-- Nothing a client sends can start, delay or repeat a reset. Players can not reset the mine for fresh loot: a reset only follows
+-- the schedule / depletion policy, never before MinLifetime, and only one can be in flight.
 local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
-local ShiftSpec = require(ReplicatedStorage.Shared.ShiftSpec)
 
+local MineLifecycle = require(script.Parent.MineLifecycle)
+local MineState = require(script.Parent.MineState)
 local SiteService = require(script.Parent.SiteService)
 local ArtifactService = require(script.Parent.ArtifactService)
-local WorldBuilder = require(script.Parent.WorldBuilder)
+local ElevatorService = require(script.Parent.ElevatorService)
+local DataService = require(script.Parent.DataService)
 local StateService = require(script.Parent.StateService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
 
 local MineShiftService = {}
 
-local shiftRemote = Remotes.Get("MineShift")
-local shifts = 0
-local running = false
+local notifyRemote = Remotes.Get("Notify")
+local lifecycle = MineLifecycle.new(Config.Reset, os.clock())
+local jobRunning = false
+local lastPublished = ""
 
-function MineShiftService.ShouldRefresh(depletion, cfg): boolean
-	return ShiftSpec.ShouldRefresh(depletion, cfg, Config.Layers[#Config.Layers].Id)
-end
-
-local function broadcast(phase: string, seconds: number?)
-	shiftRemote:FireAllClients(phase, seconds)
-end
-
-local function moveOutOfMine()
+local function bestToolTier(): number
+	local best = 1
 	for _, player in ipairs(Players:GetPlayers()) do
-		local char = player.Character
-		local hrp = char and char:FindFirstChild("HumanoidRootPart")
-		if hrp and ArtifactService.InMine(hrp.Position) then
-			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.CFrame = WorldBuilder.SpawnCFrame
+		local data = DataService.Get(player)
+		local tool = data and Defs.Tools[data.Equipment.ToolId]
+		if tool and tool.Tier > best then
+			best = tool.Tier
 		end
 	end
+	return best
 end
 
-function MineShiftService.RefreshNow()
-	shifts += 1
-	-- 1. carriers who have not left the mine by now drop their artifact (it is relocated, never deleted)
-	for _, player in ipairs(ArtifactService.CarriersInMine()) do
-		ArtifactService.ForceDrop(player)
-		Remotes.Get("Notify"):FireClient(player, "The mine was refreshed - your artifact was moved to Lost & Found at camp.", "Danger")
+local function serverTime(fromClock: number): number
+	return Workspace:GetServerTimeNow() + (fromClock - os.clock())
+end
+
+local function publish(dugFraction: number)
+	local state = lifecycle:State()
+	MineState.Set(state, SiteService.Generation())
+	local scheduled = lifecycle:SecondsToScheduled()
+	local endsAt = (state == "Warning" or state == "Evacuating") and serverTime(lifecycle:EndsAt()) or 0
+	local resetAt = scheduled and (Workspace:GetServerTimeNow() + scheduled) or 0
+	-- only touch the replicated attributes when something visible changed (state, generation, reason, whole-percent dug)
+	local key = ("%s|%d|%s|%d|%d"):format(state, SiteService.Generation(), lifecycle:Reason() or "", math.floor(dugFraction * 100), math.floor(resetAt / 5))
+	if key == lastPublished then
+		return
 	end
-	ArtifactService.RelocateFromMine()
-	-- 2. everyone inside goes to camp, 3. new terrain
-	moveOutOfMine()
-	SiteService.Generate(Config.Site.Seed + shifts * Config.Shift.SeedStep)
+	lastPublished = key
+	MineState.Publish({ EndsAt = endsAt, ResetAt = resetAt, Reason = lifecycle:Reason(), DugPercent = math.floor(dugFraction * 100) })
+end
+
+local function tellEveryone(text: string, kind: string)
+	for _, player in ipairs(Players:GetPlayers()) do
+		notifyRemote:FireClient(player, text, kind)
+	end
+end
+
+-- Server SAFETY evacuation of everyone still inside the excavation bounds. This is not a shortcut: it does not teleport
+-- artifacts (those are handled by RecoverForReset), sells nothing, and puts players beside the recovery area.
+local function evacuatePlayers(): number
+	local moved = 0
+	for _, player in ipairs(Players:GetPlayers()) do
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if hrp and ArtifactService.IsInMine(hrp.Position) then
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.CFrame = WorldBuilder.EvacCFrame
+			notifyRemote:FireClient(player, "You were moved out of the mine for the reset. Nothing was sold or deposited.", "Info")
+			moved += 1
+		end
+	end
+	return moved
+end
+
+-- The Evacuating -> Regenerating -> Active job. Runs once per reset; `jobRunning` makes overlapping jobs impossible.
+local function runReset()
+	if jobRunning then
+		return
+	end
+	jobRunning = true
+	local ok, err = pcall(function()
+		publish(0)
+		ArtifactService.RecoverForReset()
+		evacuatePlayers()
+		task.wait(Config.Reset.EvacuateSeconds)
+		evacuatePlayers() -- anyone who slipped back in during the pause
+		lifecycle:BeginRegeneration()
+		publish(0)
+		SiteService.Generate() -- fresh loot seed, new generation, old cells / remnants / unclaimed loot are gone
+		ElevatorService.ResetToSurface()
+	end)
+	if not ok then
+		warn("[MineShiftService] reset failed: " .. tostring(err))
+		-- never leave the mine stuck: make sure a mine exists and the state machine reaches Active
+		if lifecycle:State() == "Evacuating" then
+			lifecycle:BeginRegeneration()
+		end
+		if lifecycle:State() == "Regenerating" and SiteService.Generation() == lifecycle:Generation() then
+			pcall(SiteService.Generate)
+		end
+	end
+	lifecycle:FinishRegeneration(os.clock())
+	lastPublished = ""
+	publish(0)
 	for _, player in ipairs(Players:GetPlayers()) do
 		StateService.Push(player)
 	end
-	broadcast("Done")
+	tellEveryone("The mine has been reset. New treasure is buried - the elevator is ready.", "Good")
+	jobRunning = false
 end
 
-local function runShift()
-	running = true
-	local cfg = Config.Shift
-	for left = cfg.WarningSeconds, 1, -1 do
-		broadcast("Warning", left)
-		task.wait(1)
-	end
-	-- wait for carriers to bring their artifact out (bounded)
-	local waited = 0
-	while #ArtifactService.CarriersInMine() > 0 and waited < cfg.CarryDeferSeconds do
-		if waited > 0 and waited % 10 == 0 then
-			broadcast("Deferred", cfg.CarryDeferSeconds - waited)
-		end
-		task.wait(1)
-		waited += 1
-	end
-	-- never leave the service stuck: a failed refresh is logged, the banner is cleared, and the next check may retry
-	local ok, err = pcall(MineShiftService.RefreshNow)
-	if not ok then
-		warn("[MineShiftService] refresh failed: " .. tostring(err))
-		broadcast("Done")
-	end
-	running = false
+function MineShiftService.State(): string
+	return lifecycle:State()
 end
 
 function MineShiftService.Init()
-	if not Config.Shift.Enabled then
+	MineState.Set("Active", SiteService.Generation())
+	publish(0)
+	if not Config.Reset.Enabled then
 		return
 	end
 	task.spawn(function()
+		local warned30 = false
 		while true do
-			task.wait(Config.Shift.CheckInterval)
-			if not running and MineShiftService.ShouldRefresh(SiteService.Depletion(), Config.Shift) then
-				runShift()
+			task.wait(Config.Reset.CheckInterval)
+			local dep = SiteService.Depletion(bestToolTier())
+			local event = lifecycle:Update(os.clock(), dep.Diggable, #Players:GetPlayers())
+			if event == "Warn" then
+				warned30 = false
+				tellEveryone(("The mine resets in %d seconds. Leave through the ELEVATOR - it is the way out. Carry artifacts out yourself."):format(Config.Reset.WarningSeconds), "Danger")
+			elseif event == "Evacuate" then
+				task.spawn(runReset)
+			elseif lifecycle:State() == "Warning" and not warned30 and lifecycle:EndsAt() - os.clock() <= 30 then
+				warned30 = true
+				tellEveryone("30 seconds until the mine resets - head for the ELEVATOR.", "Danger")
 			end
+			publish(dep.Diggable)
 		end
 	end)
 end

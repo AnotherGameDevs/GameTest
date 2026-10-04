@@ -16,6 +16,7 @@ local LootService = require(script.Parent.LootService)
 local StateService = require(script.Parent.StateService)
 local MetricsService = require(script.Parent.MetricsService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
+local MineState = require(script.Parent.MineState)
 local RateLimiter = require(script.Parent.RateLimiter)
 local AnalyticsService = require(script.Parent.AnalyticsService)
 
@@ -28,7 +29,7 @@ local lastThrow: { [Player]: number } = {}
 local active: { [Player]: number } = {}
 local folder: Folder
 
-local function explode(thrower: Player, stick: Model)
+local function explode(thrower: Player, stick: Model, throwGeneration: number)
 	if not stick.Parent or not stick.PrimaryPart then
 		active[thrower] = math.max((active[thrower] or 1) - 1, 0)
 		stick:Destroy()
@@ -38,6 +39,10 @@ local function explode(thrower: Player, stick: Model)
 	local pos = stick.PrimaryPart.Position
 	stick:Destroy()
 	active[thrower] = math.max((active[thrower] or 1) - 1, 0)
+	-- a stick thrown into an old mine (or fizzling during a reset) never touches the new one
+	if not MineState.Accepting() or throwGeneration ~= SiteService.Generation() then
+		return
+	end
 
 	local thrownBy = thrower.Parent and DataService.Get(thrower)
 	local destroyed, hits = {}, {}
@@ -115,6 +120,10 @@ local function handleThrow(player: Player, dx: any, dy: any, dz: any)
 		notifyRemote:FireClient(player, "You have no dynamite. Buy some at the Equipment Shop.", "Danger")
 		return
 	end
+	if not MineState.Accepting() then
+		notifyRemote:FireClient(player, "The mine is resetting - no throwing right now.", "Danger")
+		return
+	end
 	local now = os.clock()
 	if now - (lastThrow[player] or 0) < def.Cooldown or (active[player] or 0) >= def.MaxActive then
 		return
@@ -135,7 +144,7 @@ local function handleThrow(player: Player, dx: any, dy: any, dz: any)
 	root.AssemblyLinearVelocity = dir * def.ThrowSpeed + Vector3.new(0, def.ThrowLift, 0)
 	root.AssemblyAngularVelocity = Vector3.new(6, 2, 0)
 	active[player] = (active[player] or 0) + 1
-	task.delay(def.FuseSeconds, explode, player, stick)
+	task.delay(def.FuseSeconds, explode, player, stick, SiteService.Generation())
 end
 
 function DynamiteService.Init()

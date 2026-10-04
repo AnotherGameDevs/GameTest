@@ -409,6 +409,17 @@ local function onExplosion(pos: Vector3, blocks: number)
 end
 
 function Effects.Init()
+	-- A new mine generation: drop everything that belonged to the old one (reveal models, block shake, remembered hit faces),
+	-- so no effect from the previous mine plays over the new cells.
+	Workspace:GetAttributeChangedSignal("MineGeneration"):Connect(function()
+		for _, child in ipairs(fxFolder:GetChildren()) do
+			if child:IsA("Model") then
+				child:Destroy()
+			end
+		end
+		table.clear(shaking)
+		table.clear(lastFace)
+	end)
 	Remotes.Get("DigResult").OnClientEvent:Connect(function(payload)
 		local mine = payload.Digger == player.UserId
 		for _, h in ipairs(payload.Hits) do

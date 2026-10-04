@@ -60,6 +60,14 @@ function Kit.make(s): Part
 		p.Shape = Enum.PartType.Ball
 	elseif s.Shape == "Cylinder" then
 		p.Shape = Enum.PartType.Cylinder
+	elseif s.Shape == "Mesh" and s.MeshId then
+		-- An imported mesh asset (docs/ARTIFACT_MESHES.md): SpecialMesh FileMesh scaled from the mesh's native size to s.Size.
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.FileMesh
+		mesh.MeshId = s.MeshId
+		local native = s.MeshSize or s.Size
+		mesh.Scale = Vector3.new(s.Size.X / native.X, s.Size.Y / native.Y, s.Size.Z / native.Z)
+		mesh.Parent = p
 	elseif s.Shape == "Ellipsoid" then
 		local mesh = Instance.new("SpecialMesh")
 		mesh.MeshType = Enum.MeshType.Sphere
@@ -135,7 +143,7 @@ function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
 		local r = s.Offset - s.Offset.Position
 		table.insert(out, {
 			Name = s.Name, Shape = s.Shape, Size = s.Size * scale, Color = s.Color, Material = s.Material,
-			Transparency = s.Transparency,
+			Transparency = s.Transparency, MeshId = s.MeshId, MeshSize = s.MeshSize,
 			Offset = rot * (CFrame.new(pos) * r),
 		})
 	end

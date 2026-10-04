@@ -24,7 +24,8 @@ overlapping HUD on narrow windows, shop not scale-to-fit, MetricsService printin
 | S4 | 8-tier tools + backpacks, previews, compare, inspect | 🟡 | prices re-checked vs. deeper mine (`tools/economy_sim.py`) |
 | S4 | Remove placeholder tabs | ✅ | Utility/Cosmetics removed; backpack previews use real pack models |
 | S5 | Mine depth/layers support progression | 🟡 | 24×24×20, four 5-row layers, toughness 24/42/72/110, layer gating by tool tier (`docs/MINE_SHIFT.md`) |
-| S5 | Replenishment | 🟡 | `MineShiftService` (rule unit-tested; sequence needs Studio) |
+| S5 | Mine reset lifecycle | 🟡 | Active→Warning→Evacuating→Regenerating→Active, recovery area, generation ids (`docs/MINE_RESET.md`); behaviour unit-tested, live sequence needs Studio + 2 players |
+| S5c | Random buried loot, per-generation limits, tells | 🟡 | `docs/LOOT.md`; behaviour unit-tested; presentation needs Studio |
 | S6 | Artifact discovery, carry, place, deposit, recovery policy | ✅ 🟡 | `artifact_test` (+relocation cases) |
 | S6 | Rarity reveals one visual language | 🟡 | EffectsController |
 | S7 | Collection journal (J) | 🟡 | `CollectionSpec` (pure) + `CollectionUI` |
@@ -34,7 +35,7 @@ overlapping HUD on narrow windows, shop not scale-to-fit, MetricsService printin
 | S9 | Onboarding hints | 🟡 | `GuideSpec` + `GuideController`; empty-outline bug fixed (`docs/TUTORIAL.md`), Skip/Restart, baseline restart, saved progress (unit-tested) |
 | S9 | UI unification, number formatting | 🟡 | `UIKit.Tokens`/`flatButton`/`fit`; shop/menu/journal scale-to-fit; HUD centre text constrained |
 | S5b | Mine variation, buried remnants, discovery pockets | 🟡 | `docs/MINE_DETAIL.md`; 269 offline checks; needs Studio |
-| S6b | Artifact models rebuilt (one source for reveal/carry/journal/shelf) | 🟡 | `docs/ARTIFACT_MODELS.md`; before/after render; mesh-dependent items listed |
+| S6b | Artifact models (one source for reveal/carry/journal/shelf) | 🟡 | 4 primitive models final-pending-review; **7 artifacts UNFINISHED: meshes generated (`docs/ARTIFACT_MESHES.md`), not imported (needs Studio)** |
 | S9 | Audio | 🟡 | **built-in Roblox placeholder sounds** – replacement needed before release |
 | S10 | Persistence + migrations + failed-load safety | 🟡 | v3 migration (unit-tested); UpdateAsync + session lock; failed load kicks in production; BindToClose waits for all saves |
 | S10 | Two-player / performance testing | ❌ (blocked) | needs Studio/server; see playtest plan |

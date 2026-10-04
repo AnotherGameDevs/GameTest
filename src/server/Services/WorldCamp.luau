@@ -23,6 +23,16 @@ WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.SpawnPosition + Vector3.new(0, 4.
 WorldCamp.ReceivingCenter = Config.Camp.ReceivingPosition + Vector3.new(0, 3.5, 0)
 WorldCamp.ReceivingDisplayPosition = Config.Camp.ReceivingPosition + Vector3.new(0, 5.2, 0)
 WorldCamp.LostFoundPosition = Config.Camp.LostFoundPosition + Vector3.new(0, 2.2, 0)
+WorldCamp.RecoveryPosition = Config.Camp.RecoveryPosition
+-- Where players are put when a mine reset evacuates them: beside the recovery area, still on the camp floor.
+WorldCamp.EvacCFrame = CFrame.new(Config.Camp.RecoveryPosition + Vector3.new(7.5, 4.5, 0))
+
+-- Nine resting spots on the recovery pad (3 columns x 3 rows), centre height suits a ~2-stud artifact on the pad top.
+function WorldCamp.RecoverySlot(i: number): Vector3
+	local n = (i - 1) % 9
+	local col, row = n % 3, n // 3
+	return Config.Camp.RecoveryPosition + Vector3.new((col - 1) * 2.6, 2.0, (row - 1) * 1.9)
+end
 
 local function cylinder(parent: Instance, name: string, length: number, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?, flat: boolean?): Part
 	-- Roblox cylinders run along X. `flat` lays the disc on the ground (axis up).
@@ -270,6 +280,33 @@ local function buildAppraisal(camp: Folder)
 	end
 end
 
+-- Artifact recovery area: where artifacts found in a mine that was reset are held for their owners. A roped pad beside the
+-- mine entrance gate; it is NOT a deposit point (the receiving table is far away) - owners pick their artifact up here and
+-- carry it to the receiving table themselves. -------------------------------------------------------------------------------
+local function buildRecovery(camp: Folder)
+	local folder = Instance.new("Folder")
+	folder.Name = "RecoveryArea"
+	folder.Parent = camp
+	local c = Config.Camp.RecoveryPosition
+	local pad = box(folder, "RecoveryPad", V(8, 0.3, 5.6), V(c.X, 0.65, c.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
+	sign(pad, Enum.NormalId.Top, "RECOVERY", Color3.fromHex("CDBE98"), C.TimberDark)
+	local postH = 3.2
+	for _, sx in ipairs({ -4, 4 }) do
+		for _, sz in ipairs({ -2.8, 2.8 }) do
+			box(folder, "Post", V(0.4, postH, 0.4), V(c.X + sx, 0.5 + postH / 2, c.Z + sz), C.TimberDark, Enum.Material.Wood)
+		end
+	end
+	-- ropes along the long sides and the sign board spanning the rear posts (embedded in both, directly under their tops)
+	for _, sz in ipairs({ 2.8 }) do
+		rope(folder, V(c.X - 4, 2.4, c.Z + sz), V(c.X + 4, 2.4, c.Z + sz))
+	end
+	for _, sx in ipairs({ -4, 4 }) do
+		rope(folder, V(c.X + sx, 2.4, c.Z - 2.8), V(c.X + sx, 2.4, c.Z + 2.8))
+	end
+	local board = box(folder, "RecoverySign", V(8.4, 1.1, 0.25), V(c.X, 0.5 + postH - 0.55, c.Z - 2.8), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "ARTIFACT RECOVERY", C.TimberDark, C.Gold)
+end
+
 -- Artifact receiving table: distinct from selling (cream cloth on a timber frame, plaque, deposit prompt) ----------------
 local function buildReceiving(camp: Folder)
 	local folder = Instance.new("Folder")
@@ -343,6 +380,7 @@ function WorldCamp.Build(world: Folder, ex)
 	buildShop(camp)
 	buildAppraisal(camp)
 	buildReceiving(camp)
+	buildRecovery(camp)
 end
 
 return WorldCamp

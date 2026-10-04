@@ -15,6 +15,7 @@ local StateService = require(script.Parent.StateService)
 local RateLimiter = require(script.Parent.RateLimiter)
 local MetricsService = require(script.Parent.MetricsService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
+local MineState = require(script.Parent.MineState)
 
 local DigService = {}
 
@@ -27,11 +28,16 @@ local function isInt(n: any): boolean
 	return type(n) == "number" and n == math.floor(n) and n == n and math.abs(n) < 1e6
 end
 
-local function handleHit(player: Player, x: any, y: any, z: any)
+local function handleHit(player: Player, x: any, y: any, z: any, gen: any)
 	if not (isInt(x) and isInt(y) and isInt(z)) then
 		return
 	end
 	if not RateLimiter.Check(player, "DigHit") then
+		return
+	end
+	-- The mine must be accepting requests (not mid-reset) and the request must name the CURRENT generation, so a delayed
+	-- or replayed hit from an old mine can never damage the new cells that happen to sit at the same coordinates.
+	if not MineState.Accepting() or gen ~= SiteService.Generation() then
 		return
 	end
 	if not Grid.InBounds(x, y, z) then

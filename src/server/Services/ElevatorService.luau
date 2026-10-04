@@ -146,6 +146,24 @@ function ElevatorService.Bind()
 	end)
 end
 
+-- Used by the mine reset AFTER everyone has been evacuated: cancels any trip/queue and puts the car at the surface stop,
+-- exactly where a fresh elevator starts, so it is safe and usable the moment the new mine opens.
+function ElevatorService.ResetToSurface()
+	pending = nil
+	if not car or not lift then
+		return
+	end
+	local cf = car.CFrame
+	car.Anchored = true
+	car.AssemblyLinearVelocity = Vector3.zero
+	car.CFrame = CFrame.new(cf.X, WorldElevator.StopTops[1] - WorldElevator.CarThickness / 2, cf.Z)
+	lift.TargetPosition = positionFor(1)
+	car.Anchored = false
+	moving = false
+	current, target = 1, 1
+	arrivedAt = os.clock()
+end
+
 function ElevatorService.Init()
 	ElevatorService.Bind()
 end

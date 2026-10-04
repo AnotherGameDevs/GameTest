@@ -298,7 +298,9 @@ local function onStep()
 	end
 	lastSent = now
 
-	digHit:FireServer(target.X, target.Y, target.Z)
+	-- name the mine generation this block belongs to, so a stale click can never hit a newer mine's cells
+	local site = Workspace:FindFirstChild("DigSite")
+	digHit:FireServer(target.X, target.Y, target.Z, site and site:GetAttribute("Generation") or 0)
 	if not CameraController.IsFirstPerson() then
 		faceTarget(target.Part.Position)
 	end

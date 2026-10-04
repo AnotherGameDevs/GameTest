@@ -1,0 +1,232 @@
+{
+ "pottery_shard": {
+  "bounds_min": [
+   -1.285,
+   -1.224,
+   -0.851
+  ],
+  "bounds_max": [
+   1.285,
+   1.321,
+   0.03
+  ],
+  "groups": {
+   "outer": {
+    "file": "pottery_shard/outer.obj",
+    "color": "B5683F",
+    "material": "SmoothPlastic",
+    "triangles": 168
+   },
+   "inner": {
+    "file": "pottery_shard/inner.obj",
+    "color": "5B3A26",
+    "material": "SmoothPlastic",
+    "triangles": 168
+   },
+   "edge": {
+    "file": "pottery_shard/edge.obj",
+    "color": "C98A5E",
+    "material": "SmoothPlastic",
+    "triangles": 80
+   },
+   "band": {
+    "file": "pottery_shard/band.obj",
+    "color": "7A3322",
+    "material": "SmoothPlastic",
+    "triangles": 20
+   }
+  }
+ },
+ "cut_gemstone": {
+  "bounds_min": [
+   -1.0,
+   -1.05,
+   -1.0
+  ],
+  "bounds_max": [
+   1.0,
+   0.6,
+   1.0
+  ],
+  "groups": {
+   "gem": {
+    "file": "cut_gemstone/gem.obj",
+    "color": "5FA3BF",
+    "material": "Glass",
+    "triangles": 72
+   },
+   "table": {
+    "file": "cut_gemstone/table.obj",
+    "color": "B7DCE8",
+    "material": "Glass",
+    "triangles": 8
+   }
+  }
+ },
+ "fossil_fragment": {
+  "bounds_min": [
+   -1.158,
+   -1.012,
+   -0.436
+  ],
+  "bounds_max": [
+   1.45,
+   1.085,
+   0.428
+  ],
+  "groups": {
+   "rock": {
+    "file": "fossil_fragment/rock.obj",
+    "color": "6E7580",
+    "material": "Slate",
+    "triangles": 32
+   },
+   "shell": {
+    "file": "fossil_fragment/shell.obj",
+    "color": "D8CDB0",
+    "material": "SmoothPlastic",
+    "triangles": 528
+   }
+  }
+ },
+ "clay_figurine": {
+  "bounds_min": [
+   -0.87,
+   -1.55,
+   -0.556
+  ],
+  "bounds_max": [
+   0.906,
+   1.84,
+   0.556
+  ],
+  "groups": {
+   "dark": {
+    "file": "clay_figurine/dark.obj",
+    "color": "7A4228",
+    "material": "SmoothPlastic",
+    "triangles": 132
+   },
+   "clay": {
+    "file": "clay_figurine/clay.obj",
+    "color": "B5683F",
+    "material": "SmoothPlastic",
+    "triangles": 546
+   },
+   "chip": {
+    "file": "clay_figurine/chip.obj",
+    "color": "D49A6A",
+    "material": "SmoothPlastic",
+    "triangles": 8
+   }
+  }
+ },
+ "fossil_claw": {
+  "bounds_min": [
+   -1.0,
+   -1.823,
+   -0.683
+  ],
+  "bounds_max": [
+   1.724,
+   1.335,
+   0.683
+  ],
+  "groups": {
+   "bone": {
+    "file": "fossil_claw/bone.obj",
+    "color": "D8CDB0",
+    "material": "SmoothPlastic",
+    "triangles": 296
+   },
+   "tip": {
+    "file": "fossil_claw/tip.obj",
+    "color": "5A4A33",
+    "material": "SmoothPlastic",
+    "triangles": 56
+   },
+   "rock": {
+    "file": "fossil_claw/rock.obj",
+    "color": "6E7580",
+    "material": "Slate",
+    "triangles": 18
+   }
+  }
+ },
+ "golden_scarab": {
+  "bounds_min": [
+   -1.694,
+   -0.756,
+   -1.854
+  ],
+  "bounds_max": [
+   1.694,
+   0.55,
+   1.876
+  ],
+  "groups": {
+   "shell": {
+    "file": "golden_scarab/shell.obj",
+    "color": "C9A24B",
+    "material": "Metal",
+    "triangles": 280
+   },
+   "head": {
+    "file": "golden_scarab/head.obj",
+    "color": "9A7A32",
+    "material": "Metal",
+    "triangles": 64
+   },
+   "inlay": {
+    "file": "golden_scarab/inlay.obj",
+    "color": "3A72AE",
+    "material": "Glass",
+    "triangles": 40
+   },
+   "legs": {
+    "file": "golden_scarab/legs.obj",
+    "color": "9A7A32",
+    "material": "Metal",
+    "triangles": 216
+   }
+  }
+ },
+ "sun_mask": {
+  "bounds_min": [
+   -1.4,
+   -1.95,
+   -0.55
+  ],
+  "bounds_max": [
+   1.4,
+   1.55,
+   0.732
+  ],
+  "groups": {
+   "gold": {
+    "file": "sun_mask/gold.obj",
+    "color": "C9A24B",
+    "material": "Metal",
+    "triangles": 1316
+   },
+   "inlay": {
+    "file": "sun_mask/inlay.obj",
+    "color": "E3D2B0",
+    "material": "SmoothPlastic",
+    "triangles": 96
+   },
+   "headdress": {
+    "file": "sun_mask/headdress.obj",
+    "color": "9A7A32",
+    "material": "Metal",
+    "triangles": 36
+   },
+   "stripe": {
+    "file": "sun_mask/stripe.obj",
+    "color": "3A72AE",
+    "material": "SmoothPlastic",
+    "triangles": 30
+   }
+  }
+ }
+}

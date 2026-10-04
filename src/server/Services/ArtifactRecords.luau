@@ -16,11 +16,12 @@ function ArtifactRecords.new(idGenerator: () -> string)
 end
 
 -- `position` is where the artifact first rests. OwnerId = discoverer (claims it for this version).
-function ArtifactRecords:Create(treasureId: string, value: number, ownerId: number, position)
+function ArtifactRecords:Create(treasureId: string, value: number, ownerId: number, position, generation: number?)
 	local id = self.idGenerator()
 	local rec = {
 		Id = id, TreasureId = treasureId, Value = value, OwnerId = ownerId,
 		State = "Dropped", CarrierId = nil, Position = position, Origin = position, Transfers = 0,
+		Generation = generation or 1, Recovered = false,
 	}
 	self.records[id] = rec
 	return rec
@@ -123,6 +124,24 @@ function ArtifactRecords:Dropped()
 		end
 	end
 	return out
+end
+
+-- Mine reset recovery: a Carried or Dropped artifact is put down at `position` (the recovery area), still owned by its
+-- discoverer and flagged Recovered. It is NEVER deposited, paid or removed here - the owner must pick it up and deliver it
+-- like any other artifact. A Deposited record is untouched (it can not be recovered twice), and the record count never changes.
+function ArtifactRecords:Recover(id: string, position): boolean
+	local rec = self.records[id]
+	if not rec or rec.State == "Deposited" then
+		return false
+	end
+	if rec.State == "Carried" and rec.CarrierId then
+		self.carried[rec.CarrierId] = nil
+	end
+	rec.State = "Dropped"
+	rec.CarrierId = nil
+	rec.Position = position
+	rec.Recovered = true
+	return true
 end
 
 return ArtifactRecords

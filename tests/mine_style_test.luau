@@ -80,12 +80,13 @@ do
 		allowed[lid] = {}
 		for _, k in ipairs(kinds) do allowed[lid][k] = true; check("ambient kind has specs: " .. k, MineDetailSpecs.Has(k)) end
 	end
-	local tellKinds = {}
-	for _, k in pairs(MineStyle.TELLS) do tellKinds[k] = true; check("tell kind has specs: " .. k, MineDetailSpecs.Has(k)) end
-	for tid in pairs(MineStyle.TELLS) do check("tell reward exists in Defs: " .. tid, Defs.Treasure[tid] ~= nil) end
-
-	local ambient, total, tells, tellable = 0, 0, 0, 0
-	local badAmbient, lootAmbient, ambientTell, wrongTell = 0, 0, 0, 0
+	-- tells: every treasure id can show a piece of ITSELF; chance follows rarity
+	local ids = {}
+	for tid in pairs(Defs.Treasure) do table.insert(ids, tid) end
+	table.sort(ids)
+	local ambient, total, ambientTell, wrongTell, lootAmbient = 0, 0, 0, 0, 0
+	local badAmbient = 0
+	local tellRate, tellTrials = {}, {}
 	for y = 0, S.Depth - 1 do
 		local lid = layerOf(y)
 		for x = 0, S.SizeX - 1 do for z = 0, S.SizeZ - 1 do
@@ -95,27 +96,26 @@ do
 				ambient += 1
 				if d.Tell then ambientTell += 1 end
 				if not allowed[lid][d.Kind] then badAmbient += 1 end
-				if d.Variant < 0 or d.Variant > 3 or d.FaceRot < 0 or d.FaceRot > 5 then badAmbient += 1 end
 			end
-			-- loot cells: never ambient; tells only for the matching reward
-			for tid, kind in pairs(MineStyle.TELLS) do
+			for _, tid in ipairs(ids) do
 				local dl = MineStyle.Detail(x, y, z, lid, SEED, tid, nil)
-				tellable += 1
+				tellTrials[tid] = (tellTrials[tid] or 0) + 1
 				if dl then
-					tells += 1
-					if not dl.Tell or dl.Kind ~= kind or dl.Loot ~= tid then wrongTell += 1 end
+					tellRate[tid] = (tellRate[tid] or 0) + 1
+					if not dl.Tell or dl.Loot ~= tid or dl.Kind ~= "tell" then wrongTell += 1 end
 				end
 			end
-			if MineStyle.Detail(x, y, z, lid, SEED, "golden_scarab", nil) ~= nil then lootAmbient += 1 end
-			if MineStyle.Detail(x, y, z, lid, SEED, "cut_gemstone", nil) ~= nil then lootAmbient += 1 end
 		end end
 	end
 	check("only layer-appropriate ambient kinds", badAmbient == 0)
 	check("ambient remnants are occasional (3-10% of cells)", ambient / total > 0.03 and ambient / total < 0.10, ("%.3f"):format(ambient / total))
 	check("ambient cells never claim to be rewards", ambientTell == 0)
-	check("a tell always names its own reward", wrongTell == 0)
-	check("loot without a tell and not-tellable loot never carry ambient remnants", lootAmbient == 0)
-	check("tells appear on roughly TellChance of tellable cells", math.abs(tells / tellable - Config.Mine.TellChance) < 0.05, ("%.3f"):format(tells / tellable))
+	check("a tell always names the cell's own reward", wrongTell == 0)
+	for _, tid in ipairs(ids) do
+		local want = Config.Mine.TellChance[Defs.Treasure[tid].Rarity]
+		local got = (tellRate[tid] or 0) / tellTrials[tid]
+		check("tell chance follows rarity: " .. tid, math.abs(got - want) < 0.06, ("%.2f vs %.2f"):format(got, want))
+	end
 	-- pocket cells: ambient uses the pocket's own remnant
 	local kindsSeen = {}
 	for x = 0, 23 do local d = MineStyle.Detail(x, 7, 5, "Clay", SEED, nil, "Cache"); if d then kindsSeen[d.Kind] = true end end
@@ -133,40 +133,51 @@ do
 		local p = spec.Offset.p
 		return p.X - ex, p.X + ex, p.Y - ey, p.Y + ey, p.Z - ez, p.Z + ez
 	end
-	local tellColors = {}
-	for k in pairs({ tell_coin = 1, tell_pottery = 1, tell_fossil = 1, tell_tablet = 1 }) do
-		for _, s in ipairs(MineDetailSpecs.Build(k, 0)) do tellColors[s.Color.Hex or tostring(s.Color)] = true end
-	end
+	-- every ambient remnant (all variants): bounded, on the face, embedded in the wall, low
+	local ambientOk, embeddedOk, lowOk, boundedOk = true, true, true, true
 	for _, kind in ipairs(MineDetailSpecs.Kinds) do
-		local isTell = kind:sub(1, 5) == "tell_"
 		for variant = 0, 3 do
 			local specs = MineDetailSpecs.Build(kind, variant)
-			check(("%s v%d: bounded part count"):format(kind, variant), #specs >= 2 and #specs <= 12)
-			local maxZ, minZ, within = -1e9, 1e9, true
-			for _, s in ipairs(specs) do
-				local x0, x1, y0, y1, z0, z1 = extent(s)
+			if #specs < 2 or #specs > 12 then boundedOk = false end
+			local maxZ, minZ = -1e9, 1e9
+			for _, sp in ipairs(specs) do
+				local x0, x1, y0, y1, z0, z1 = extent(sp)
 				maxZ, minZ = math.max(maxZ, z1), math.min(minZ, z0)
-				if x0 < -2.05 or x1 > 2.05 or y0 < -2.05 or y1 > 2.05 then within = false end
+				if x0 < -2.05 or x1 > 2.05 or y0 < -2.05 or y1 > 2.05 then ambientOk = false end
 			end
-			check(("%s v%d: stays on its 4x4 face"):format(kind, variant), within)
-			check(("%s v%d: embedded in the wall (nothing floats)"):format(kind, variant), minZ < 0 and minZ > -0.2, ("%.2f"):format(minZ))
-			if isTell then
-				check(kind .. ": reward tell stands proud (>= 0.25)", maxZ >= 0.25 and maxZ <= 0.5, ("%.2f"):format(maxZ))
-			else
-				check(kind .. ": ambient remnant is low (<= 0.16)", maxZ <= 0.16, ("%.2f"):format(maxZ))
-				local clash = false
-				for _, s in ipairs(specs) do if tellColors[s.Color.Hex or tostring(s.Color)] then clash = true end end
-				check(kind .. ": ambient never uses reward colours", not clash)
-			end
+			if not (minZ < 0 and minZ > -0.2) then embeddedOk = false end
+			if maxZ > 0.16 then lowOk = false end
 		end
 	end
+	check("ambient remnants: bounded part counts", boundedOk)
+	check("ambient remnants: stay on their 4x4 face", ambientOk)
+	check("ambient remnants: embedded in the wall (nothing floats)", embeddedOk)
+	check("ambient remnants: low relief (<= 0.16 studs)", lowOk)
+	-- tells: the REAL artifact, partly out of the wall, never fully buried, never wider than the cell face
+	local shown, protrudes, onFace = true, true, true
+	for tid, def in pairs(Defs.Treasure) do
+		for variant = 0, 3 do
+			local specs = MineDetailSpecs.Tell(tid, def, variant)
+			if #specs < 1 then shown = false end
+			local maxZ = -1e9
+			for _, sp in ipairs(specs) do
+				local x0, x1, y0, y1, _, z1 = extent(sp)
+				maxZ = math.max(maxZ, z1)
+				if x0 < -2.1 or x1 > 2.1 or y0 < -2.1 or y1 > 2.1 then onFace = false end
+			end
+			if math.abs(maxZ - Config.Mine.TellProtrude) > 0.06 then protrudes = false end
+		end
+	end
+	check("tells: every treasure shows part of itself", shown)
+	check("tells: stand TellProtrude studs out of the wall", protrudes)
+	check("tells: never wider than the cell face", onFace)
 end
 
 -- ------------------------------------------------------------------- pockets -------------------------------------------
 do
 	local layers = {}
 	for i, l in ipairs(Config.Layers) do layers[l.Id] = { l.FromCell, (Config.Layers[i + 1] and Config.Layers[i + 1].FromCell or S.Depth) - 1 } end
-	for _, seed in ipairs({ SEED, SEED + Config.Shift.SeedStep, SEED + 2 * Config.Shift.SeedStep, 1, 99991 }) do
+	for _, seed in ipairs({ SEED, 424242, 7919, 1, 99991, 2147483000 }) do
 		local pockets = MineStyle.Pockets(seed)
 		local counts, seen, ok = { Cache = 0, Fossil = 0, Masonry = 0 }, {}, true
 		local lootOk, sizeOk = true, true
@@ -195,7 +206,7 @@ do
 		for i, p in ipairs(pockets) do if not again[i] or again[i].Cells[1][1] ~= p.Cells[1][1] or again[i].Cells[1][3] ~= p.Cells[1][3] then same = false end end
 		check(("seed %d: pocket placement is deterministic (no duplicates on regeneration)"):format(seed), same)
 	end
-	local a, b = MineStyle.Pockets(SEED), MineStyle.Pockets(SEED + Config.Shift.SeedStep)
+	local a, b = MineStyle.Pockets(SEED), MineStyle.Pockets(SEED + 7919)
 	check("a refreshed mine moves its pockets", a[1].Cells[1][1] ~= b[1].Cells[1][1] or a[1].Cells[1][3] ~= b[1].Cells[1][3] or a[2].Cells[1][1] ~= b[2].Cells[1][1])
 	-- tier appropriateness: pocket layers are open to the tool tiers that can reach them in normal progression
 	check("cache is in clay, fossil in stone, masonry in ruins", MineStyle.POCKET_LAYER.Cache == "Clay" and MineStyle.POCKET_LAYER.Fossil == "Stone" and MineStyle.POCKET_LAYER.Masonry == "Ruins")

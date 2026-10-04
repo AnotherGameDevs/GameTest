@@ -159,5 +159,24 @@ do
 	check("scarab: shell, head and six legs", find(sc, "Shell") and find(sc, "Head") and named(sc, "Leg") == 6)
 end
 
+-- mesh pipeline: until meshes are configured the seven mesh-required artifacts are reported UNFINISHED; configuring a mesh set switches
+-- EVERY consumer (they all call Specs) to it, and scaling keeps the mesh data
+do
+	local Kit = require("./_build/shared/ModelKit")
+	local required = TreasureModels.MeshRequired
+	local unfinished = true
+	for _, id in ipairs(required) do if TreasureModels.Status(id) ~= "unfinished" then unfinished = false end end
+	check("seven artifacts are honestly marked unfinished until meshes are imported", #required == 7 and unfinished)
+	check("coin and ring primitives are final art", TreasureModels.Status("old_coin") == "parts" and TreasureModels.Status("bronze_ring") == "parts")
+	local V = require("./_build/shared/__stubs").Vector3
+	Config.MeshAssets.pottery_shard = { { Name = "outer", MeshId = "rbxassetid://1", Color = "B5683F", Material = "SmoothPlastic", Size = V.new(2.5, 2.5, 0.9) } }
+	local specs = TreasureModels.Specs("pottery_shard", Defs.Treasure.pottery_shard)
+	check("a configured mesh set replaces the primitive fallback", TreasureModels.Status("pottery_shard") == "mesh" and #specs == 1 and specs[1].Shape == "Mesh" and specs[1].MeshId == "rbxassetid://1")
+	local scaled = Kit.Transform(specs, 0.5, nil)
+	check("scaling keeps the mesh id and native size", scaled[1].MeshId == "rbxassetid://1" and scaled[1].MeshSize.X == 2.5 and math.abs(scaled[1].Size.X - 1.25) < 1e-6)
+	Config.MeshAssets.pottery_shard = nil
+	check("removing the mesh set restores the fallback", TreasureModels.Status("pottery_shard") == "unfinished")
+end
+
 print(("artifact models: %d passed, %d failed"):format(passed, failed))
 if failed > 0 then error("tests failed") end

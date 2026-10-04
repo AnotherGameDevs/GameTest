@@ -19,9 +19,8 @@ TREASURE = {  # value, {layer: weight}
     "ancient_necklace": (240, {"Clay": 1, "Stone": 5, "Ruins": 4}),
     "cut_gemstone": (320, {"Stone": 4, "Ruins": 5}),
     "ruin_tablet": (260, {"Stone": 1, "Ruins": 6}),
-    "fossil_claw": (900, {"Stone": 1, "Ruins": 2}),
-    "golden_scarab": (1400, {"Ruins": 1}),
-    "sun_mask": (3500, {"Ruins": 0.5}),
+    # Important (carry-home) artifacts are capped per mine generation (Config.Loot.ImportantLimits: claw 4, scarab 2, mask 1)
+    # and found on top of this income, so they are NOT part of the per-block expectation any more.
 }
 # tool: (name, power, rate, reach, splash(extra, fraction))   -- mirrors Defs.Tools (tier 8 Dynamite is a consumable)
 TOOLS = [
@@ -115,8 +114,8 @@ def gated_report(capacities):
         print(f"{t[0]:20s} {'/'.join(pol):>22s} {b:8.1f} {ipm:9.1f} {c:7.0f}  {cap}")
     return rows
 
-PRICES = [0, 300, 1100, 5500, 11000, 30000, 52000]   # mirrors Defs.Tools[...].Price
-PACKS = [(12, 0), (30, 120), (55, 2500), (90, 14000), (140, 40000)]   # mirrors Defs.Backpacks
+PRICES = [0, 300, 1100, 5500, 11000, 24000, 40000]   # mirrors Defs.Tools[...].Price
+PACKS = [(12, 0), (30, 120), (55, 2500), (90, 14000), (140, 32000)]   # mirrors Defs.Backpacks
 PACK_FOR_TOOL = [12, 30, 30, 55, 55, 90, 140]  # capacity a typical player owns when holding tool i
 
 if __name__ == "__main__":

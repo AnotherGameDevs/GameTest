@@ -16,12 +16,12 @@ Each tier changes about one thing versus the tier before it (damage, speed, reac
 | 3 | Heavy Shovel | Hand | 36 | 1.5 | 8 | single | $1,100 | **Stone layer**; soft blocks break in 1-2 hits |
 | 4 | Power Shovel | Excavation | 36 | 1.5 | 8 | +2 blocks @40% | $5,500 | first area tier |
 | 5 | Jackhammer | Excavation | 22 | 4.5 | 8 | single | $11,000 | **Ruins layer**; rapid fire |
-| 6 | Drill | Excavation | 22 | 5.5 | 11 | single | $30,000 | faster, reaches deeper (11) |
-| 7 | Industrial Drill | Industrial | 22 | 5.5 | 11 | +2 blocks @40% | $52,000 | area on top of tier 6 |
+| 6 | Drill | Excavation | 22 | 5.5 | 11 | single | $24,000 | faster, reaches deeper (11) |
+| 7 | Industrial Drill | Industrial | 22 | 5.5 | 11 | +2 blocks @40% | $40,000 | area on top of tier 6 |
 | 8 | Dynamite | Industrial | - | - | - | up to 14 blocks, once | $1,200 each | throwable, max carry 3, respects layer gating |
 
 Backpacks (capacity sized to the dig rate of the tools a player owns when they can afford them):
-Pouch 12 (free) · Big Satchel 30 ($120) · Field Pack 55 ($2,500) · Mining Pack 90 ($14,000) · Expedition Pack 140 ($40,000).
+Pouch 12 (free) · Big Satchel 30 ($120) · Field Pack 55 ($2,500) · Mining Pack 90 ($14,000) · Expedition Pack 140 ($32,000).
 A smaller pack bought later never replaces a bigger one in use.
 
 Layer HP: Soil 24, Clay 42, Stone 72, Ruins 110. Swings to break one block:
@@ -32,6 +32,10 @@ Layer HP: Soil 24, Clay 42, Stone 72, Ruins 110. Swings to break one block:
 | Digging | 2 | 4 | locked | locked |
 | Heavy / Power | 1 | 2 | 2 | locked |
 | Jackhammer / Drill / Industrial | 2 | 2 | 4 | 5 |
+
+> **Update (loot pass):** important artifacts are capped per mine generation (`Config.Loot`), so they are no longer in the per-block income.
+> Stone/ruins ordinary income fell ~40%; Drill and Industrial Drill prices were lowered ($24,000 / $40,000) and the Expedition Pack to $32,000.
+> Re-simulated minutes-to-afford: 2.8 / 5.9 / 6.7 / 8.3 / 10.3 / 12.7. Still a model, not measured play.
 
 ## How prices were chosen (analytic model — NOT measured play)
 

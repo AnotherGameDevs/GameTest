@@ -8,6 +8,7 @@
 --     loot cells and never use treasure colours.
 --   * Pockets(): a few compact discovery pockets (pottery cache in clay, fossil patch in stone, broken masonry in ruins).
 local Config = require(script.Parent.Config)
+local Defs = require(script.Parent.Defs)
 
 local MineStyle = {}
 
@@ -97,20 +98,26 @@ MineStyle.AMBIENT = { -- remnants by layer (exactly the set asked for: roots/sto
 	Ruins = { "worked_fragment", "carving" },
 }
 MineStyle.POCKET_AMBIENT = { Cache = "sherds", Fossil = "fossil_impression", Masonry = "worked_fragment" }
--- Rewards whose real cell shows a tell when its face is exposed. The tell IS the reward (same treasure id).
-MineStyle.TELLS = { old_coin = "tell_coin", pottery_shard = "tell_pottery", fossil_fragment = "tell_fossil", ruin_tablet = "tell_tablet" }
+-- A "tell" is a small part of the cell's REAL reward standing out of its exposed face (built from the actual artifact model).
 
 -- Returns nil or { Kind, Variant (0-3), FaceRot (0-5), Tell (bool), Loot (treasure id for tells) }.
+-- Loot cells never carry ambient remnants and non-loot cells never carry tells, so a clue always matches the assigned reward.
 function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed: number, lootId: string?, pocketKind: string?)
 	local variant = math.floor(hash(x, y, z, seed, 14) * 4)
 	local faceRot = math.floor(hash(x, y, z, seed, 15) * 6)
 	if lootId then
-		local tell = MineStyle.TELLS[lootId]
-		local chance = pocketKind and 0.9 or Config.Mine.TellChance
-		if tell and hash(x, y, z, seed, 12) < chance then
-			return { Kind = tell, Variant = variant, FaceRot = faceRot, Tell = true, Loot = lootId }
+		local def = Defs.Treasure[lootId]
+		if not def then
+			return nil
 		end
-		return nil -- loot cells never carry ambient remnants: a remnant must never promise a reward that is not there
+		local chance = Config.Mine.TellChance[def.Rarity] or 0.4
+		if pocketKind then
+			chance = math.max(chance, 0.9)
+		end
+		if hash(x, y, z, seed, 12) < chance then
+			return { Kind = "tell", Variant = variant, FaceRot = faceRot, Tell = true, Loot = lootId }
+		end
+		return nil
 	end
 	if pocketKind then
 		if hash(x, y, z, seed, 16) < Config.Mine.PocketChance then

@@ -28,6 +28,7 @@ local WorldBuilder = require(script.Parent.WorldBuilder)
 local MetricsService = require(script.Parent.MetricsService)
 local RateLimiter = require(script.Parent.RateLimiter)
 local AnalyticsService = require(script.Parent.AnalyticsService)
+local MineState = require(script.Parent.MineState)
 
 local ArtifactService = {}
 
@@ -227,7 +228,7 @@ function ArtifactService.Discover(player: Player, treasureId: string, cellIndex:
 	end
 	local position = cf and cf.Position or (center + Vector3.new(0, size.Y / 2 - Grid.CellSize / 2 + 0.05, 0))
 
-	local rec = store:Create(treasureId, def.Value, player.UserId, position)
+	local rec = store:Create(treasureId, def.Value, player.UserId, position, MineState.Generation())
 	task.delay(Config.Artifacts.SpawnDelay, spawnWorldModel, rec.Id)
 	say(player, "Important artifact found - carry it to camp.", "Good")
 	AnalyticsService.Log(player, "ArtifactDiscovered", { id = rec.Id, treasure = treasureId })
@@ -236,7 +237,11 @@ end
 
 -- Pickup ---------------------------------------------------------------------------------------------------------
 function ArtifactService.Pickup(player: Player, recId: any)
-	if type(recId) ~= "string" then
+	if type(recId) ~= "string" or not RateLimiter.Check(player, "ArtifactPickup") then
+		return
+	end
+	if not MineState.Accepting() then
+		say(player, "The mine is resetting - pickups resume in a moment.", "Danger")
 		return
 	end
 	local rec = store:Get(recId)
@@ -287,6 +292,10 @@ end
 -- Place down -----------------------------------------------------------------------------------------------------
 local function placeDown(player: Player)
 	if not RateLimiter.Check(player, "PlaceArtifact") then
+		return
+	end
+	if not MineState.Accepting() then
+		say(player, "The mine is resetting - you can put it down once it reopens.", "Danger")
 		return
 	end
 	local rec = CarryRegistry.Get(player)
@@ -388,39 +397,62 @@ local function inMine(pos: Vector3): boolean
 end
 ArtifactService.InMine = inMine
 
--- Players currently carrying an artifact while standing inside the mine.
-function ArtifactService.CarriersInMine(): { Player }
-	local out = {}
-	for _, player in ipairs(Players:GetPlayers()) do
-		if CarryRegistry.IsCarrying(player) then
-			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-			if hrp and inMine(hrp.Position) then
-				table.insert(out, player)
+-- Mine reset recovery ---------------------------------------------------------------------------------------------------
+-- Every important artifact that is CARRIED by a player inside the mine, or RESTING anywhere inside the mine, is moved to an
+-- owner-claimed spot in the camp's recovery area (beside the entrance gate, far outside the deposit zone). Nothing is sold,
+-- deposited or recorded in a collection: the owner must pick it up there (the existing pickup rules still apply: only the
+-- discoverer) and carry it to the receiving table. The records are separate from the new mine's loot, which is generated from
+-- scratch afterwards, so nothing can duplicate. Returns how many artifacts were recovered.
+function ArtifactService.RecoverForReset(): number
+	local function recoveredCount(): number
+		local n = 0
+		for _, rec in ipairs(store:Dropped()) do
+			if rec.Recovered and (Vector3.new(rec.Position.X, 0, rec.Position.Z) - Vector3.new(WorldBuilder.RecoveryPosition.X, 0, WorldBuilder.RecoveryPosition.Z)).Magnitude < 6 then
+				n += 1
 			end
 		end
+		return n
 	end
-	return out
-end
-
--- Moves every resting artifact that lies inside the mine onto the camp Lost & Found pad (they are never deleted; the
--- owner can still pick them up there). Returns how many were moved.
-function ArtifactService.RelocateFromMine(): number
+	local slot = recoveredCount()
 	local moved = 0
+	local function recover(rec, carrier: Player?)
+		slot += 1
+		local size = artifactSize(rec.TreasureId)
+		local base = WorldBuilder.RecoverySlot(slot)
+		local position = Vector3.new(base.X, 0.85 + size.Y / 2, base.Z)
+		if not store:Recover(rec.Id, position) then
+			return
+		end
+		if carrier then
+			finishCarry(carrier, rec.Id) -- removes the carried tool and brings the shovel back
+		end
+		destroyWorldModel(rec.Id)
+		spawnWorldModel(rec.Id)
+		moved += 1
+		local owner = Players:GetPlayerByUserId(rec.OwnerId)
+		if owner then
+			say(owner, ("The mine reset. Your %s is waiting in the ARTIFACT RECOVERY area at the mine entrance. It has NOT been sold or deposited - pick it up and carry it to the receiving table."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
+		end
+		AnalyticsService.Log(owner, "ArtifactRecovered", { id = rec.Id, treasure = rec.TreasureId })
+	end
+	for _, player in ipairs(Players:GetPlayers()) do
+		local rec = CarryRegistry.Get(player)
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if rec and hrp and inMine(hrp.Position) then
+			recover(rec, player)
+		end
+	end
 	for _, rec in ipairs(store:Dropped()) do
-		if inMine(rec.Position) then
-			local spot = WorldBuilder.LostFoundPosition + Vector3.new((moved % 3 - 1) * 2.2, 0, (moved // 3) * 2.2)
-			if store:Relocate(rec.Id, spot) then
-				destroyWorldModel(rec.Id)
-				spawnWorldModel(rec.Id)
-				moved += 1
-				local owner = Players:GetPlayerByUserId(rec.OwnerId)
-				if owner then
-					say(owner, ("The mine was refreshed. Your %s is waiting at Lost & Found."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
-				end
-			end
+		if not rec.Recovered and inMine(rec.Position) then
+			recover(rec, nil)
 		end
 	end
 	return moved
+end
+
+-- Players currently standing inside the mine volume (used by the reset to evacuate them).
+function ArtifactService.IsInMine(position: Vector3): boolean
+	return inMine(position)
 end
 
 -- Loss handling (death / respawn / disconnect) --------------------------------------------------------------------
@@ -449,11 +481,6 @@ local function onLoss(player: Player, reason: string)
 		say(player, "You dropped your artifact. It is waiting where you lost it.", "Danger")
 	end
 	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
-end
-
--- Forces a carried artifact to be dropped (used by the mine refresh when a carrier will not leave the mine).
-function ArtifactService.ForceDrop(player: Player)
-	onLoss(player, "mine_refresh")
 end
 
 function ArtifactService.Init()

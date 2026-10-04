@@ -243,7 +243,7 @@ Config.Site = {
 	SizeZ = 24,
 	Depth = 20, -- cells deep (four layers of five rows, 20 studs each)
 	Center = Vector3.new(0, 0, 0), -- world XZ centre of the site, Y of the surface
-	Seed = 1337, -- change for a different (seeded) layout
+	Seed = 1337, -- base for COSMETIC variation only (colours/remnants). Loot is placed from a fresh random server-only seed per generation.
 	StudsPerMeter = 3.5, -- for the depth readout
 	BorderHeight = 6, -- decorative rim
 }
@@ -288,6 +288,7 @@ Config.Camp = {
 	ShopPosition = Vector3.new(20, 0, 88),
 	ShopReach = 34, -- server-side purchase range (the client closes the shop at 30)
 	ReceivingPosition = Vector3.new(24, 0, 73), -- artifact receiving table (a short walk from the elevator exit)
+	RecoveryPosition = Vector3.new(-14, 0, 59), -- owner-claimed recovery area beside the mine entrance gate, far outside the deposit zone
 	LostFoundPosition = Vector3.new(31, 0, 73), -- beside the table
 	-- Declared footprints (half-extents on X and Z) of what each builder actually builds; used by the layout test and
 	-- by any future placement tool. Keep in step with WorldCamp.
@@ -295,6 +296,7 @@ Config.Camp = {
 		Shop = { Center = Vector3.new(20, 0, 88), HalfX = 7.0, HalfZ = 4.8 },
 		Appraisal = { Center = Vector3.new(-18, 0, 70), HalfX = 6.5, HalfZ = 4.2 },
 		Receiving = { Center = Vector3.new(24, 0, 73), HalfX = 3.7, HalfZ = 2.6 },
+		Recovery = { Center = Vector3.new(-14, 0, 59), HalfX = 4.0, HalfZ = 2.8 },
 		Shelf = { Center = Vector3.new(-30, 0, 96), HalfX = 1.2, HalfZ = 4.9 }, -- personal display (client-side, Config.Collection)
 	},
 	-- Required clear spaces (checked by tests/camp_layout_test.luau)
@@ -330,26 +332,46 @@ Config.Collection = {
 	ShelfReach = 12, -- the shelf is only built/visible when the player is this close
 }
 
+-- Imported artifact meshes (docs/ARTIFACT_MESHES.md). EMPTY until the OBJ files in assets/artifact_meshes/ have been imported in
+-- Roblox Studio and uploaded. While an artifact has no entry here the game uses its primitive-part model, which is a
+-- documented FALLBACK for the artifacts listed in TreasureModels.MeshRequired (their silhouette requirement is not met by parts).
+-- Entry: Config.MeshAssets[treasureId] = { { Name = "outer", MeshId = "rbxassetid://123", Color = "B5683F", Material = "SmoothPlastic",
+--   Size = Vector3.new(x, y, z) (the mesh's native bounding size in studs, from assets/artifact_meshes/manifest.json) }, ... }
+Config.MeshAssets = {}
+
 -- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
 Config.Mine = {
+	TellChance = { Common = 0.35, Uncommon = 0.5, Rare = 0.65, Epic = 1, Legendary = 1 }, -- chance a buried reward shows part of ITSELF once its face is exposed
+	TellProtrude = 0.7, -- studs of the real artifact that stand out of the wall
 	AmbientChance = { Soil = 0.07, Clay = 0.06, Stone = 0.07, Ruins = 0.07 }, -- chance an exposed non-loot cell carries an ambient remnant
-	TellChance = 0.45, -- chance a cell holding one of the "tellable" rewards shows its real reward when its face is exposed
 	PocketChance = 0.55, -- chance a non-loot cell INSIDE a pocket carries that pocket's remnant
-	MaxDetails = 220, -- hard cap on live detail objects in the whole mine
+	MaxDetails = 160, -- hard cap on live detail objects in the whole mine
+	MaxDetailParts = 1800, -- ...and on the parts they use
 	Pockets = { Cache = 3, Fossil = 3, Masonry = 2 }, -- discovery pockets per generation
 }
 
--- Shared-mine replenishment ("Fresh Dig", docs/MINE_SHIFT.md).
-Config.Shift = {
+-- Mine reset lifecycle (docs/MINE_RESET.md). One server-controlled state machine:
+--   Active -> Warning -> Evacuating -> Regenerating -> Active.
+-- PROVISIONAL playtest values. Nothing a client sends can start, delay or repeat a reset.
+Config.Reset = {
 	Enabled = true,
-	TriggerFraction = 0.55, -- fraction of ALL cells dug that triggers a refresh
-	DeepLayerFraction = 0.70, -- ...or this fraction of the deepest layer dug (nothing left to reach)
-	MaxAgeMinutes = 60, -- ...or the mine is this old and at least MinFractionForAge of it has been dug
-	MinFractionForAge = 0.10,
-	CheckInterval = 5, -- seconds between depletion checks
-	WarningSeconds = 45, -- countdown shown to everyone before the refresh
-	CarryDeferSeconds = 120, -- how long a refresh waits for carriers still inside the mine before dropping their artifact
-	SeedStep = 7919, -- each refresh uses Seed + count * SeedStep
+	IntervalMinutes = 20, -- scheduled reset after this much ACTIVE time (the clock pauses while the server is empty)
+	DepletionFraction = 0.70, -- earlier reset once this fraction of the DIGGABLE cells is gone (diggable = layers the best online tool can break)
+	MinLifetimeMinutes = 10, -- depletion can never trigger a reset before the generation is this old
+	WarningSeconds = 60, -- countdown before the reset; the last 10 s are called out
+	FinalCountdownSeconds = 10,
+	EvacuateSeconds = 3, -- pause between "stop accepting requests" and the new mine (players are moved, artifacts recovered)
+	CheckInterval = 1,
+}
+
+-- Buried loot (docs/LOOT.md). Placement is rolled ONCE per mine generation from a fresh server-only seed.
+Config.Loot = {
+	-- Important (carry-home) artifacts: at most this many exist in one generation (each is claimed once). Extra rolls become
+	-- ordinary finds. Individually configurable.
+	ImportantLimits = { fossil_claw = 4, golden_scarab = 2, sun_mask = 1 },
+	DefaultImportantLimit = 2,
+	ExitClearCells = 2, -- important artifacts keep this many cells away from the elevator shaft side of the grid
+	ReplaceTries = 8,
 }
 
 Config.Shop = {
@@ -389,6 +411,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
+	ArtifactPickup = { 4, 3 },
 	GuideDone = { 10, 5 },
 	GuideControl = { 3, 5 },
 	SetDisplay = { 6, 3 },
@@ -455,13 +478,13 @@ Defs.Tools = {
 	},
 	drill = {
 		DisplayName = "Drill", Tier = 6, Family = "Excavation", ToolType = "Drill", Appearance = "drill",
-		Power = 22, Rate = 5.5, Reach = 11, Price = 30000, RequiredReputation = 0,
+		Power = 22, Rate = 5.5, Reach = 11, Price = 24000, RequiredReputation = 0,
 		Blurb = "Cuts a tunnel. Faster, and reaches deeper from where you stand.",
 	},
 	industrial_drill = {
 		DisplayName = "Industrial Drill", Tier = 7, Family = "Industrial", ToolType = "Drill", Appearance = "drill_industrial",
 		Power = 22, Rate = 5.5, Reach = 11, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
-		Price = 52000, RequiredReputation = 0,
+		Price = 40000, RequiredReputation = 0,
 		Blurb = "Massive digging power. Clears neighbouring blocks as it goes.",
 	},
 }
@@ -489,7 +512,7 @@ Defs.Backpacks = {
 		Blurb = "Straps and pockets for 55 finds. Suits the stone layer." },
 	mining_pack = { DisplayName = "Mining Pack", Capacity = 90, Price = 14000, RequiredReputation = 0, Order = 4, Appearance = "pack_mining",
 		Blurb = "Reinforced frame for 90 finds on deep runs." },
-	expedition_pack = { DisplayName = "Expedition Pack", Capacity = 140, Price = 40000, RequiredReputation = 0, Order = 5, Appearance = "pack_expedition",
+	expedition_pack = { DisplayName = "Expedition Pack", Capacity = 140, Price = 32000, RequiredReputation = 0, Order = 5, Appearance = "pack_expedition",
 		Blurb = "The biggest pack there is: 140 finds per trip." },
 }
 
@@ -555,28 +578,34 @@ function Defs.LayerName(layerId: string): string
 	return layerId
 end
 
--- Per-layer weighted lists, built once.
-local weighted = {}
-for _, layer in ipairs(Config.Layers) do
-	local list, total = {}, 0
-	for id, def in pairs(Defs.Treasure) do
-		local w = def.Layers[layer.Id]
-		if w then
-			total += w
-			table.insert(list, { Id = id, Cum = total })
+-- Per-layer weighted lists, built once: all treasures, and ordinary (not carry-home) treasures only.
+local function buildWeighted(onlyOrdinary: boolean)
+	local out = {}
+	for _, layer in ipairs(Config.Layers) do
+		local list = {}
+		for id, def in pairs(Defs.Treasure) do
+			local w = def.Layers[layer.Id]
+			if w and not (onlyOrdinary and def.RequiresCarry) then
+				table.insert(list, { Id = id, Weight = w })
+			end
 		end
+		table.sort(list, function(a, b) return a.Id < b.Id end)
+		local total = 0
+		for _, e in ipairs(list) do
+			total += e.Weight
+			e.Cum = total
+		end
+		out[layer.Id] = { List = list, Total = total }
 	end
-	table.sort(list, function(a, b) return a.Id < b.Id end)
-	total = 0
-	for _, e in ipairs(list) do
-		total += (Defs.Treasure[e.Id].Layers[layer.Id])
-		e.Cum = total
-	end
-	weighted[layer.Id] = { List = list, Total = total }
+	return out
 end
+local weighted = buildWeighted(false)
+local weightedOrdinary = buildWeighted(true)
 
-function Defs.PickTreasure(layerId: string, rng: Random): string?
-	local w = weighted[layerId]
+-- Weighted pick for a layer. `ordinaryOnly` excludes carry-home artifacts (used when an important artifact is over its
+-- per-generation limit or ineligible for a cell). `rng` needs :NextNumber().
+function Defs.PickTreasure(layerId: string, rng, ordinaryOnly: boolean?): string?
+	local w = (ordinaryOnly and weightedOrdinary or weighted)[layerId]
 	if not w or w.Total <= 0 then
 		return nil
 	end
@@ -983,6 +1012,161 @@ return GuideSpec
       </Item>
       <Item class="ModuleScript" referent="9">
         <Properties>
+          <string name="Name">LootBoard</string>
+          <string name="Source"><![CDATA[-- The buried loot of one mine generation: who may take what, exactly once. Pure (no Roblox APIs), tested in
+-- tests/loot_reset_test.luau. A claim names the generation it was made for; a request from an old generation can never
+-- take loot from the new mine at the same coordinates, and a cell's reward can be taken only once.
+local LootBoard = {}
+LootBoard.__index = LootBoard
+
+function LootBoard.new(generation: number, loot: { [number]: string })
+	return setmetatable({ generation = generation, loot = loot, taken = 0 }, LootBoard)
+end
+
+function LootBoard:Generation(): number
+	return self.generation
+end
+
+function LootBoard:Peek(index: number): string?
+	return self.loot[index]
+end
+
+-- Returns the treasure id the FIRST time a cell is claimed in the right generation; nil otherwise (nothing there, already
+-- claimed, or the request belongs to another generation).
+function LootBoard:Claim(index: number, generation: number): string?
+	if generation ~= self.generation then
+		return nil
+	end
+	local id = self.loot[index]
+	if id == nil then
+		return nil
+	end
+	self.loot[index] = nil
+	self.taken += 1
+	return id
+end
+
+function LootBoard:Remaining(): number
+	local n = 0
+	for _ in pairs(self.loot) do
+		n += 1
+	end
+	return n
+end
+
+return LootBoard
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">LootPlan</string>
+          <string name="Source"><![CDATA[-- Pure buried-loot generation for ONE mine generation (docs/LOOT.md). The caller supplies a random source (a Roblox
+-- `Random` seeded from a fresh server-only seed) and the loot-placement seed; nothing here touches the world and nothing
+-- here is ever sent to a client. Tested in tests/loot_reset_test.luau.
+--   * Each cell rolls its layer's TreasureChance, then a weighted layer table (Defs.PickTreasure).
+--   * Important (carry-home) artifacts: only eligible cells; at most Config.Loot.ImportantLimits[id] per generation, chosen
+--     UNIFORMLY among all rolled candidates (so the depth/position of the survivors is not biased toward the first cells in
+--     index order); the rest become ordinary finds from the same layer.
+--   * Discovery pockets are placed at random from the loot seed and own the loot of their cells.
+local Config = require(script.Parent.Config)
+local Defs = require(script.Parent.Defs)
+local Grid = require(script.Parent.Grid)
+local MineStyle = require(script.Parent.MineStyle)
+
+local LootPlan = {}
+
+-- May an important artifact be buried in this cell? Not on the outer ring of the grid, not on the bottom row (bedrock
+-- below) and not near the exit shaft / elevator side.
+function LootPlan.Eligible(x: number, y: number, z: number): boolean
+	local S = Config.Site
+	if x < 1 or x > S.SizeX - 2 or z < 1 or z > S.SizeZ - 2 or y < 1 or y > S.Depth - 2 then
+		return false
+	end
+	local ex = Config.Exit
+	if ex.Enabled then
+		local clear = Config.Loot.ExitClearCells
+		local cellMin = Grid.OriginX + x * Grid.CellSize
+		local cellMax = cellMin + Grid.CellSize
+		local shaftMin, shaftMax = ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2
+		local margin = clear * Grid.CellSize
+		local nearShaftColumn = cellMax > shaftMin - margin and cellMin < shaftMax + margin
+		if nearShaftColumn and z >= S.SizeZ - 1 - clear then
+			return false
+		end
+	end
+	return true
+end
+
+local function limitFor(id: string): number
+	return Config.Loot.ImportantLimits[id] or Config.Loot.DefaultImportantLimit
+end
+
+-- Returns { Loot = { [cellIndex] = treasureId }, Pockets = {...}, Counts = { [treasureId] = n } }.
+function LootPlan.Generate(rng, lootSeed: number)
+	local loot: { [number]: any } = {}
+	local candidates: { [string]: { number } } = {}
+
+	for idx = 1, Grid.Count do
+		local x, y, z = Grid.FromIndex(idx)
+		local layer = Defs.LayerAtCell(y)
+		if rng:NextNumber() < layer.TreasureChance then
+			local id = Defs.PickTreasure(layer.Id, rng)
+			if id then
+				local def = Defs.Treasure[id]
+				if def.RequiresCarry then
+					if LootPlan.Eligible(x, y, z) then
+						candidates[id] = candidates[id] or {}
+						table.insert(candidates[id], idx)
+					else
+						id = Defs.PickTreasure(layer.Id, rng, true)
+					end
+				end
+				loot[idx] = id
+			end
+		end
+	end
+
+	-- Enforce per-generation limits: keep a uniformly random subset of each important artifact's candidates.
+	local ids = {}
+	for id in pairs(candidates) do
+		table.insert(ids, id)
+	end
+	table.sort(ids) -- deterministic order for a given rng stream
+	for _, id in ipairs(ids) do
+		local list = candidates[id]
+		for i = #list, 2, -1 do -- Fisher-Yates
+			local j = 1 + math.floor(rng:NextNumber() * i)
+			list[i], list[j] = list[j], list[i]
+		end
+		for i = limitFor(id) + 1, #list do
+			local idx = list[i]
+			local _, y = Grid.FromIndex(idx)
+			loot[idx] = Defs.PickTreasure(Defs.LayerAtCell(y).Id, rng, true)
+		end
+	end
+
+	-- Discovery pockets: random positions from the loot seed; their cells own their loot (ordinary rewards only).
+	local pockets = MineStyle.Pockets(lootSeed)
+	for _, pocket in ipairs(pockets) do
+		for _, c in ipairs(pocket.Cells) do
+			loot[Grid.ToIndex(c[1], c[2], c[3])] = c[4]
+		end
+	end
+
+	local counts = {}
+	for _, id in pairs(loot) do
+		counts[id] = (counts[id] or 0) + 1
+	end
+	return { Loot = loot, Pockets = pockets, Counts = counts }
+end
+
+return LootPlan
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
+        <Properties>
           <string name="Name">MineDetailSpecs</string>
           <string name="Source"><![CDATA[-- Part specs for the small remnants that appear on exposed mine faces (see MineStyle.Detail). Local frame of every
 -- detail: origin = centre of the 4x4-stud cell face, +Z points OUT of the wall, X/Y lie in the face. Parts are embedded
@@ -991,6 +1175,7 @@ return GuideSpec
 -- the two are never confused. Tested in tests/mine_style_test.luau.
 local Kit = require(script.Parent.ModelKit)
 local Config = require(script.Parent.Config)
+local TreasureModels = require(script.Parent.TreasureModels)
 
 local MineDetailSpecs = {}
 
@@ -998,7 +1183,6 @@ local V = Vector3.new
 local function hex(s: string): Color3
 	return Color3.fromHex(s)
 end
-local P = Config.Palette
 
 local function lay(name: string, size: Vector3, x: number, y: number, color: Color3, mat: Enum.Material?, rotZ: number?)
 	-- a block lying on the face: footprint (size.X, size.Y), height size.Z
@@ -1073,43 +1257,6 @@ function builders.carving() -- ruins: a shallow carved panel with a few glyph ba
 	return parts
 end
 
--- Tells (real rewards; colours match the treasure) -----------------------------------------------------------------------
-function builders.tell_coin()
-	local gold, rim = hex("B8964A"), hex("8F7330")
-	return {
-		Kit.cyl("CoinRim", "Z", 0.3, 1.0, V(0, 0, 0.11), rim, Enum.Material.Metal),
-		Kit.cyl("CoinFace", "Z", 0.34, 0.78, V(0, 0, 0.13), gold, Enum.Material.Metal),
-	}
-end
-
-function builders.tell_pottery()
-	local fire, band = hex("B5683F"), hex("E3D2B0")
-	return {
-		lay("PotA", V(1.1, 0.7, 0.3), -0.35, 0.15, fire, Enum.Material.SmoothPlastic, 15),
-		lay("PotB", V(0.7, 0.55, 0.28), 0.5, -0.2, fire, Enum.Material.SmoothPlastic, -30),
-		lay("PotBand", V(1.1, 0.12, 0.34), -0.35, 0.15, band, Enum.Material.SmoothPlastic, 15),
-	}
-end
-
-function builders.tell_fossil()
-	local bone = hex("D9CFB4")
-	local parts = {}
-	for i = 0, 9 do
-		local th = i * 0.75
-		local r = 0.1 * math.exp(0.2 * th)
-		parts[#parts + 1] = lay("Whorl" .. i, V(0.22 + r * 0.6, 0.15, 0.32), r * math.cos(th), r * math.sin(th), bone, Enum.Material.SmoothPlastic, math.deg(th) + 90)
-	end
-	return parts
-end
-
-function builders.tell_tablet()
-	local sand, glyph = P.Sandstone, hex("8C6B3E")
-	return {
-		lay("TabletEdge", V(1.5, 1.1, 0.3), 0, 0, sand, Enum.Material.Limestone, 8),
-		lay("TabletGlyph", V(0.9, 0.12, 0.34), 0, 0.1, glyph, Enum.Material.Limestone, 8),
-	}
-end
-
 MineDetailSpecs.Kinds = {}
 for kind in pairs(builders) do
 	table.insert(MineDetailSpecs.Kinds, kind)
@@ -1118,6 +1265,32 @@ table.sort(MineDetailSpecs.Kinds)
 
 function MineDetailSpecs.Has(kind: string): boolean
 	return builders[kind] ~= nil
+end
+
+-- Tell: the REAL artifact, scaled to a fixed size and oriented so a recognisable part of it stands `Config.Mine.TellProtrude` studs
+-- out of the wall. The rest is buried inside the (opaque) block, so only that part is ever visible, and parts that would be
+-- completely buried are dropped. Frame = face frame (+Z out of the wall).
+local TELL_SIZE = 2.6
+local TELL_PITCH = { golden_scarab = 90, cut_gemstone = 90 } -- models that lie flat: turn their best face outward
+
+function MineDetailSpecs.Tell(treasureId: string, def, variant: number)
+	local specs = TreasureModels.Specs(treasureId, def)
+	local scale = TELL_SIZE / math.max(TreasureModels.MaxExtent(specs), 0.1)
+	local rotated = Kit.Transform(specs, scale, V(TELL_PITCH[treasureId] or 0, 0, 90 * variant))
+	local _, hi = TreasureModels.Bounds(rotated)
+	local shift = Config.Mine.TellProtrude - hi.Z
+	local out = {}
+	for _, s in ipairs(rotated) do
+		local moved = {
+			Name = s.Name, Shape = s.Shape, Size = s.Size, Color = s.Color, Material = s.Material, Transparency = s.Transparency,
+			Offset = CFrame.new(0, 0, shift) * s.Offset,
+		}
+		local _, top = TreasureModels.Bounds({ moved })
+		if top.Z > 0.02 then -- at least partly outside the wall
+			table.insert(out, moved)
+		end
+	end
+	return out
 end
 
 -- Specs for one detail, turned by variant*90 degrees about the face normal so repeats do not look identical.
@@ -1133,7 +1306,7 @@ return MineDetailSpecs
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">MineStyle</string>
           <string name="Source"><![CDATA[-- Pure, deterministic description of how the mine LOOKS and where small buried discoveries sit (no Roblox instances).
@@ -1146,6 +1319,7 @@ return MineDetailSpecs
 --     loot cells and never use treasure colours.
 --   * Pockets(): a few compact discovery pockets (pottery cache in clay, fossil patch in stone, broken masonry in ruins).
 local Config = require(script.Parent.Config)
+local Defs = require(script.Parent.Defs)
 
 local MineStyle = {}
 
@@ -1235,20 +1409,26 @@ MineStyle.AMBIENT = { -- remnants by layer (exactly the set asked for: roots/sto
 	Ruins = { "worked_fragment", "carving" },
 }
 MineStyle.POCKET_AMBIENT = { Cache = "sherds", Fossil = "fossil_impression", Masonry = "worked_fragment" }
--- Rewards whose real cell shows a tell when its face is exposed. The tell IS the reward (same treasure id).
-MineStyle.TELLS = { old_coin = "tell_coin", pottery_shard = "tell_pottery", fossil_fragment = "tell_fossil", ruin_tablet = "tell_tablet" }
+-- A "tell" is a small part of the cell's REAL reward standing out of its exposed face (built from the actual artifact model).
 
 -- Returns nil or { Kind, Variant (0-3), FaceRot (0-5), Tell (bool), Loot (treasure id for tells) }.
+-- Loot cells never carry ambient remnants and non-loot cells never carry tells, so a clue always matches the assigned reward.
 function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed: number, lootId: string?, pocketKind: string?)
 	local variant = math.floor(hash(x, y, z, seed, 14) * 4)
 	local faceRot = math.floor(hash(x, y, z, seed, 15) * 6)
 	if lootId then
-		local tell = MineStyle.TELLS[lootId]
-		local chance = pocketKind and 0.9 or Config.Mine.TellChance
-		if tell and hash(x, y, z, seed, 12) < chance then
-			return { Kind = tell, Variant = variant, FaceRot = faceRot, Tell = true, Loot = lootId }
+		local def = Defs.Treasure[lootId]
+		if not def then
+			return nil
 		end
-		return nil -- loot cells never carry ambient remnants: a remnant must never promise a reward that is not there
+		local chance = Config.Mine.TellChance[def.Rarity] or 0.4
+		if pocketKind then
+			chance = math.max(chance, 0.9)
+		end
+		if hash(x, y, z, seed, 12) < chance then
+			return { Kind = "tell", Variant = variant, FaceRot = faceRot, Tell = true, Loot = lootId }
+		end
+		return nil
 	end
 	if pocketKind then
 		if hash(x, y, z, seed, 16) < Config.Mine.PocketChance then
@@ -1327,7 +1507,7 @@ return MineStyle
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">ModelKit</string>
           <string name="Source"><![CDATA[-- Tiny parts-only modelling kit for the "chunky dig-site" look. A model is a list of part specs positioned
@@ -1392,6 +1572,14 @@ function Kit.make(s): Part
 		p.Shape = Enum.PartType.Ball
 	elseif s.Shape == "Cylinder" then
 		p.Shape = Enum.PartType.Cylinder
+	elseif s.Shape == "Mesh" and s.MeshId then
+		-- An imported mesh asset (docs/ARTIFACT_MESHES.md): SpecialMesh FileMesh scaled from the mesh's native size to s.Size.
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.FileMesh
+		mesh.MeshId = s.MeshId
+		local native = s.MeshSize or s.Size
+		mesh.Scale = Vector3.new(s.Size.X / native.X, s.Size.Y / native.Y, s.Size.Z / native.Z)
+		mesh.Parent = p
 	elseif s.Shape == "Ellipsoid" then
 		local mesh = Instance.new("SpecialMesh")
 		mesh.MeshType = Enum.MeshType.Sphere
@@ -1467,7 +1655,7 @@ function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
 		local r = s.Offset - s.Offset.Position
 		table.insert(out, {
 			Name = s.Name, Shape = s.Shape, Size = s.Size * scale, Color = s.Color, Material = s.Material,
-			Transparency = s.Transparency,
+			Transparency = s.Transparency, MeshId = s.MeshId, MeshSize = s.MeshSize,
 			Offset = rot * (CFrame.new(pos) * r),
 		})
 	end
@@ -1478,7 +1666,7 @@ return Kit
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="14">
         <Properties>
           <string name="Name">PackModels</string>
           <string name="Source"><![CDATA[-- Chunky backpack models for the shop (same Kit/palette as tools and artifacts). Five packs, each visibly bigger and
@@ -1581,7 +1769,7 @@ return PackModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="13">
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">Remotes</string>
           <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
@@ -1611,7 +1799,6 @@ local EVENTS = {
 	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
-	"MineShift", -- S->C  (phase, secondsOrNil) mine refresh warning / deferral / done
 }
 
 local folder: Folder
@@ -1638,7 +1825,7 @@ return Remotes
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="14">
+      <Item class="ModuleScript" referent="16">
         <Properties>
           <string name="Name">SettingsSpec</string>
           <string name="Source"><![CDATA[-- Player settings: one definition used by the client (UI + clamping) and the server (validation before saving).
@@ -1701,28 +1888,7 @@ return SettingsSpec
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="15">
-        <Properties>
-          <string name="Name">ShiftSpec</string>
-          <string name="Source"><![CDATA[-- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/collection_test.luau.
-local ShiftSpec = {}
-
--- depletion = { Total = fraction of all cells dug, ByLayer = { [layerId] = fraction }, AgeMinutes }
-function ShiftSpec.ShouldRefresh(depletion, cfg, deepestLayerId: string): boolean
-	if depletion.Total >= cfg.TriggerFraction then
-		return true
-	end
-	if (depletion.ByLayer[deepestLayerId] or 0) >= cfg.DeepLayerFraction then
-		return true
-	end
-	return depletion.AgeMinutes >= cfg.MaxAgeMinutes and depletion.Total >= cfg.MinFractionForAge
-end
-
-return ShiftSpec
-]]></string>
-        </Properties>
-      </Item>
-      <Item class="ModuleScript" referent="16">
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
@@ -2086,7 +2252,7 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="17">
+      <Item class="ModuleScript" referent="18">
         <Properties>
           <string name="Name">TreasureModels</string>
           <string name="Source"><![CDATA[-- Artifact models. ONE source of truth: these part specs drive the discovery reveal, the carried artifact (world and
@@ -2099,6 +2265,7 @@ return ToolModels
 -- Frame of every model: +Y up, front faces +Z, origin near the centre, roughly 2-3 studs across.
 -- Mesh-dependent parts (none shipped): see the MESH NOTES in docs/ARTIFACT_MODELS.md.
 local Kit = require(script.Parent.ModelKit)
+local Config = require(script.Parent.Config)
 
 local TreasureModels = {}
 
@@ -2385,8 +2552,39 @@ function TreasureModels.DisplayRotation(treasureId: string): CFrame
 	return CFrame.Angles(math.rad(TreasureModels.DisplayPitch[treasureId] or 0), math.rad(TreasureModels.DisplayYaw[treasureId] or 0), 0)
 end
 
--- Part specs (origin-centred) for a treasure id. `def` is the Defs entry (passed in to avoid a require cycle).
+-- Artifacts whose required silhouette needs an authored mesh (parts cannot do it cleanly). Until a mesh set is configured in
+-- Config.MeshAssets their model is the primitive FALLBACK below and counts as UNFINISHED.
+TreasureModels.MeshRequired = { "pottery_shard", "cut_gemstone", "fossil_fragment", "clay_figurine", "fossil_claw", "golden_scarab", "sun_mask" }
+
+-- "mesh" (authored mesh in use), "unfinished" (needs a mesh, primitive fallback shown) or "parts" (primitives are the final art).
+function TreasureModels.Status(treasureId: string): string
+	if Config.MeshAssets[treasureId] and #Config.MeshAssets[treasureId] > 0 then
+		return "mesh"
+	end
+	if table.find(TreasureModels.MeshRequired, treasureId) then
+		return "unfinished"
+	end
+	return "parts"
+end
+
+local function meshSpecs(entries)
+	local out = {}
+	for _, e in ipairs(entries) do
+		table.insert(out, {
+			Name = e.Name, Shape = "Mesh", MeshId = e.MeshId, MeshSize = e.Size, Size = e.Size, Offset = CFrame.identity,
+			Color = Color3.fromHex(e.Color), Material = Enum.Material[e.Material or "SmoothPlastic"],
+		})
+	end
+	return out
+end
+
+-- Part specs (origin-centred) for a treasure id. `def` is the Defs entry (passed in to avoid a require cycle). The same specs
+-- (mesh set when configured, else the primitive fallback) feed reveals, carrying, journal, shelf and buried tells.
 function TreasureModels.Specs(treasureId: string, def)
+	local assets = Config.MeshAssets[treasureId]
+	if assets and #assets > 0 then
+		return meshSpecs(assets)
+	end
 	local builder = def.Model and builders[def.Model]
 	if builder then
 		return builder()
@@ -2394,8 +2592,8 @@ function TreasureModels.Specs(treasureId: string, def)
 	return genericSpecs(def)
 end
 
--- Largest side of the model's part bounds, in studs (rotation-aware, from the specs).
-function TreasureModels.MaxExtent(specs): number
+-- Axis-aligned bounds of a spec list (rotation-aware): returns min and max corners.
+function TreasureModels.Bounds(specs): (Vector3, Vector3)
 	local lo, hi = V(1e9, 1e9, 1e9), V(-1e9, -1e9, -1e9)
 	for _, s in ipairs(specs) do
 		local r = s.Offset.RightVector
@@ -2409,6 +2607,12 @@ function TreasureModels.MaxExtent(specs): number
 		lo = V(math.min(lo.X, p.X - ex), math.min(lo.Y, p.Y - ey), math.min(lo.Z, p.Z - ez))
 		hi = V(math.max(hi.X, p.X + ex), math.max(hi.Y, p.Y + ey), math.max(hi.Z, p.Z + ez))
 	end
+	return lo, hi
+end
+
+-- Largest side of the model's part bounds, in studs.
+function TreasureModels.MaxExtent(specs): number
+	local lo, hi = TreasureModels.Bounds(specs)
 	return math.max(hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z)
 end
 
@@ -2438,7 +2642,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="18">
+      <Item class="ModuleScript" referent="19">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -2488,7 +2692,7 @@ return Util
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="19">
+      <Item class="ModuleScript" referent="20">
         <Properties>
           <string name="Name">ViewmodelMath</string>
           <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
@@ -2565,15 +2769,15 @@ return ViewmodelMath
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="20">
+  <Item class="ServerScriptService" referent="21">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="21">
+    <Item class="Folder" referent="22">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="22">
+      <Item class="Script" referent="23">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -2601,7 +2805,7 @@ local CollectionService = require(Services.CollectionService)
 local MineShiftService = require(Services.MineShiftService)
 
 WorldBuilder.Build()
-SiteService.Generate(Config.Site.Seed)
+SiteService.Generate() -- fresh server-only loot seed (never the constant Config.Site.Seed)
 
 for name, init in pairs({
 	Data = DataService.Init,
@@ -2636,11 +2840,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="23">
+      <Item class="Folder" referent="24">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -2658,7 +2862,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -2679,11 +2883,12 @@ function ArtifactRecords.new(idGenerator: () -> string)
 end
 
 -- `position` is where the artifact first rests. OwnerId = discoverer (claims it for this version).
-function ArtifactRecords:Create(treasureId: string, value: number, ownerId: number, position)
+function ArtifactRecords:Create(treasureId: string, value: number, ownerId: number, position, generation: number?)
 	local id = self.idGenerator()
 	local rec = {
 		Id = id, TreasureId = treasureId, Value = value, OwnerId = ownerId,
 		State = "Dropped", CarrierId = nil, Position = position, Origin = position, Transfers = 0,
+		Generation = generation or 1, Recovered = false,
 	}
 	self.records[id] = rec
 	return rec
@@ -2788,11 +2993,29 @@ function ArtifactRecords:Dropped()
 	return out
 end
 
+-- Mine reset recovery: a Carried or Dropped artifact is put down at `position` (the recovery area), still owned by its
+-- discoverer and flagged Recovered. It is NEVER deposited, paid or removed here - the owner must pick it up and deliver it
+-- like any other artifact. A Deposited record is untouched (it can not be recovered twice), and the record count never changes.
+function ArtifactRecords:Recover(id: string, position): boolean
+	local rec = self.records[id]
+	if not rec or rec.State == "Deposited" then
+		return false
+	end
+	if rec.State == "Carried" and rec.CarrierId then
+		self.carried[rec.CarrierId] = nil
+	end
+	rec.State = "Dropped"
+	rec.CarrierId = nil
+	rec.Position = position
+	rec.Recovered = true
+	return true
+end
+
 return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -2825,6 +3048,7 @@ local WorldBuilder = require(script.Parent.WorldBuilder)
 local MetricsService = require(script.Parent.MetricsService)
 local RateLimiter = require(script.Parent.RateLimiter)
 local AnalyticsService = require(script.Parent.AnalyticsService)
+local MineState = require(script.Parent.MineState)
 
 local ArtifactService = {}
 
@@ -3024,7 +3248,7 @@ function ArtifactService.Discover(player: Player, treasureId: string, cellIndex:
 	end
 	local position = cf and cf.Position or (center + Vector3.new(0, size.Y / 2 - Grid.CellSize / 2 + 0.05, 0))
 
-	local rec = store:Create(treasureId, def.Value, player.UserId, position)
+	local rec = store:Create(treasureId, def.Value, player.UserId, position, MineState.Generation())
 	task.delay(Config.Artifacts.SpawnDelay, spawnWorldModel, rec.Id)
 	say(player, "Important artifact found - carry it to camp.", "Good")
 	AnalyticsService.Log(player, "ArtifactDiscovered", { id = rec.Id, treasure = treasureId })
@@ -3033,7 +3257,11 @@ end
 
 -- Pickup ---------------------------------------------------------------------------------------------------------
 function ArtifactService.Pickup(player: Player, recId: any)
-	if type(recId) ~= "string" then
+	if type(recId) ~= "string" or not RateLimiter.Check(player, "ArtifactPickup") then
+		return
+	end
+	if not MineState.Accepting() then
+		say(player, "The mine is resetting - pickups resume in a moment.", "Danger")
 		return
 	end
 	local rec = store:Get(recId)
@@ -3084,6 +3312,10 @@ end
 -- Place down -----------------------------------------------------------------------------------------------------
 local function placeDown(player: Player)
 	if not RateLimiter.Check(player, "PlaceArtifact") then
+		return
+	end
+	if not MineState.Accepting() then
+		say(player, "The mine is resetting - you can put it down once it reopens.", "Danger")
 		return
 	end
 	local rec = CarryRegistry.Get(player)
@@ -3185,39 +3417,62 @@ local function inMine(pos: Vector3): boolean
 end
 ArtifactService.InMine = inMine
 
--- Players currently carrying an artifact while standing inside the mine.
-function ArtifactService.CarriersInMine(): { Player }
-	local out = {}
-	for _, player in ipairs(Players:GetPlayers()) do
-		if CarryRegistry.IsCarrying(player) then
-			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-			if hrp and inMine(hrp.Position) then
-				table.insert(out, player)
+-- Mine reset recovery ---------------------------------------------------------------------------------------------------
+-- Every important artifact that is CARRIED by a player inside the mine, or RESTING anywhere inside the mine, is moved to an
+-- owner-claimed spot in the camp's recovery area (beside the entrance gate, far outside the deposit zone). Nothing is sold,
+-- deposited or recorded in a collection: the owner must pick it up there (the existing pickup rules still apply: only the
+-- discoverer) and carry it to the receiving table. The records are separate from the new mine's loot, which is generated from
+-- scratch afterwards, so nothing can duplicate. Returns how many artifacts were recovered.
+function ArtifactService.RecoverForReset(): number
+	local function recoveredCount(): number
+		local n = 0
+		for _, rec in ipairs(store:Dropped()) do
+			if rec.Recovered and (Vector3.new(rec.Position.X, 0, rec.Position.Z) - Vector3.new(WorldBuilder.RecoveryPosition.X, 0, WorldBuilder.RecoveryPosition.Z)).Magnitude < 6 then
+				n += 1
 			end
 		end
+		return n
 	end
-	return out
-end
-
--- Moves every resting artifact that lies inside the mine onto the camp Lost & Found pad (they are never deleted; the
--- owner can still pick them up there). Returns how many were moved.
-function ArtifactService.RelocateFromMine(): number
+	local slot = recoveredCount()
 	local moved = 0
+	local function recover(rec, carrier: Player?)
+		slot += 1
+		local size = artifactSize(rec.TreasureId)
+		local base = WorldBuilder.RecoverySlot(slot)
+		local position = Vector3.new(base.X, 0.85 + size.Y / 2, base.Z)
+		if not store:Recover(rec.Id, position) then
+			return
+		end
+		if carrier then
+			finishCarry(carrier, rec.Id) -- removes the carried tool and brings the shovel back
+		end
+		destroyWorldModel(rec.Id)
+		spawnWorldModel(rec.Id)
+		moved += 1
+		local owner = Players:GetPlayerByUserId(rec.OwnerId)
+		if owner then
+			say(owner, ("The mine reset. Your %s is waiting in the ARTIFACT RECOVERY area at the mine entrance. It has NOT been sold or deposited - pick it up and carry it to the receiving table."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
+		end
+		AnalyticsService.Log(owner, "ArtifactRecovered", { id = rec.Id, treasure = rec.TreasureId })
+	end
+	for _, player in ipairs(Players:GetPlayers()) do
+		local rec = CarryRegistry.Get(player)
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if rec and hrp and inMine(hrp.Position) then
+			recover(rec, player)
+		end
+	end
 	for _, rec in ipairs(store:Dropped()) do
-		if inMine(rec.Position) then
-			local spot = WorldBuilder.LostFoundPosition + Vector3.new((moved % 3 - 1) * 2.2, 0, (moved // 3) * 2.2)
-			if store:Relocate(rec.Id, spot) then
-				destroyWorldModel(rec.Id)
-				spawnWorldModel(rec.Id)
-				moved += 1
-				local owner = Players:GetPlayerByUserId(rec.OwnerId)
-				if owner then
-					say(owner, ("The mine was refreshed. Your %s is waiting at Lost & Found."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
-				end
-			end
+		if not rec.Recovered and inMine(rec.Position) then
+			recover(rec, nil)
 		end
 	end
 	return moved
+end
+
+-- Players currently standing inside the mine volume (used by the reset to evacuate them).
+function ArtifactService.IsInMine(position: Vector3): boolean
+	return inMine(position)
 end
 
 -- Loss handling (death / respawn / disconnect) --------------------------------------------------------------------
@@ -3246,11 +3501,6 @@ local function onLoss(player: Player, reason: string)
 		say(player, "You dropped your artifact. It is waiting where you lost it.", "Danger")
 	end
 	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
-end
-
--- Forces a carried artifact to be dropped (used by the mine refresh when a carrier will not leave the mine).
-function ArtifactService.ForceDrop(player: Player)
-	onLoss(player, "mine_refresh")
 end
 
 function ArtifactService.Init()
@@ -3321,7 +3571,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -3348,7 +3598,7 @@ return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">CollectionService</string>
             <string name="Source"><![CDATA[-- Player-facing progress that is just saved flags: the camp-shelf selection and first-time hint progress. The server
@@ -3436,7 +3686,7 @@ return CollectionService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -3566,7 +3816,7 @@ return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -3861,7 +4111,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -3881,6 +4131,7 @@ local StateService = require(script.Parent.StateService)
 local RateLimiter = require(script.Parent.RateLimiter)
 local MetricsService = require(script.Parent.MetricsService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
+local MineState = require(script.Parent.MineState)
 
 local DigService = {}
 
@@ -3893,11 +4144,16 @@ local function isInt(n: any): boolean
 	return type(n) == "number" and n == math.floor(n) and n == n and math.abs(n) < 1e6
 end
 
-local function handleHit(player: Player, x: any, y: any, z: any)
+local function handleHit(player: Player, x: any, y: any, z: any, gen: any)
 	if not (isInt(x) and isInt(y) and isInt(z)) then
 		return
 	end
 	if not RateLimiter.Check(player, "DigHit") then
+		return
+	end
+	-- The mine must be accepting requests (not mid-reset) and the request must name the CURRENT generation, so a delayed
+	-- or replayed hit from an old mine can never damage the new cells that happen to sit at the same coordinates.
+	if not MineState.Accepting() or gen ~= SiteService.Generation() then
 		return
 	end
 	if not Grid.InBounds(x, y, z) then
@@ -4002,7 +4258,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -4023,6 +4279,7 @@ local LootService = require(script.Parent.LootService)
 local StateService = require(script.Parent.StateService)
 local MetricsService = require(script.Parent.MetricsService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
+local MineState = require(script.Parent.MineState)
 local RateLimiter = require(script.Parent.RateLimiter)
 local AnalyticsService = require(script.Parent.AnalyticsService)
 
@@ -4035,7 +4292,7 @@ local lastThrow: { [Player]: number } = {}
 local active: { [Player]: number } = {}
 local folder: Folder
 
-local function explode(thrower: Player, stick: Model)
+local function explode(thrower: Player, stick: Model, throwGeneration: number)
 	if not stick.Parent or not stick.PrimaryPart then
 		active[thrower] = math.max((active[thrower] or 1) - 1, 0)
 		stick:Destroy()
@@ -4045,6 +4302,10 @@ local function explode(thrower: Player, stick: Model)
 	local pos = stick.PrimaryPart.Position
 	stick:Destroy()
 	active[thrower] = math.max((active[thrower] or 1) - 1, 0)
+	-- a stick thrown into an old mine (or fizzling during a reset) never touches the new one
+	if not MineState.Accepting() or throwGeneration ~= SiteService.Generation() then
+		return
+	end
 
 	local thrownBy = thrower.Parent and DataService.Get(thrower)
 	local destroyed, hits = {}, {}
@@ -4122,6 +4383,10 @@ local function handleThrow(player: Player, dx: any, dy: any, dz: any)
 		notifyRemote:FireClient(player, "You have no dynamite. Buy some at the Equipment Shop.", "Danger")
 		return
 	end
+	if not MineState.Accepting() then
+		notifyRemote:FireClient(player, "The mine is resetting - no throwing right now.", "Danger")
+		return
+	end
 	local now = os.clock()
 	if now - (lastThrow[player] or 0) < def.Cooldown or (active[player] or 0) >= def.MaxActive then
 		return
@@ -4142,7 +4407,7 @@ local function handleThrow(player: Player, dx: any, dy: any, dz: any)
 	root.AssemblyLinearVelocity = dir * def.ThrowSpeed + Vector3.new(0, def.ThrowLift, 0)
 	root.AssemblyAngularVelocity = Vector3.new(6, 2, 0)
 	active[player] = (active[player] or 0) + 1
-	task.delay(def.FuseSeconds, explode, player, stick)
+	task.delay(def.FuseSeconds, explode, player, stick, SiteService.Generation())
 end
 
 function DynamiteService.Init()
@@ -4160,7 +4425,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -4392,7 +4657,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">ElevatorService</string>
             <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
@@ -4543,6 +4808,24 @@ function ElevatorService.Bind()
 	end)
 end
 
+-- Used by the mine reset AFTER everyone has been evacuated: cancels any trip/queue and puts the car at the surface stop,
+-- exactly where a fresh elevator starts, so it is safe and usable the moment the new mine opens.
+function ElevatorService.ResetToSurface()
+	pending = nil
+	if not car or not lift then
+		return
+	end
+	local cf = car.CFrame
+	car.Anchored = true
+	car.AssemblyLinearVelocity = Vector3.zero
+	car.CFrame = CFrame.new(cf.X, WorldElevator.StopTops[1] - WorldElevator.CarThickness / 2, cf.Z)
+	lift.TargetPosition = positionFor(1)
+	car.Anchored = false
+	moving = false
+	current, target = 1, 1
+	arrivedAt = os.clock()
+end
+
 function ElevatorService.Init()
 	ElevatorService.Bind()
 end
@@ -4551,7 +4834,7 @@ return ElevatorService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="35">
+        <Item class="ModuleScript" referent="36">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -4654,7 +4937,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="37">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -4721,7 +5004,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="38">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -4805,7 +5088,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="39">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -4902,7 +5185,7 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="40">
           <Properties>
             <string name="Name">MineDetails</string>
             <string name="Source"><![CDATA[-- Builds the small remnants on a mine cell's exposed face. Every detail part is a CHILD of the cell's own Part, so when
@@ -4921,14 +5204,23 @@ local function faceFrame(center: Vector3, normal: Vector3, half: number): CFrame
 	return CFrame.lookAt(origin, origin - normal, up)
 end
 
--- Returns the number of parts created (0 if the kind is unknown).
-function MineDetails.Build(kind: string, variant: number, cell: BasePart, center: Vector3, normal: Vector3): number
-	if not MineDetailSpecs.Has(kind) then
-		return 0
+-- The part specs for a MineStyle.Detail result: a small remnant, or - for a tell - the real artifact's visible part.
+function MineDetails.Specs(detail, treasureDefs)
+	if detail.Tell then
+		local def = treasureDefs[detail.Loot]
+		return def and MineDetailSpecs.Tell(detail.Loot, def, detail.Variant) or {}
 	end
+	if not MineDetailSpecs.Has(detail.Kind) then
+		return {}
+	end
+	return MineDetailSpecs.Build(detail.Kind, detail.Variant)
+end
+
+-- Builds the specs on the cell's face; returns the number of parts created.
+function MineDetails.Build(specs, label: string, cell: BasePart, center: Vector3, normal: Vector3): number
 	local frame = faceFrame(center, normal, cell.Size.X / 2)
 	local n = 0
-	for _, spec in ipairs(MineDetailSpecs.Build(kind, variant)) do
+	for _, spec in ipairs(specs) do
 		local p = Kit.make(spec)
 		p.Anchored = true
 		p.CanCollide = false
@@ -4941,7 +5233,7 @@ function MineDetails.Build(kind: string, variant: number, cell: BasePart, center
 		p.Parent = cell
 		n += 1
 	end
-	cell:SetAttribute("Detail", kind)
+	cell:SetAttribute("Detail", label)
 	return n
 end
 
@@ -4949,105 +5241,276 @@ return MineDetails
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="41">
+          <Properties>
+            <string name="Name">MineLifecycle</string>
+            <string name="Source"><![CDATA[-- The mine's reset lifecycle as a pure state machine (no Roblox APIs; tests/loot_reset_test.luau).
+--   Active -> Warning -> Evacuating -> Regenerating -> Active
+-- Exactly one reset can be in flight: `Update` only starts a reset from Active, every later transition is explicit and
+-- ordered, and a reset in any other state is ignored, so resets cannot overlap or loop. Only the server drives it.
+local MineLifecycle = {}
+MineLifecycle.__index = MineLifecycle
+
+-- policy = Config.Reset-shaped table. `now` is any monotonic clock in seconds.
+function MineLifecycle.new(policy, now: number)
+	return setmetatable({
+		policy = policy,
+		state = "Active",
+		generation = 1,
+		activeSeconds = 0, -- time the CURRENT generation has been Active with at least one player online
+		reason = nil :: string?,
+		endsAt = 0, -- when the current Warning / Evacuating phase ends
+		lastTick = now,
+		resets = 0,
+	}, MineLifecycle)
+end
+
+function MineLifecycle:State(): string
+	return self.state
+end
+
+function MineLifecycle:Generation(): number
+	return self.generation
+end
+
+function MineLifecycle:Reason(): string?
+	return self.reason
+end
+
+function MineLifecycle:EndsAt(): number
+	return self.endsAt
+end
+
+-- Mining and artifact pickups are accepted only while the mine is Active or in its Warning countdown.
+function MineLifecycle:AcceptingRequests(): boolean
+	return self.state == "Active" or self.state == "Warning"
+end
+
+function MineLifecycle:IsCurrent(generation: number): boolean
+	return generation == self.generation
+end
+
+-- Seconds of active play left before the scheduled reset (nil unless Active).
+function MineLifecycle:SecondsToScheduled(): number?
+	if self.state ~= "Active" then
+		return nil
+	end
+	return math.max(self.policy.IntervalMinutes * 60 - self.activeSeconds, 0)
+end
+
+-- Advances the clock and the state machine. Returns an event for the caller to act on, or nil:
+--   "Warn"       a reset was just decided (reason via :Reason()); begin the countdown UI
+--   "Evacuate"   the warning ended: stop accepting requests, recover artifacts, move players
+-- `depletion` = fraction of diggable cells removed (0..1); `players` = players currently online.
+function MineLifecycle:Update(now: number, depletion: number, players: number): string?
+	local dt = math.max(now - self.lastTick, 0)
+	self.lastTick = now
+	local p = self.policy
+	if self.state == "Active" then
+		if players > 0 then
+			self.activeSeconds += dt
+		end
+		local reason
+		if self.activeSeconds >= p.IntervalMinutes * 60 then
+			reason = "Scheduled"
+		elseif self.activeSeconds >= p.MinLifetimeMinutes * 60 and depletion >= p.DepletionFraction then
+			reason = "Depleted"
+		end
+		if reason then
+			self.state = "Warning"
+			self.reason = reason
+			self.endsAt = now + p.WarningSeconds
+			self.resets += 1
+			return "Warn"
+		end
+	elseif self.state == "Warning" then
+		if now >= self.endsAt then
+			self.state = "Evacuating"
+			self.endsAt = now + p.EvacuateSeconds
+			return "Evacuate"
+		end
+	end
+	return nil
+end
+
+-- Evacuation + artifact recovery finished -> the old mine may be torn down.
+function MineLifecycle:BeginRegeneration(): boolean
+	if self.state ~= "Evacuating" then
+		return false
+	end
+	self.state = "Regenerating"
+	return true
+end
+
+-- The new mine is fully built -> a NEW generation id, fresh timers, back to Active.
+function MineLifecycle:FinishRegeneration(now: number): boolean
+	if self.state ~= "Regenerating" then
+		return false
+	end
+	self.generation += 1
+	self.state = "Active"
+	self.activeSeconds = 0
+	self.reason = nil
+	self.endsAt = 0
+	self.lastTick = now
+	return true
+end
+
+return MineLifecycle
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">MineShiftService</string>
-            <string name="Source"><![CDATA[-- "Fresh Dig": replenishes the shared mine when it is exhausted (docs/MINE_SHIFT.md).
---   1. Watch depletion (Config.Shift). When the mine is mostly dug out, or its deepest layer is, or it is old and
---      substantially dug, start a countdown and tell every player.
---   2. At zero: wait (up to Config.Shift.CarryDeferSeconds) for anyone still CARRYING an artifact inside the mine; after
---      that their artifact is dropped like any other loss. Resting artifacts inside the mine are moved to Lost & Found
---      (never deleted). Players inside the mine volume are moved to the camp spawn.
---   3. Regenerate the grid with a new seed. The exit shaft/elevator are outside the grid and untouched.
+            <string name="Source"><![CDATA[-- The mine reset ("Fresh Dig"), docs/MINE_RESET.md. Extends the earlier refresh; there is exactly one reset system.
+-- The pure state machine is MineLifecycle: Active -> Warning -> Evacuating -> Regenerating -> Active. This service feeds it
+-- the clock, depletion and player count, and performs the side effects of each transition:
+--   Warn        publish the countdown (Workspace attributes, so late joiners get state + remaining time automatically)
+--   Evacuate    stop accepting mining / pickups / throws (MineState), recover artifacts to the recovery area, move players out
+--   Regenerate  rebuild the mine from a FRESH loot seed, put the elevator back at the surface, bump the generation
+-- Nothing a client sends can start, delay or repeat a reset. Players can not reset the mine for fresh loot: a reset only follows
+-- the schedule / depletion policy, never before MinLifetime, and only one can be in flight.
 local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
-local ShiftSpec = require(ReplicatedStorage.Shared.ShiftSpec)
 
+local MineLifecycle = require(script.Parent.MineLifecycle)
+local MineState = require(script.Parent.MineState)
 local SiteService = require(script.Parent.SiteService)
 local ArtifactService = require(script.Parent.ArtifactService)
-local WorldBuilder = require(script.Parent.WorldBuilder)
+local ElevatorService = require(script.Parent.ElevatorService)
+local DataService = require(script.Parent.DataService)
 local StateService = require(script.Parent.StateService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
 
 local MineShiftService = {}
 
-local shiftRemote = Remotes.Get("MineShift")
-local shifts = 0
-local running = false
+local notifyRemote = Remotes.Get("Notify")
+local lifecycle = MineLifecycle.new(Config.Reset, os.clock())
+local jobRunning = false
+local lastPublished = ""
 
-function MineShiftService.ShouldRefresh(depletion, cfg): boolean
-	return ShiftSpec.ShouldRefresh(depletion, cfg, Config.Layers[#Config.Layers].Id)
-end
-
-local function broadcast(phase: string, seconds: number?)
-	shiftRemote:FireAllClients(phase, seconds)
-end
-
-local function moveOutOfMine()
+local function bestToolTier(): number
+	local best = 1
 	for _, player in ipairs(Players:GetPlayers()) do
-		local char = player.Character
-		local hrp = char and char:FindFirstChild("HumanoidRootPart")
-		if hrp and ArtifactService.InMine(hrp.Position) then
-			hrp.AssemblyLinearVelocity = Vector3.zero
-			hrp.CFrame = WorldBuilder.SpawnCFrame
+		local data = DataService.Get(player)
+		local tool = data and Defs.Tools[data.Equipment.ToolId]
+		if tool and tool.Tier > best then
+			best = tool.Tier
 		end
 	end
+	return best
 end
 
-function MineShiftService.RefreshNow()
-	shifts += 1
-	-- 1. carriers who have not left the mine by now drop their artifact (it is relocated, never deleted)
-	for _, player in ipairs(ArtifactService.CarriersInMine()) do
-		ArtifactService.ForceDrop(player)
-		Remotes.Get("Notify"):FireClient(player, "The mine was refreshed - your artifact was moved to Lost & Found at camp.", "Danger")
+local function serverTime(fromClock: number): number
+	return Workspace:GetServerTimeNow() + (fromClock - os.clock())
+end
+
+local function publish(dugFraction: number)
+	local state = lifecycle:State()
+	MineState.Set(state, SiteService.Generation())
+	local scheduled = lifecycle:SecondsToScheduled()
+	local endsAt = (state == "Warning" or state == "Evacuating") and serverTime(lifecycle:EndsAt()) or 0
+	local resetAt = scheduled and (Workspace:GetServerTimeNow() + scheduled) or 0
+	-- only touch the replicated attributes when something visible changed (state, generation, reason, whole-percent dug)
+	local key = ("%s|%d|%s|%d|%d"):format(state, SiteService.Generation(), lifecycle:Reason() or "", math.floor(dugFraction * 100), math.floor(resetAt / 5))
+	if key == lastPublished then
+		return
 	end
-	ArtifactService.RelocateFromMine()
-	-- 2. everyone inside goes to camp, 3. new terrain
-	moveOutOfMine()
-	SiteService.Generate(Config.Site.Seed + shifts * Config.Shift.SeedStep)
+	lastPublished = key
+	MineState.Publish({ EndsAt = endsAt, ResetAt = resetAt, Reason = lifecycle:Reason(), DugPercent = math.floor(dugFraction * 100) })
+end
+
+local function tellEveryone(text: string, kind: string)
+	for _, player in ipairs(Players:GetPlayers()) do
+		notifyRemote:FireClient(player, text, kind)
+	end
+end
+
+-- Server SAFETY evacuation of everyone still inside the excavation bounds. This is not a shortcut: it does not teleport
+-- artifacts (those are handled by RecoverForReset), sells nothing, and puts players beside the recovery area.
+local function evacuatePlayers(): number
+	local moved = 0
+	for _, player in ipairs(Players:GetPlayers()) do
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if hrp and ArtifactService.IsInMine(hrp.Position) then
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.CFrame = WorldBuilder.EvacCFrame
+			notifyRemote:FireClient(player, "You were moved out of the mine for the reset. Nothing was sold or deposited.", "Info")
+			moved += 1
+		end
+	end
+	return moved
+end
+
+-- The Evacuating -> Regenerating -> Active job. Runs once per reset; `jobRunning` makes overlapping jobs impossible.
+local function runReset()
+	if jobRunning then
+		return
+	end
+	jobRunning = true
+	local ok, err = pcall(function()
+		publish(0)
+		ArtifactService.RecoverForReset()
+		evacuatePlayers()
+		task.wait(Config.Reset.EvacuateSeconds)
+		evacuatePlayers() -- anyone who slipped back in during the pause
+		lifecycle:BeginRegeneration()
+		publish(0)
+		SiteService.Generate() -- fresh loot seed, new generation, old cells / remnants / unclaimed loot are gone
+		ElevatorService.ResetToSurface()
+	end)
+	if not ok then
+		warn("[MineShiftService] reset failed: " .. tostring(err))
+		-- never leave the mine stuck: make sure a mine exists and the state machine reaches Active
+		if lifecycle:State() == "Evacuating" then
+			lifecycle:BeginRegeneration()
+		end
+		if lifecycle:State() == "Regenerating" and SiteService.Generation() == lifecycle:Generation() then
+			pcall(SiteService.Generate)
+		end
+	end
+	lifecycle:FinishRegeneration(os.clock())
+	lastPublished = ""
+	publish(0)
 	for _, player in ipairs(Players:GetPlayers()) do
 		StateService.Push(player)
 	end
-	broadcast("Done")
+	tellEveryone("The mine has been reset. New treasure is buried - the elevator is ready.", "Good")
+	jobRunning = false
 end
 
-local function runShift()
-	running = true
-	local cfg = Config.Shift
-	for left = cfg.WarningSeconds, 1, -1 do
-		broadcast("Warning", left)
-		task.wait(1)
-	end
-	-- wait for carriers to bring their artifact out (bounded)
-	local waited = 0
-	while #ArtifactService.CarriersInMine() > 0 and waited < cfg.CarryDeferSeconds do
-		if waited > 0 and waited % 10 == 0 then
-			broadcast("Deferred", cfg.CarryDeferSeconds - waited)
-		end
-		task.wait(1)
-		waited += 1
-	end
-	-- never leave the service stuck: a failed refresh is logged, the banner is cleared, and the next check may retry
-	local ok, err = pcall(MineShiftService.RefreshNow)
-	if not ok then
-		warn("[MineShiftService] refresh failed: " .. tostring(err))
-		broadcast("Done")
-	end
-	running = false
+function MineShiftService.State(): string
+	return lifecycle:State()
 end
 
 function MineShiftService.Init()
-	if not Config.Shift.Enabled then
+	MineState.Set("Active", SiteService.Generation())
+	publish(0)
+	if not Config.Reset.Enabled then
 		return
 	end
 	task.spawn(function()
+		local warned30 = false
 		while true do
-			task.wait(Config.Shift.CheckInterval)
-			if not running and MineShiftService.ShouldRefresh(SiteService.Depletion(), Config.Shift) then
-				runShift()
+			task.wait(Config.Reset.CheckInterval)
+			local dep = SiteService.Depletion(bestToolTier())
+			local event = lifecycle:Update(os.clock(), dep.Diggable, #Players:GetPlayers())
+			if event == "Warn" then
+				warned30 = false
+				tellEveryone(("The mine resets in %d seconds. Leave through the ELEVATOR - it is the way out. Carry artifacts out yourself."):format(Config.Reset.WarningSeconds), "Danger")
+			elseif event == "Evacuate" then
+				task.spawn(runReset)
+			elseif lifecycle:State() == "Warning" and not warned30 and lifecycle:EndsAt() - os.clock() <= 30 then
+				warned30 = true
+				tellEveryone("30 seconds until the mine resets - head for the ELEVATOR.", "Danger")
 			end
+			publish(dep.Diggable)
 		end
 	end)
 end
@@ -5056,7 +5519,56 @@ return MineShiftService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="43">
+          <Properties>
+            <string name="Name">MineState</string>
+            <string name="Source"><![CDATA[-- Tiny shared holder of the mine's lifecycle state, so DigService / ArtifactService / DynamiteService can ask
+-- "is the mine accepting requests?" and "is this the current generation?" without depending on MineShiftService (no cycles).
+-- MineShiftService owns the values; everyone else only reads.
+local Workspace = game:GetService("Workspace")
+
+local MineState = {}
+
+local state = "Active"
+local generation = 1
+
+function MineState.Set(newState: string, newGeneration: number)
+	state = newState
+	generation = newGeneration
+end
+
+function MineState.State(): string
+	return state
+end
+
+function MineState.Generation(): number
+	return generation
+end
+
+function MineState.Accepting(): boolean
+	return state == "Active" or state == "Warning"
+end
+
+function MineState.IsCurrent(gen: any): boolean
+	return type(gen) == "number" and gen == generation
+end
+
+-- Replicates what clients need (late joiners get the current values automatically with the Workspace attributes).
+-- `endsAt` is a Workspace:GetServerTimeNow() timestamp; `resetAt` the predicted scheduled reset (also server time) or 0.
+function MineState.Publish(info)
+	Workspace:SetAttribute("MineState", state)
+	Workspace:SetAttribute("MineGeneration", generation)
+	Workspace:SetAttribute("MineEndsAt", info.EndsAt or 0)
+	Workspace:SetAttribute("MineResetAt", info.ResetAt or 0)
+	Workspace:SetAttribute("MineReason", info.Reason or "")
+	Workspace:SetAttribute("MineDug", info.DugPercent or 0)
+end
+
+return MineState
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="44">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -5105,7 +5617,7 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="42">
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -5141,12 +5653,13 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="43">
+        <Item class="ModuleScript" referent="46">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
 -- *exposed* cells (those touching air), so the instance count stays tiny even for a big site.
--- Generation is seeded, so the site can be reset/regenerated cleanly (future "Excavation Shift").
+-- Each generation has TWO seeds: a fresh server-only LOOT seed (placement of rewards and pockets, never sent anywhere) and a
+-- cosmetic seed (colour variation and remnants). Reset timing and the state machine live in MineShiftService / MineLifecycle.
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -5154,18 +5667,23 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local MineStyle = require(ReplicatedStorage.Shared.MineStyle)
+local LootPlan = require(ReplicatedStorage.Shared.LootPlan)
+local LootBoard = require(ReplicatedStorage.Shared.LootBoard)
 local MineDetails = require(script.Parent.MineDetails)
 
 local SiteService = {}
 
 local health: { number } = {}
 local maxHealth: { number } = {}
-local loot: { [number]: string } = {}
+local board = LootBoard.new(0, {})
 local parts: { [number]: Part } = {}
 local pocketOf: { [number]: string } = {} -- cell -> discovery pocket kind
 local detailBuilt: { [number]: boolean } = {}
 local liveDetails = 0
+local liveDetailParts = 0
+local detailPartCount: { [number]: number } = {}
 local currentSeed = 0
+local generationCounts: { [string]: number } = {}
 local folder: Folder
 local generation = 0
 local dugTotal = 0
@@ -5193,12 +5711,12 @@ local function ensureDetail(idx: number)
 	if not part or detailBuilt[idx] or (health[idx] or 0) <= 0 then
 		return
 	end
-	if liveDetails >= Config.Mine.MaxDetails then
+	if liveDetails >= Config.Mine.MaxDetails or liveDetailParts >= Config.Mine.MaxDetailParts then
 		return
 	end
 	local x, y, z = Grid.FromIndex(idx)
 	local layer = Defs.LayerAtCell(y)
-	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, loot[idx], pocketOf[idx])
+	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, board:Peek(idx), pocketOf[idx])
 	if not spec then
 		return
 	end
@@ -5206,10 +5724,16 @@ local function ensureDetail(idx: number)
 	for i = 0, 5 do
 		local face = (spec.FaceRot + i) % 6 + 1
 		if faceOpen(x, y, z, face) and not (isExitWall and face == 3) then
-			local n = MineDetails.Build(spec.Kind, spec.Variant, part, part.Position, FACE_NORMALS[face])
+			local specs = MineDetails.Specs(spec, Defs.Treasure)
+			if #specs == 0 or liveDetailParts + #specs > Config.Mine.MaxDetailParts then
+				return
+			end
+			local n = MineDetails.Build(specs, spec.Tell and "tell" or spec.Kind, part, part.Position, FACE_NORMALS[face])
 			if n > 0 then
 				detailBuilt[idx] = true
+				detailPartCount[idx] = n
 				liveDetails += 1
+				liveDetailParts += n
 			end
 			return
 		end
@@ -5249,53 +5773,52 @@ function SiteService.IsExitWall(x: number, z: number): boolean
 	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + 1e-3
 end
 
-function SiteService.Generate(seedIn: number?)
+-- Builds a brand-new mine. `lootSeed` defaults to a FRESH random server-only value (never a constant, never derived from
+-- the cosmetic seed or sent to clients); `cosmeticSeed` only varies colours/remnants. Returns the new generation number.
+function SiteService.Generate(lootSeedIn: number?, cosmeticSeedIn: number?)
 	generation += 1
-	local seed: number = seedIn or Config.Site.Seed
+	local lootSeed: number = lootSeedIn or Random.new():NextInteger(1, 2147483646)
+	local cosmeticSeed: number = cosmeticSeedIn or (Config.Site.Seed + generation * 7919)
 	if folder then
 		folder:Destroy()
 	end
 	folder = Instance.new("Folder")
 	folder.Name = "DigSite"
+	folder:SetAttribute("Generation", generation)
 	folder.Parent = Workspace
 
 	table.clear(health)
 	table.clear(maxHealth)
-	table.clear(loot)
 	table.clear(parts)
 	table.clear(pocketOf)
 	table.clear(detailBuilt)
+	table.clear(detailPartCount)
 	liveDetails = 0
-	currentSeed = seed
+	liveDetailParts = 0
+	currentSeed = cosmeticSeed
 	table.clear(dugByLayer)
 	table.clear(cellsByLayer)
 	dugTotal = 0
 	generatedAt = os.clock()
 
-	local rng = Random.new(seed)
 	for idx = 1, Grid.Count do
 		local _, y = Grid.FromIndex(idx)
 		local layer = Defs.LayerAtCell(y)
 		health[idx] = layer.Health
-		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 		maxHealth[idx] = layer.Health
-		if rng:NextNumber() < layer.TreasureChance then
-			local id = Defs.PickTreasure(layer.Id, rng)
-			if id then
-				loot[idx] = id
-			end
-		end
+		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 	end
 
-	-- Discovery pockets: compact, seeded, tier-appropriate arrangements (pottery cache / fossil patch / broken masonry).
-	-- Their cells get a pocket tint, and their loot is the pocket's own (replacing whatever was rolled for those cells).
-	for _, pocket in ipairs(MineStyle.Pockets(seed)) do
+	-- Reward placement: rolled ONCE here (layer tables, per-generation limits on important artifacts, random pockets) from
+	-- the fresh loot seed. A rejoining player never triggers this; only a completed reset does.
+	local plan = LootPlan.Generate(Random.new(lootSeed), lootSeed)
+	board = LootBoard.new(generation, plan.Loot)
+	for _, pocket in ipairs(plan.Pockets) do
 		for _, c in ipairs(pocket.Cells) do
-			local pidx = Grid.ToIndex(c[1], c[2], c[3])
-			pocketOf[pidx] = pocket.Kind
-			loot[pidx] = c[4]
+			pocketOf[Grid.ToIndex(c[1], c[2], c[3])] = pocket.Kind
 		end
 	end
+	generationCounts = plan.Counts
 
 	-- Instance only the cells that start exposed: the top surface row, plus the wall of cells facing the exit shaft
 	-- (open air beyond the grid edge), so players can dig through to the ladder from any depth.
@@ -5308,18 +5831,32 @@ function SiteService.Generate(seedIn: number?)
 	return generation
 end
 
--- Depletion figures used by the Fresh Dig refresh (docs/MINE_SHIFT.md). Fractions are of ALL cells / of a layer's cells.
-function SiteService.Depletion()
-	local byLayer = {}
-	for layerId, total in pairs(cellsByLayer) do
-		byLayer[layerId] = (dugByLayer[layerId] or 0) / math.max(total, 1)
+-- Depletion for the reset policy: the fraction of DIGGABLE cells already removed, where diggable = layers that a tool of
+-- tier `maxTier` (the best tool among players online) can break. Also the whole-mine fraction and the generation's age.
+function SiteService.Depletion(maxTier: number?)
+	local tier = maxTier or 1
+	local dug, total = 0, 0
+	for _, layer in ipairs(Config.Layers) do
+		if (layer.MinToolTier or 1) <= tier then
+			dug += dugByLayer[layer.Id] or 0
+			total += cellsByLayer[layer.Id] or 0
+		end
 	end
 	return {
+		Diggable = dug / math.max(total, 1),
 		Total = dugTotal / math.max(Grid.Count, 1),
-		ByLayer = byLayer,
 		AgeMinutes = (os.clock() - generatedAt) / 60,
 		Generation = generation,
 	}
+end
+
+function SiteService.Generation(): number
+	return generation
+end
+
+-- Counts of each treasure buried in this generation (server-side diagnostics only; never replicated).
+function SiteService.BuriedCounts(): { [string]: number }
+	return generationCounts
 end
 
 function SiteService.IsAlive(idx: number): boolean
@@ -5348,13 +5885,14 @@ function SiteService.Damage(idx: number, amount: number): (number, boolean, stri
 		local _, dy = Grid.FromIndex(idx)
 		local lid = Defs.LayerAtCell(dy).Id
 		dugByLayer[lid] = (dugByLayer[lid] or 0) + 1
-		local treasure = loot[idx]
-		loot[idx] = nil
+		local treasure = board:Claim(idx, generation) -- exactly once, only for this generation
 		local part = parts[idx]
 		parts[idx] = nil
 		if detailBuilt[idx] then
 			detailBuilt[idx] = nil
 			liveDetails -= 1
+			liveDetailParts -= detailPartCount[idx] or 0
+			detailPartCount[idx] = nil
 		end
 		if part then
 			part:Destroy()
@@ -5471,7 +6009,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="44">
+        <Item class="ModuleScript" referent="47">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -5535,7 +6073,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="45">
+        <Item class="ModuleScript" referent="48">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -5597,7 +6135,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="46">
+        <Item class="ModuleScript" referent="49">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -5626,6 +6164,9 @@ WorldBuilder.SpawnCFrame = WorldCamp.SpawnCFrame
 WorldBuilder.ReceivingCenter = WorldCamp.ReceivingCenter
 WorldBuilder.ReceivingDisplayPosition = WorldCamp.ReceivingDisplayPosition
 WorldBuilder.LostFoundPosition = WorldCamp.LostFoundPosition
+WorldBuilder.RecoveryPosition = WorldCamp.RecoveryPosition
+WorldBuilder.EvacCFrame = WorldCamp.EvacCFrame
+WorldBuilder.RecoverySlot = WorldCamp.RecoverySlot
 WorldBuilder.Elevator = { StopTops = WorldElevator.StopTops, StopNames = WorldElevator.StopNames }
 
 local function lighting()
@@ -5700,7 +6241,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="47">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -5728,6 +6269,16 @@ WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.SpawnPosition + Vector3.new(0, 4.
 WorldCamp.ReceivingCenter = Config.Camp.ReceivingPosition + Vector3.new(0, 3.5, 0)
 WorldCamp.ReceivingDisplayPosition = Config.Camp.ReceivingPosition + Vector3.new(0, 5.2, 0)
 WorldCamp.LostFoundPosition = Config.Camp.LostFoundPosition + Vector3.new(0, 2.2, 0)
+WorldCamp.RecoveryPosition = Config.Camp.RecoveryPosition
+-- Where players are put when a mine reset evacuates them: beside the recovery area, still on the camp floor.
+WorldCamp.EvacCFrame = CFrame.new(Config.Camp.RecoveryPosition + Vector3.new(7.5, 4.5, 0))
+
+-- Nine resting spots on the recovery pad (3 columns x 3 rows), centre height suits a ~2-stud artifact on the pad top.
+function WorldCamp.RecoverySlot(i: number): Vector3
+	local n = (i - 1) % 9
+	local col, row = n % 3, n // 3
+	return Config.Camp.RecoveryPosition + Vector3.new((col - 1) * 2.6, 2.0, (row - 1) * 1.9)
+end
 
 local function cylinder(parent: Instance, name: string, length: number, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?, flat: boolean?): Part
 	-- Roblox cylinders run along X. `flat` lays the disc on the ground (axis up).
@@ -5975,6 +6526,33 @@ local function buildAppraisal(camp: Folder)
 	end
 end
 
+-- Artifact recovery area: where artifacts found in a mine that was reset are held for their owners. A roped pad beside the
+-- mine entrance gate; it is NOT a deposit point (the receiving table is far away) - owners pick their artifact up here and
+-- carry it to the receiving table themselves. -------------------------------------------------------------------------------
+local function buildRecovery(camp: Folder)
+	local folder = Instance.new("Folder")
+	folder.Name = "RecoveryArea"
+	folder.Parent = camp
+	local c = Config.Camp.RecoveryPosition
+	local pad = box(folder, "RecoveryPad", V(8, 0.3, 5.6), V(c.X, 0.65, c.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
+	sign(pad, Enum.NormalId.Top, "RECOVERY", Color3.fromHex("CDBE98"), C.TimberDark)
+	local postH = 3.2
+	for _, sx in ipairs({ -4, 4 }) do
+		for _, sz in ipairs({ -2.8, 2.8 }) do
+			box(folder, "Post", V(0.4, postH, 0.4), V(c.X + sx, 0.5 + postH / 2, c.Z + sz), C.TimberDark, Enum.Material.Wood)
+		end
+	end
+	-- ropes along the long sides and the sign board spanning the rear posts (embedded in both, directly under their tops)
+	for _, sz in ipairs({ 2.8 }) do
+		rope(folder, V(c.X - 4, 2.4, c.Z + sz), V(c.X + 4, 2.4, c.Z + sz))
+	end
+	for _, sx in ipairs({ -4, 4 }) do
+		rope(folder, V(c.X + sx, 2.4, c.Z - 2.8), V(c.X + sx, 2.4, c.Z + 2.8))
+	end
+	local board = box(folder, "RecoverySign", V(8.4, 1.1, 0.25), V(c.X, 0.5 + postH - 0.55, c.Z - 2.8), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "ARTIFACT RECOVERY", C.TimberDark, C.Gold)
+end
+
 -- Artifact receiving table: distinct from selling (cream cloth on a timber frame, plaque, deposit prompt) ----------------
 local function buildReceiving(camp: Folder)
 	local folder = Instance.new("Folder")
@@ -6048,13 +6626,14 @@ function WorldCamp.Build(world: Folder, ex)
 	buildShop(camp)
 	buildAppraisal(camp)
 	buildReceiving(camp)
+	buildRecovery(camp)
 end
 
 return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="48">
+        <Item class="ModuleScript" referent="51">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -6291,7 +6870,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="49">
+        <Item class="ModuleScript" referent="52">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -6394,7 +6973,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="50">
+        <Item class="ModuleScript" referent="53">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -6525,23 +7104,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="51">
+  <Item class="StarterPlayer" referent="54">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="52">
+    <Item class="StarterPlayerScripts" referent="55">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="53">
+      <Item class="Folder" referent="56">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="54">
+        <Item class="Folder" referent="57">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="55">
+          <Item class="ModuleScript" referent="58">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -6649,7 +7228,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="56">
+          <Item class="ModuleScript" referent="59">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -6680,7 +7259,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="57">
+          <Item class="ModuleScript" referent="60">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -6988,7 +7567,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="58">
+          <Item class="ModuleScript" referent="61">
             <Properties>
               <string name="Name">CampShelf</string>
               <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
@@ -7123,7 +7702,7 @@ return CampShelf
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="59">
+          <Item class="ModuleScript" referent="62">
             <Properties>
               <string name="Name">CollectionUI</string>
               <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
@@ -7345,7 +7924,7 @@ return CollectionUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="60">
+          <Item class="ModuleScript" referent="63">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -7648,7 +8227,9 @@ local function onStep()
 	end
 	lastSent = now
 
-	digHit:FireServer(target.X, target.Y, target.Z)
+	-- name the mine generation this block belongs to, so a stale click can never hit a newer mine's cells
+	local site = Workspace:FindFirstChild("DigSite")
+	digHit:FireServer(target.X, target.Y, target.Z, site and site:GetAttribute("Generation") or 0)
 	if not CameraController.IsFirstPerson() then
 		faceTarget(target.Part.Position)
 	end
@@ -7774,7 +8355,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="61">
+          <Item class="ModuleScript" referent="64">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -8188,6 +8769,17 @@ local function onExplosion(pos: Vector3, blocks: number)
 end
 
 function Effects.Init()
+	-- A new mine generation: drop everything that belonged to the old one (reveal models, block shake, remembered hit faces),
+	-- so no effect from the previous mine plays over the new cells.
+	Workspace:GetAttributeChangedSignal("MineGeneration"):Connect(function()
+		for _, child in ipairs(fxFolder:GetChildren()) do
+			if child:IsA("Model") then
+				child:Destroy()
+			end
+		end
+		table.clear(shaking)
+		table.clear(lastFace)
+	end)
 	Remotes.Get("DigResult").OnClientEvent:Connect(function(payload)
 		local mine = payload.Digger == player.UserId
 		for _, h in ipairs(payload.Hits) do
@@ -8206,7 +8798,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="62">
+          <Item class="ModuleScript" referent="65">
             <Properties>
               <string name="Name">GuideController</string>
               <string name="Source"><![CDATA[-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
@@ -8394,7 +8986,7 @@ return GuideController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="63">
+          <Item class="ModuleScript" referent="66">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -8470,7 +9062,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="64">
+          <Item class="ModuleScript" referent="67">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -8552,7 +9144,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="65">
+          <Item class="ModuleScript" referent="68">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -8858,7 +9450,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="66">
+          <Item class="ModuleScript" referent="69">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -8931,7 +9523,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="67">
+          <Item class="ModuleScript" referent="70">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -9048,7 +9640,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="68">
+          <Item class="ModuleScript" referent="71">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
@@ -9565,7 +10157,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="69">
+          <Item class="ModuleScript" referent="72">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -9611,7 +10203,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="70">
+          <Item class="ModuleScript" referent="73">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -9687,7 +10279,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="71">
+          <Item class="ModuleScript" referent="74">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -9969,6 +10561,12 @@ local function build()
 	refs.depth = label(depth, "SURFACE", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 30), Position = UDim2.fromOffset(0, 4) })
 	refs.layer = label(depth, "BASE CAMP", 15, P.Gold, { Size = UDim2.new(1, 0, 0, 18), Position = UDim2.fromOffset(0, 33), TextStrokeTransparency = 1 })
 
+	-- Compact mine status (under the buttons, top right): reset countdown / state. Driven by Workspace attributes that the
+	-- server maintains, so a player who joins mid-countdown sees the correct state and time immediately.
+	refs.mine = panel(gui, UDim2.fromOffset(170, 48), UDim2.new(1, -180, 0, 122))
+	refs.mineTitle = label(refs.mine, "MINE", 12, K.Muted, { Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 3), TextStrokeTransparency = 1 })
+	refs.mineTime = label(refs.mine, "--:--", 22, P.Cream, { Size = UDim2.new(1, 0, 0, 26), Position = UDim2.fromOffset(0, 18) })
+
 	-- Treasure cards (left, mid)
 	refs.cards = mk("Frame", { Size = UDim2.fromOffset(260, 300), Position = UDim2.new(0, 10, 0.5, -60), BackgroundTransparency = 1 }, gui)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 6) }, refs.cards)
@@ -10012,6 +10610,58 @@ local function build()
 		Guide.Dismiss("collection")
 	end)
 	Guide.Build(gui)
+end
+
+-- Mine reset status ---------------------------------------------------------------------------------------------------
+local function clock(seconds: number): string
+	seconds = math.max(math.floor(seconds + 0.5), 0)
+	return ("%d:%02d"):format(seconds // 60, seconds % 60)
+end
+
+local lastTick = -1
+local mineAcc = 0
+function UI.StepMineStatus(dt: number)
+	mineAcc += dt
+	if mineAcc < 0.2 then
+		return
+	end
+	mineAcc = 0
+	local state = Workspace:GetAttribute("MineState") or "Active"
+	local now = Workspace:GetServerTimeNow()
+	local banner = refs.shift
+	if state == "Warning" then
+		local left = math.max((Workspace:GetAttribute("MineEndsAt") or now) - now, 0)
+		local final = left <= Config.Reset.FinalCountdownSeconds
+		refs.mineTitle.Text = "MINE RESETS IN"
+		refs.mineTime.Text = clock(left)
+		refs.mineTime.TextColor3 = final and P.Danger or P.Gold
+		banner.Text = final and ("RESET IN %d - GET OUT NOW!"):format(math.ceil(left))
+			or ("MINE RESETS IN %ds - leave by the ELEVATOR"):format(math.ceil(left))
+		banner.TextColor3 = final and P.Danger or P.Gold
+		banner.Visible = true
+		local whole = math.ceil(left)
+		if final and whole ~= lastTick then
+			lastTick = whole
+			Audio.Play("Error", 1.4, 0.8) -- one tick per second in the final countdown
+		end
+	elseif state == "Evacuating" or state == "Regenerating" then
+		refs.mineTitle.Text = "MINE"
+		refs.mineTime.Text = state == "Evacuating" and "EVACUATING" or "REBUILDING"
+		refs.mineTime.TextColor3 = P.Danger
+		refs.mineTime.TextSize = 18
+		banner.Text = state == "Evacuating" and "Moving everyone out of the mine..." or "Rebuilding the mine..."
+		banner.TextColor3 = P.Danger
+		banner.Visible = true
+	else
+		local resetAt = Workspace:GetAttribute("MineResetAt") or 0
+		local dug = Workspace:GetAttribute("MineDug") or 0
+		refs.mineTitle.Text = ("MINE %d%% DUG  -  RESET IN"):format(dug)
+		refs.mineTime.Text = resetAt > 0 and clock(resetAt - now) or "--:--"
+		refs.mineTime.TextColor3 = P.Cream
+		refs.mineTime.TextSize = 22
+		banner.Visible = false
+		lastTick = -1
+	end
 end
 
 function UI.GetGui(): ScreenGui
@@ -10058,30 +10708,6 @@ function UI.Init()
 			showPopup("SET COMPLETE!", layerName .. " COLLECTION", "SetComplete")
 		end)
 	end)
-	Remotes.Get("MineShift").OnClientEvent:Connect(function(phase: string, seconds: number?)
-		local l = refs.shift
-		refs.shiftToken = (refs.shiftToken or 0) + 1
-		local token = refs.shiftToken
-		if phase == "Warning" then
-			l.Text = ("FRESH DIG IN %ds - leave the mine!"):format(seconds or 0)
-			l.TextColor3 = (seconds or 0) <= 10 and P.Danger or P.Gold
-			l.Visible = true
-		elseif phase == "Deferred" then
-			l.Text = "FRESH DIG waiting for artifact carriers..."
-			l.TextColor3 = P.Gold
-			l.Visible = true
-		else
-			l.Text = "THE MINE HAS BEEN REFRESHED!"
-			l.TextColor3 = P.Teal
-			l.Visible = true
-			Audio.Play("Buy")
-			task.delay(5, function()
-				if refs.shiftToken == token then
-					l.Visible = false
-				end
-			end)
-		end
-	end)
 	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
 		if reason == "CARRYING" then
 			-- rejected: the cooldown is NOT consumed, so do not touch returnReadyAt
@@ -10126,6 +10752,7 @@ function UI.Init()
 			shownCash += (math.abs(diff) < 1) and diff or diff * math.min(1, dt * 8)
 			refs.cash.Text = Util.FormatCash(shownCash)
 		end
+		UI.StepMineStatus(dt)
 		-- depth readout + auto-close shop when walking away
 		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 		if hrp then
@@ -10173,7 +10800,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="72">
+          <Item class="ModuleScript" referent="75">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -10287,7 +10914,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="73">
+          <Item class="ModuleScript" referent="76">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -10432,7 +11059,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="74">
+        <Item class="LocalScript" referent="77">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.

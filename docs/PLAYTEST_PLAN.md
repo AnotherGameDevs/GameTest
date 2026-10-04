@@ -29,4 +29,9 @@ it every session starts fresh (expected, a warning is printed). **Do not enable 
 | 20 | Reward tells | a block showing a coin/pottery/fossil/tablet tell actually drops that item; ambient remnants (grey/low) never drop anything | untested |
 | 21 | Fresh Dig + details | after a refresh: new arrangement, no leftover remnants, no duplicate pockets, instance count back to baseline | untested |
 | 22 | Artifact models | reveal, carry (3rd/1st person), world pickup, journal icon and shelf all show the new models; ring opening visible; necklace on stand; names fit on plates; shelf heading says "<name>'s Collection" | untested |
+| 23 | Buried tells | dig down: the real artifact model sticks out ~0.7 studs only on exposed faces; digging that block releases exactly that reward; unexposed rewards show nothing (no outline/prompt/name through walls) | untested |
+| 24 | Fresh loot per generation | note the positions of a few tells/pockets, wait for a reset (or set `Config.Reset.IntervalMinutes = 1`): positions differ; rejoin mid-generation: board unchanged | untested |
+| 25 | Reset with two players | A carries an artifact inside the mine, B has placed one down inside; 60 s warning shows on both (late joiner C sees the right countdown); at the deadline mining/pickup stop, both are moved out, both artifacts appear in ARTIFACT RECOVERY, nothing sold/deposited; each owner can pick up ONLY their own and must carry it to the receiving table | untested |
+| 26 | Post-reset state | elevator at the surface and working, new terrain, old requests ignored (hold click through the reset), no old reveal effects, instance count back to baseline | untested |
+| 27 | Mesh artifacts | after importing the OBJs (docs/ARTIFACT_MESHES.md): reveal, carry (1st/3rd person), journal, shelf and buried tell for the seven mesh artifacts | not possible yet |
 

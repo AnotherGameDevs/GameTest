@@ -22,7 +22,7 @@ local CollectionService = require(Services.CollectionService)
 local MineShiftService = require(Services.MineShiftService)
 
 WorldBuilder.Build()
-SiteService.Generate(Config.Site.Seed)
+SiteService.Generate() -- fresh server-only loot seed (never the constant Config.Site.Seed)
 
 for name, init in pairs({
 	Data = DataService.Init,

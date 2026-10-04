@@ -5,6 +5,7 @@
 -- the two are never confused. Tested in tests/mine_style_test.luau.
 local Kit = require(script.Parent.ModelKit)
 local Config = require(script.Parent.Config)
+local TreasureModels = require(script.Parent.TreasureModels)
 
 local MineDetailSpecs = {}
 
@@ -12,7 +13,6 @@ local V = Vector3.new
 local function hex(s: string): Color3
 	return Color3.fromHex(s)
 end
-local P = Config.Palette
 
 local function lay(name: string, size: Vector3, x: number, y: number, color: Color3, mat: Enum.Material?, rotZ: number?)
 	-- a block lying on the face: footprint (size.X, size.Y), height size.Z
@@ -87,43 +87,6 @@ function builders.carving() -- ruins: a shallow carved panel with a few glyph ba
 	return parts
 end
 
--- Tells (real rewards; colours match the treasure) -----------------------------------------------------------------------
-function builders.tell_coin()
-	local gold, rim = hex("B8964A"), hex("8F7330")
-	return {
-		Kit.cyl("CoinRim", "Z", 0.3, 1.0, V(0, 0, 0.11), rim, Enum.Material.Metal),
-		Kit.cyl("CoinFace", "Z", 0.34, 0.78, V(0, 0, 0.13), gold, Enum.Material.Metal),
-	}
-end
-
-function builders.tell_pottery()
-	local fire, band = hex("B5683F"), hex("E3D2B0")
-	return {
-		lay("PotA", V(1.1, 0.7, 0.3), -0.35, 0.15, fire, Enum.Material.SmoothPlastic, 15),
-		lay("PotB", V(0.7, 0.55, 0.28), 0.5, -0.2, fire, Enum.Material.SmoothPlastic, -30),
-		lay("PotBand", V(1.1, 0.12, 0.34), -0.35, 0.15, band, Enum.Material.SmoothPlastic, 15),
-	}
-end
-
-function builders.tell_fossil()
-	local bone = hex("D9CFB4")
-	local parts = {}
-	for i = 0, 9 do
-		local th = i * 0.75
-		local r = 0.1 * math.exp(0.2 * th)
-		parts[#parts + 1] = lay("Whorl" .. i, V(0.22 + r * 0.6, 0.15, 0.32), r * math.cos(th), r * math.sin(th), bone, Enum.Material.SmoothPlastic, math.deg(th) + 90)
-	end
-	return parts
-end
-
-function builders.tell_tablet()
-	local sand, glyph = P.Sandstone, hex("8C6B3E")
-	return {
-		lay("TabletEdge", V(1.5, 1.1, 0.3), 0, 0, sand, Enum.Material.Limestone, 8),
-		lay("TabletGlyph", V(0.9, 0.12, 0.34), 0, 0.1, glyph, Enum.Material.Limestone, 8),
-	}
-end
-
 MineDetailSpecs.Kinds = {}
 for kind in pairs(builders) do
 	table.insert(MineDetailSpecs.Kinds, kind)
@@ -132,6 +95,32 @@ table.sort(MineDetailSpecs.Kinds)
 
 function MineDetailSpecs.Has(kind: string): boolean
 	return builders[kind] ~= nil
+end
+
+-- Tell: the REAL artifact, scaled to a fixed size and oriented so a recognisable part of it stands `Config.Mine.TellProtrude` studs
+-- out of the wall. The rest is buried inside the (opaque) block, so only that part is ever visible, and parts that would be
+-- completely buried are dropped. Frame = face frame (+Z out of the wall).
+local TELL_SIZE = 2.6
+local TELL_PITCH = { golden_scarab = 90, cut_gemstone = 90 } -- models that lie flat: turn their best face outward
+
+function MineDetailSpecs.Tell(treasureId: string, def, variant: number)
+	local specs = TreasureModels.Specs(treasureId, def)
+	local scale = TELL_SIZE / math.max(TreasureModels.MaxExtent(specs), 0.1)
+	local rotated = Kit.Transform(specs, scale, V(TELL_PITCH[treasureId] or 0, 0, 90 * variant))
+	local _, hi = TreasureModels.Bounds(rotated)
+	local shift = Config.Mine.TellProtrude - hi.Z
+	local out = {}
+	for _, s in ipairs(rotated) do
+		local moved = {
+			Name = s.Name, Shape = s.Shape, Size = s.Size, Color = s.Color, Material = s.Material, Transparency = s.Transparency,
+			Offset = CFrame.new(0, 0, shift) * s.Offset,
+		}
+		local _, top = TreasureModels.Bounds({ moved })
+		if top.Z > 0.02 then -- at least partly outside the wall
+			table.insert(out, moved)
+		end
+	end
+	return out
 end
 
 -- Specs for one detail, turned by variant*90 degrees about the face normal so repeats do not look identical.

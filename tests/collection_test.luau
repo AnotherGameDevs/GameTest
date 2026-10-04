@@ -5,7 +5,6 @@ local Config = require("./_build/shared/Config")
 local Defs = require("./_build/shared/Defs")
 local CollectionSpec = require("./_build/shared/CollectionSpec")
 local GuideSpec = require("./_build/shared/GuideSpec")
-local ShiftSpec = require("./_build/shared/ShiftSpec")
 local TreasureModels = require("./_build/shared/TreasureModels")
 local PackModels = require("./_build/shared/PackModels")
 
@@ -152,19 +151,6 @@ do
 	check("relative stats are clamped at zero", GuideSpec.StateFrom(snap(), { BlocksDug = 50 }, {}).Stats.BlocksDug == 0)
 end
 
--- ---------------------------------------------------------------- mine shift --------------------------------------
-do
-	local cfg = Config.Shift
-	local deepest = Config.Layers[#Config.Layers].Id
-	local function dep(total, deep, age) return { Total = total, ByLayer = { [deepest] = deep }, AgeMinutes = age } end
-	check("fresh mine: no refresh", not ShiftSpec.ShouldRefresh(dep(0, 0, 0), cfg, deepest))
-	check("half dug: no refresh yet", not ShiftSpec.ShouldRefresh(dep(0.4, 0.2, 10), cfg, deepest))
-	check("mostly dug: refresh", ShiftSpec.ShouldRefresh(dep(cfg.TriggerFraction, 0.1, 5), cfg, deepest))
-	check("deepest layer exhausted: refresh", ShiftSpec.ShouldRefresh(dep(0.2, cfg.DeepLayerFraction, 5), cfg, deepest))
-	check("old but barely touched: no refresh", not ShiftSpec.ShouldRefresh(dep(0.02, 0, 500), cfg, deepest))
-	check("old and meaningfully dug: refresh", ShiftSpec.ShouldRefresh(dep(cfg.MinFractionForAge, 0, cfg.MaxAgeMinutes), cfg, deepest))
-end
-
 -- ---------------------------------------------------------------- layer gating & progression data -----------------
 do
 	local layers = Config.Layers
@@ -207,5 +193,5 @@ do
 	check("five packs", #packs == 5)
 end
 
-print(("collection/guide/shift/progression: %d passed, %d failed"):format(passed, failed))
+print(("collection/guide/progression: %d passed, %d failed"):format(passed, failed))
 if failed > 0 then error("tests failed") end

@@ -8,6 +8,7 @@
 -- Frame of every model: +Y up, front faces +Z, origin near the centre, roughly 2-3 studs across.
 -- Mesh-dependent parts (none shipped): see the MESH NOTES in docs/ARTIFACT_MODELS.md.
 local Kit = require(script.Parent.ModelKit)
+local Config = require(script.Parent.Config)
 
 local TreasureModels = {}
 
@@ -294,8 +295,39 @@ function TreasureModels.DisplayRotation(treasureId: string): CFrame
 	return CFrame.Angles(math.rad(TreasureModels.DisplayPitch[treasureId] or 0), math.rad(TreasureModels.DisplayYaw[treasureId] or 0), 0)
 end
 
--- Part specs (origin-centred) for a treasure id. `def` is the Defs entry (passed in to avoid a require cycle).
+-- Artifacts whose required silhouette needs an authored mesh (parts cannot do it cleanly). Until a mesh set is configured in
+-- Config.MeshAssets their model is the primitive FALLBACK below and counts as UNFINISHED.
+TreasureModels.MeshRequired = { "pottery_shard", "cut_gemstone", "fossil_fragment", "clay_figurine", "fossil_claw", "golden_scarab", "sun_mask" }
+
+-- "mesh" (authored mesh in use), "unfinished" (needs a mesh, primitive fallback shown) or "parts" (primitives are the final art).
+function TreasureModels.Status(treasureId: string): string
+	if Config.MeshAssets[treasureId] and #Config.MeshAssets[treasureId] > 0 then
+		return "mesh"
+	end
+	if table.find(TreasureModels.MeshRequired, treasureId) then
+		return "unfinished"
+	end
+	return "parts"
+end
+
+local function meshSpecs(entries)
+	local out = {}
+	for _, e in ipairs(entries) do
+		table.insert(out, {
+			Name = e.Name, Shape = "Mesh", MeshId = e.MeshId, MeshSize = e.Size, Size = e.Size, Offset = CFrame.identity,
+			Color = Color3.fromHex(e.Color), Material = Enum.Material[e.Material or "SmoothPlastic"],
+		})
+	end
+	return out
+end
+
+-- Part specs (origin-centred) for a treasure id. `def` is the Defs entry (passed in to avoid a require cycle). The same specs
+-- (mesh set when configured, else the primitive fallback) feed reveals, carrying, journal, shelf and buried tells.
 function TreasureModels.Specs(treasureId: string, def)
+	local assets = Config.MeshAssets[treasureId]
+	if assets and #assets > 0 then
+		return meshSpecs(assets)
+	end
 	local builder = def.Model and builders[def.Model]
 	if builder then
 		return builder()
@@ -303,8 +335,8 @@ function TreasureModels.Specs(treasureId: string, def)
 	return genericSpecs(def)
 end
 
--- Largest side of the model's part bounds, in studs (rotation-aware, from the specs).
-function TreasureModels.MaxExtent(specs): number
+-- Axis-aligned bounds of a spec list (rotation-aware): returns min and max corners.
+function TreasureModels.Bounds(specs): (Vector3, Vector3)
 	local lo, hi = V(1e9, 1e9, 1e9), V(-1e9, -1e9, -1e9)
 	for _, s in ipairs(specs) do
 		local r = s.Offset.RightVector
@@ -318,6 +350,12 @@ function TreasureModels.MaxExtent(specs): number
 		lo = V(math.min(lo.X, p.X - ex), math.min(lo.Y, p.Y - ey), math.min(lo.Z, p.Z - ez))
 		hi = V(math.max(hi.X, p.X + ex), math.max(hi.Y, p.Y + ey), math.max(hi.Z, p.Z + ez))
 	end
+	return lo, hi
+end
+
+-- Largest side of the model's part bounds, in studs.
+function TreasureModels.MaxExtent(specs): number
+	local lo, hi = TreasureModels.Bounds(specs)
 	return math.max(hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z)
 end
 

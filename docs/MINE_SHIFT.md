@@ -24,7 +24,9 @@
 4. **Layer-specific discoveries:** every layer has a home set (see COLLECTION.md). New finds: Ruin Tablet (Rare),
    Sun Pharaoh Mask (Legendary, carry-home), plus models for the claw, figurine, shard, fossil.
 
-## Replenishment: "Fresh Dig" (`MineShiftService`, `Config.Shift`, `ShiftSpec`)
+## Replenishment: "Fresh Dig" — SUPERSEDED by `docs/MINE_RESET.md` (kept for history)
+
+### Original description (`MineShiftService`, `Config.Shift`, `ShiftSpec`)
 Approach chosen: **reset the shared mine in place** (re-run `SiteService.Generate` with a new seed). No new terrain system,
 the block grid and its raycast targeting are untouched.
 

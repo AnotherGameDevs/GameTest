@@ -52,13 +52,13 @@ Defs.Tools = {
 	},
 	drill = {
 		DisplayName = "Drill", Tier = 6, Family = "Excavation", ToolType = "Drill", Appearance = "drill",
-		Power = 22, Rate = 5.5, Reach = 11, Price = 30000, RequiredReputation = 0,
+		Power = 22, Rate = 5.5, Reach = 11, Price = 24000, RequiredReputation = 0,
 		Blurb = "Cuts a tunnel. Faster, and reaches deeper from where you stand.",
 	},
 	industrial_drill = {
 		DisplayName = "Industrial Drill", Tier = 7, Family = "Industrial", ToolType = "Drill", Appearance = "drill_industrial",
 		Power = 22, Rate = 5.5, Reach = 11, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
-		Price = 52000, RequiredReputation = 0,
+		Price = 40000, RequiredReputation = 0,
 		Blurb = "Massive digging power. Clears neighbouring blocks as it goes.",
 	},
 }
@@ -86,7 +86,7 @@ Defs.Backpacks = {
 		Blurb = "Straps and pockets for 55 finds. Suits the stone layer." },
 	mining_pack = { DisplayName = "Mining Pack", Capacity = 90, Price = 14000, RequiredReputation = 0, Order = 4, Appearance = "pack_mining",
 		Blurb = "Reinforced frame for 90 finds on deep runs." },
-	expedition_pack = { DisplayName = "Expedition Pack", Capacity = 140, Price = 40000, RequiredReputation = 0, Order = 5, Appearance = "pack_expedition",
+	expedition_pack = { DisplayName = "Expedition Pack", Capacity = 140, Price = 32000, RequiredReputation = 0, Order = 5, Appearance = "pack_expedition",
 		Blurb = "The biggest pack there is: 140 finds per trip." },
 }
 
@@ -152,28 +152,34 @@ function Defs.LayerName(layerId: string): string
 	return layerId
 end
 
--- Per-layer weighted lists, built once.
-local weighted = {}
-for _, layer in ipairs(Config.Layers) do
-	local list, total = {}, 0
-	for id, def in pairs(Defs.Treasure) do
-		local w = def.Layers[layer.Id]
-		if w then
-			total += w
-			table.insert(list, { Id = id, Cum = total })
+-- Per-layer weighted lists, built once: all treasures, and ordinary (not carry-home) treasures only.
+local function buildWeighted(onlyOrdinary: boolean)
+	local out = {}
+	for _, layer in ipairs(Config.Layers) do
+		local list = {}
+		for id, def in pairs(Defs.Treasure) do
+			local w = def.Layers[layer.Id]
+			if w and not (onlyOrdinary and def.RequiresCarry) then
+				table.insert(list, { Id = id, Weight = w })
+			end
 		end
+		table.sort(list, function(a, b) return a.Id < b.Id end)
+		local total = 0
+		for _, e in ipairs(list) do
+			total += e.Weight
+			e.Cum = total
+		end
+		out[layer.Id] = { List = list, Total = total }
 	end
-	table.sort(list, function(a, b) return a.Id < b.Id end)
-	total = 0
-	for _, e in ipairs(list) do
-		total += (Defs.Treasure[e.Id].Layers[layer.Id])
-		e.Cum = total
-	end
-	weighted[layer.Id] = { List = list, Total = total }
+	return out
 end
+local weighted = buildWeighted(false)
+local weightedOrdinary = buildWeighted(true)
 
-function Defs.PickTreasure(layerId: string, rng: Random): string?
-	local w = weighted[layerId]
+-- Weighted pick for a layer. `ordinaryOnly` excludes carry-home artifacts (used when an important artifact is over its
+-- per-generation limit or ineligible for a cell). `rng` needs :NextNumber().
+function Defs.PickTreasure(layerId: string, rng, ordinaryOnly: boolean?): string?
+	local w = (ordinaryOnly and weightedOrdinary or weighted)[layerId]
 	if not w or w.Total <= 0 then
 		return nil
 	end

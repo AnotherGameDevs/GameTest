@@ -1,5 +1,9 @@
 # Artifact models (one source for reveal, carry, world, journal, shelf)
 
+> **Update:** the Pottery Shard, Cut Gemstone, Fossil Fragment, Clay Figurine, Fossil Claw, Golden Scarab and Sun Pharaoh Mask below are the
+> primitive-part FALLBACK and are **UNFINISHED** (their silhouettes need meshes). Mesh files exist but are not imported: see `docs/ARTIFACT_MESHES.md`.
+> Old Coin, Bronze Ring, Ancient Necklace and Ruin Tablet remain primitive final art (subject to Studio review).
+
 `shared/TreasureModels.luau` builds every artifact from part specs. Reveals (`EffectsController`), world pickups and carried tools
 (`ArtifactService`), the first-person view (`ViewmodelController`), journal icons (`CollectionUI`) and shelf displays (`CampShelf`)
 all call it; displays only scale (`BuildDisplay`: largest side = common size) and pose (`DisplayRotation`). Values/ids/ownership untouched.

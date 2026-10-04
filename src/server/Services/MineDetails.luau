@@ -14,14 +14,23 @@ local function faceFrame(center: Vector3, normal: Vector3, half: number): CFrame
 	return CFrame.lookAt(origin, origin - normal, up)
 end
 
--- Returns the number of parts created (0 if the kind is unknown).
-function MineDetails.Build(kind: string, variant: number, cell: BasePart, center: Vector3, normal: Vector3): number
-	if not MineDetailSpecs.Has(kind) then
-		return 0
+-- The part specs for a MineStyle.Detail result: a small remnant, or - for a tell - the real artifact's visible part.
+function MineDetails.Specs(detail, treasureDefs)
+	if detail.Tell then
+		local def = treasureDefs[detail.Loot]
+		return def and MineDetailSpecs.Tell(detail.Loot, def, detail.Variant) or {}
 	end
+	if not MineDetailSpecs.Has(detail.Kind) then
+		return {}
+	end
+	return MineDetailSpecs.Build(detail.Kind, detail.Variant)
+end
+
+-- Builds the specs on the cell's face; returns the number of parts created.
+function MineDetails.Build(specs, label: string, cell: BasePart, center: Vector3, normal: Vector3): number
 	local frame = faceFrame(center, normal, cell.Size.X / 2)
 	local n = 0
-	for _, spec in ipairs(MineDetailSpecs.Build(kind, variant)) do
+	for _, spec in ipairs(specs) do
 		local p = Kit.make(spec)
 		p.Anchored = true
 		p.CanCollide = false
@@ -34,7 +43,7 @@ function MineDetails.Build(kind: string, variant: number, cell: BasePart, center
 		p.Parent = cell
 		n += 1
 	end
-	cell:SetAttribute("Detail", kind)
+	cell:SetAttribute("Detail", label)
 	return n
 end
 

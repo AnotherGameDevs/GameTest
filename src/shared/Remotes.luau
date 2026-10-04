@@ -25,7 +25,6 @@ local EVENTS = {
 	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
-	"MineShift", -- S->C  (phase, secondsOrNil) mine refresh warning / deferral / done
 }
 
 local folder: Folder

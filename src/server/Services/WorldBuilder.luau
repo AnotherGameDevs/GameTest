@@ -24,6 +24,9 @@ WorldBuilder.SpawnCFrame = WorldCamp.SpawnCFrame
 WorldBuilder.ReceivingCenter = WorldCamp.ReceivingCenter
 WorldBuilder.ReceivingDisplayPosition = WorldCamp.ReceivingDisplayPosition
 WorldBuilder.LostFoundPosition = WorldCamp.LostFoundPosition
+WorldBuilder.RecoveryPosition = WorldCamp.RecoveryPosition
+WorldBuilder.EvacCFrame = WorldCamp.EvacCFrame
+WorldBuilder.RecoverySlot = WorldCamp.RecoverySlot
 WorldBuilder.Elevator = { StopTops = WorldElevator.StopTops, StopNames = WorldElevator.StopNames }
 
 local function lighting()
