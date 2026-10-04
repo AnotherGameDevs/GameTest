@@ -35,6 +35,7 @@ function StateService.Snapshot(player: Player)
 		Collection = data.Collection,
 		Display = data.Display,
 		Guide = data.Guide,
+		GuideBase = data.GuideBase,
 	}
 end
 

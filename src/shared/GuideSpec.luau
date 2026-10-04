@@ -5,6 +5,9 @@
 -- `state` fields: Cash, Count, Capacity, Stats{BlocksDug, CashEarned, DeepestDepth}, OwnedToolCount, NextToolPrice,
 --   NextToolName, Carrying (bool), HasDeposited (bool), CollectionFound (number), Touch (bool), depthMeters (number)
 -- `names` = { Dig, Sell, Shop, Place, Journal } display strings for the CURRENT bindings.
+local Defs = require(script.Parent.Defs)
+local CollectionSpec = require(script.Parent.CollectionSpec)
+
 local GuideSpec = {}
 
 GuideSpec.Order = { "mine", "backpack", "sell", "upgrade", "elevator", "artifact", "collection" }
@@ -84,6 +87,9 @@ end
 
 -- The single hint to show: the first in order that is triggered, not yet done and not satisfied.
 function GuideSpec.Active(s, done: { [string]: boolean }): string?
+	if done.skipped then
+		return nil -- "Skip tutorial" was used: no guidance at all until the player restarts it from Settings
+	end
 	for _, id in ipairs(GuideSpec.Order) do
 		if not done[id] and not GuideSpec.Satisfied(id, s) and GuideSpec.Triggered(id, s) then
 			return id
@@ -95,12 +101,64 @@ end
 -- Ids that can be marked done because their condition is satisfied (so they are persisted and never reappear).
 function GuideSpec.NewlySatisfied(s, done: { [string]: boolean }): { string }
 	local out = {}
+	if done.skipped then
+		return out
+	end
 	for _, id in ipairs(GuideSpec.Order) do
 		if not done[id] and GuideSpec.Satisfied(id, s) then
 			table.insert(out, id)
 		end
 	end
 	return out
+end
+
+-- Builds the snapshot GuideSpec works on from the server's player snapshot `d`, the saved restart baseline `base`
+-- (lifetime counters at the moment the tutorial was last restarted; {} for a fresh profile) and client-only extras.
+-- Everything is RELATIVE to the baseline, so restarting the tutorial for a veteran really starts from zero instead of
+-- instantly counting old progress as done.
+function GuideSpec.StateFrom(d, base, extras)
+	base = base or {}
+	local stats = d.Stats or {}
+	local owned = 0
+	for _ in pairs(d.OwnedTools or {}) do
+		owned += 1
+	end
+	local nextTool
+	for _, id in ipairs(Defs.ToolsByTier) do
+		if not (d.OwnedTools or {})[id] then
+			nextTool = Defs.Tools[id]
+			break
+		end
+	end
+	local found = CollectionSpec.Totals(d.Collection or {})
+	return {
+		Cash = d.Cash or 0, Count = d.Count or 0, Capacity = math.max(d.Capacity or 1, 1),
+		Stats = {
+			BlocksDug = math.max((stats.BlocksDug or 0) - (base.BlocksDug or 0), 0),
+			CashEarned = math.max((stats.CashEarned or 0) - (base.CashEarned or 0), 0),
+			DeepestDepth = stats.DeepestDepth or 0,
+		},
+		OwnedToolCount = math.max(owned - (base.Tools or 1), 0) + 1,
+		NextToolPrice = nextTool and nextTool.Price or nil,
+		NextToolName = nextTool and nextTool.DisplayName or nil,
+		Carrying = d.Carrying ~= nil,
+		HasDeposited = (stats.RelicsExtracted or 0) - (base.RelicsExtracted or 0) > 0,
+		CollectionFound = math.max(found - (base.Found or 0), 0),
+		Touch = extras.Touch == true,
+		depthMeters = extras.depthMeters or 0,
+	}
+end
+
+-- The baseline to save when the tutorial is restarted (computed on the server from the live profile).
+function GuideSpec.Baseline(data)
+	local owned = 0
+	for _ in pairs(data.OwnedTools or {}) do
+		owned += 1
+	end
+	local found = CollectionSpec.Totals(data.Collection or {})
+	local stats = data.Stats or {}
+	return { BlocksDug = stats.BlocksDug or 0, CashEarned = stats.CashEarned or 0, RelicsExtracted = stats.RelicsExtracted or 0,
+		Tools = math.max(owned, 1), Found = found }
 end
 
 return GuideSpec

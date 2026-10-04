@@ -31,8 +31,10 @@ overlapping HUD on narrow windows, shop not scale-to-fit, MetricsService printin
 | S7 | Camp personal display + choice | 🟡 | client-side shelf, saved `Display` list |
 | S7 | Set completion | 🟡 | per-layer sets, toast on completion |
 | S8 | World: camp spacing, no sand overlap, signs | ✅ 🟡 | audit + `WorldAudit`; floating signs fixed this pass |
-| S9 | Onboarding hints | 🟡 | `GuideSpec` + `GuideController` |
+| S9 | Onboarding hints | 🟡 | `GuideSpec` + `GuideController`; empty-outline bug fixed (`docs/TUTORIAL.md`), Skip/Restart, baseline restart, saved progress (unit-tested) |
 | S9 | UI unification, number formatting | 🟡 | `UIKit.Tokens`/`flatButton`/`fit`; shop/menu/journal scale-to-fit; HUD centre text constrained |
+| S5b | Mine variation, buried remnants, discovery pockets | 🟡 | `docs/MINE_DETAIL.md`; 269 offline checks; needs Studio |
+| S6b | Artifact models rebuilt (one source for reveal/carry/journal/shelf) | 🟡 | `docs/ARTIFACT_MODELS.md`; before/after render; mesh-dependent items listed |
 | S9 | Audio | 🟡 | **built-in Roblox placeholder sounds** – replacement needed before release |
 | S10 | Persistence + migrations + failed-load safety | 🟡 | v3 migration (unit-tested); UpdateAsync + session lock; failed load kicks in production; BindToClose waits for all saves |
 | S10 | Two-player / performance testing | ❌ (blocked) | needs Studio/server; see playtest plan |

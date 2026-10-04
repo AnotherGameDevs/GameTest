@@ -13,6 +13,7 @@ local InputMode = require(script.Parent.InputMode)
 local Bindings = require(script.Parent.Bindings)
 local Audio = require(script.Parent.AudioController)
 local K = require(script.Parent.UIKit)
+local Guide = require(script.Parent.GuideController)
 
 local P = Config.Palette
 local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
@@ -167,6 +168,19 @@ local function buildSettings(parent: Instance)
 	makeSlider(body, 100, "MasterVolume", "Master volume", "%.2f")
 	makeToggle(body, 180, "CameraShake", "Camera shake")
 	makeToggle(body, 216, "InvertY", "Invert vertical look")
+	-- tutorial controls (the hints are separate from objectives and notifications)
+	local skip = flatButton(body, "Skip tutorial", UDim2.fromOffset(160, 30), UDim2.fromOffset(0, 258), nil)
+	skip.TextSize = 15
+	skip.Activated:Connect(function()
+		Audio.Play("UI")
+		Guide.Skip()
+	end)
+	local restart = flatButton(body, "Restart tutorial", UDim2.fromOffset(160, 30), UDim2.fromOffset(174, 258), nil)
+	restart.TextSize = 15
+	restart.Activated:Connect(function()
+		Audio.Play("UI")
+		Guide.Restart()
+	end)
 end
 
 local function buildControls(parent: Instance)

@@ -28,7 +28,8 @@ local function defaultData()
 		UnlockedSites = {},
 		Collection = {}, -- [treasureId] = { Count, FirstFound }
 		Display = {}, -- treasure ids shown on the player's camp shelf (subset of Collection)
-		Guide = {}, -- [hintId] = true once a first-time hint is finished
+		Guide = {}, -- [hintId] = true once a first-time hint is finished; Guide.skipped = true after "Skip tutorial"
+		GuideBase = {}, -- lifetime counters at the last tutorial restart (GuideSpec.Baseline); {} = never restarted
 		Stats = {
 			BlocksDug = 0, TreasureFound = 0, CashEarned = 0,
 			RelicsDiscovered = 0, RelicsExtracted = 0, RelicsStolen = 0, DeepestDepth = 0,

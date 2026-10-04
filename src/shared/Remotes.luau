@@ -22,6 +22,7 @@ local EVENTS = {
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)
 	"GuideDone", -- C->S  (hintId) the player finished/dismissed a first-time hint
+	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
 	"MineShift", -- S->C  (phase, secondsOrNil) mine refresh warning / deferral / done

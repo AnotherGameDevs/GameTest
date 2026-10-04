@@ -109,6 +109,15 @@ Config.Collection = {
 	ShelfReach = 12, -- the shelf is only built/visible when the player is this close
 }
 
+-- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
+Config.Mine = {
+	AmbientChance = { Soil = 0.07, Clay = 0.06, Stone = 0.07, Ruins = 0.07 }, -- chance an exposed non-loot cell carries an ambient remnant
+	TellChance = 0.45, -- chance a cell holding one of the "tellable" rewards shows its real reward when its face is exposed
+	PocketChance = 0.55, -- chance a non-loot cell INSIDE a pocket carries that pocket's remnant
+	MaxDetails = 220, -- hard cap on live detail objects in the whole mine
+	Pockets = { Cache = 3, Fossil = 3, Masonry = 2 }, -- discovery pockets per generation
+}
+
 -- Shared-mine replenishment ("Fresh Dig", docs/MINE_SHIFT.md).
 Config.Shift = {
 	Enabled = true,
@@ -160,6 +169,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
 	GuideDone = { 10, 5 },
+	GuideControl = { 3, 5 },
 	SetDisplay = { 6, 3 },
 }
 

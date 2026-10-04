@@ -112,6 +112,46 @@ do
 	end
 end
 
+-- ---------------------------------------------------------------- tutorial lifecycle ----------------------------------
+do
+	local function snap(over)
+		local d = { Cash = 0, Count = 0, Capacity = 12, Stats = { BlocksDug = 0, CashEarned = 0, RelicsExtracted = 0, DeepestDepth = 0 },
+			OwnedTools = { rusty_shovel = true }, Collection = {}, Carrying = nil }
+		for k, v in pairs(over or {}) do d[k] = v end
+		return d
+	end
+	local names = { Dig = "LEFT CLICK", Sell = "R", Place = "X", Journal = "J" }
+	local function active(d, guide, base) return GuideSpec.Active(GuideSpec.StateFrom(d, base, { Touch = false, depthMeters = 0 }), guide) end
+
+	-- fresh profile
+	check("fresh profile: shows the mining hint", active(snap(), {}, {}) == "mine")
+	-- partially completed (saved): never replays the finished steps
+	local partial = { mine = true, backpack = true }
+	local d = snap({ Count = 4, Stats = { BlocksDug = 20, CashEarned = 0, RelicsExtracted = 0, DeepestDepth = 0 } })
+	check("partial: resumes at the next step (sell)", active(d, partial, {}) == "sell")
+	check("partial: finished steps stay finished", GuideSpec.Active(GuideSpec.StateFrom(d, {}, { depthMeters = 0 }), { mine = true, backpack = true, sell = true }) == nil)
+	-- completed profile: nothing shows, even after respawn/rejoin (same saved table)
+	local all = {}
+	for _, id in ipairs(GuideSpec.Order) do all[id] = true end
+	check("completed: no guidance", active(snap({ Count = 3 }), all, {}) == nil)
+	-- skip
+	check("skip: no guidance even for a brand-new state", active(snap(), { skipped = true }, {}) == nil)
+	check("skip: nothing newly satisfied is re-reported", #GuideSpec.NewlySatisfied(GuideSpec.StateFrom(snap(), {}, {}), { skipped = true }) == 0)
+	-- restart: a veteran restarts, old lifetime progress does not count
+	local veteran = snap({ Cash = 5000, Stats = { BlocksDug = 900, CashEarned = 20000, RelicsExtracted = 3, DeepestDepth = 40 },
+		OwnedTools = { rusty_shovel = true, digging_shovel = true, heavy_shovel = true }, Collection = { old_coin = { Count = 1 } } })
+	local base = GuideSpec.Baseline(veteran)
+	check("baseline records lifetime counters", base.BlocksDug == 900 and base.CashEarned == 20000 and base.Tools == 3 and base.Found == 1)
+	check("veteran WITHOUT a baseline would see everything done", #GuideSpec.NewlySatisfied(GuideSpec.StateFrom(veteran, {}, {}), {}) >= 3)
+	check("restart: guidance starts from the mining hint again", active(veteran, {}, base) == "mine")
+	check("restart: nothing is auto-completed from old stats", #GuideSpec.NewlySatisfied(GuideSpec.StateFrom(veteran, base, {}), {}) == 0)
+	local progressed = snap({ Stats = { BlocksDug = 905, CashEarned = 20000, RelicsExtracted = 3, DeepestDepth = 40 },
+		OwnedTools = veteran.OwnedTools, Collection = veteran.Collection, Cash = 5000 })
+	check("restart: new digging completes the first step", table.find(GuideSpec.NewlySatisfied(GuideSpec.StateFrom(progressed, base, {}), {}), "mine") ~= nil)
+	-- the restart baseline never makes counters negative
+	check("relative stats are clamped at zero", GuideSpec.StateFrom(snap(), { BlocksDug = 50 }, {}).Stats.BlocksDug == 0)
+end
+
 -- ---------------------------------------------------------------- mine shift --------------------------------------
 do
 	local cfg = Config.Shift

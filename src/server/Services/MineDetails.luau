@@ -1,0 +1,41 @@
+-- Builds the small remnants on a mine cell's exposed face. Every detail part is a CHILD of the cell's own Part, so when
+-- that cell is destroyed the Part (and with it every remnant) disappears in the same instant: nothing can be left floating.
+-- Parts never collide, are never hit by mining rays (CanQuery = false), and cast no shadows.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Kit = require(ReplicatedStorage.Shared.ModelKit)
+local MineDetailSpecs = require(ReplicatedStorage.Shared.MineDetailSpecs)
+
+local MineDetails = {}
+
+-- Frame at the face centre looking INTO the wall: local +Z points out of the cell.
+local function faceFrame(center: Vector3, normal: Vector3, half: number): CFrame
+	local origin = center + normal * half
+	local up = math.abs(normal.Y) > 0.9 and Vector3.xAxis or Vector3.yAxis
+	return CFrame.lookAt(origin, origin - normal, up)
+end
+
+-- Returns the number of parts created (0 if the kind is unknown).
+function MineDetails.Build(kind: string, variant: number, cell: BasePart, center: Vector3, normal: Vector3): number
+	if not MineDetailSpecs.Has(kind) then
+		return 0
+	end
+	local frame = faceFrame(center, normal, cell.Size.X / 2)
+	local n = 0
+	for _, spec in ipairs(MineDetailSpecs.Build(kind, variant)) do
+		local p = Kit.make(spec)
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanTouch = false
+		p.CanQuery = false -- never intercepts the dig ray, the crosshair or a click
+		p.CastShadow = false
+		p.Massless = true
+		p.Name = "Detail_" .. spec.Name
+		p.CFrame = frame * spec.Offset
+		p.Parent = cell
+		n += 1
+	end
+	cell:SetAttribute("Detail", kind)
+	return n
+end
+
+return MineDetails

@@ -14,7 +14,7 @@
   popup + sound. Totals and per-layer progress are in the journal header.
 * **Camp shelf** (`CampShelf`, `Config.Collection`): 4 slots, chosen in the journal (`SetDisplay`, validated against the saved
   collection, never silently replaces a full shelf). Built **only on the local client** from the local player's own saved
-  `Display` list, with a sign "<name>'s SHELF - only you see this", at `Config.Collection.ShelfPosition`
+  `Display` list, with ONE modest heading "<name>'s Collection" (the "only you see this" explanation is in the journal), at `Config.Collection.ShelfPosition`
   (west side of camp, facing the arrival area, footprint registered in `Config.Camp.Footprints.Shelf` and checked by the
   layout test). Other players' shelves are never shown to you and yours is never shown to them.
 * **Saving:** `Collection`, `Display` and hint progress `Guide` are in the profile (schema v3, `DataMigrations`).

@@ -1,19 +1,24 @@
--- First-time hints. One short card at a time, bottom-centre (clear of the crosshair and the HUD), chosen by the pure
--- GuideSpec from the server snapshot. A hint ends when the player has done the thing, after its timeout, or when
--- they open the thing it points at; ended hints are saved by the server (GuideDone) and never return.
--- Text always uses the CURRENT bindings. No tutorial world, no forced steps, nothing blocks play.
+-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
+-- snapshot. Rules:
+--   * The card is ONE plain Frame that owns its background, outline, title, text and Skip button. When there is no active
+--     hint the whole Frame is hidden (Visible = false), so an empty outline can never be left on screen. (The earlier
+--     version faded a CanvasGroup; a UIStroke on a CanvasGroup is drawn outside the group and ignores GroupTransparency,
+--     so the gold outline stayed behind after the text faded.) There are no tweens or delayed callbacks any more, so an old
+--     step cannot reappear later.
+--   * A hint ends when the player has done the thing (saved on the server via GuideDone), after its timeout, or when they use
+--     the thing it points at. Finished hints are part of the profile: they do not replay after death, respawn or rejoin.
+--   * It is hidden while any menu (shop, settings, journal, Roblox menu) is open and comes back only if still relevant.
+--   * "Skip tutorial" (card button or Settings) and "Restart tutorial" (Settings) go through GuideControl on the server.
+--   * Guidance is separate from objectives and toasts; hiding it never touches those.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
-local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local GuideSpec = require(ReplicatedStorage.Shared.GuideSpec)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
-local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
 local State = require(script.Parent.State)
 local InputMode = require(script.Parent.InputMode)
@@ -28,14 +33,15 @@ local TOUCH = UserInputService.TouchEnabled
 
 local GuideController = {}
 
-local card: Frame
+local card: Frame? = nil
 local titleLabel: TextLabel
 local bodyLabel: TextLabel
 local current: string? = nil
 local shownAt = 0
-local sent: { [string]: boolean } = {} -- ids already reported to the server this session
+local sent: { [string]: boolean } = {} -- ids already reported to the server (cleared on restart)
 local depthMeters = 0
 local acc = 0
+local initialized = false
 
 local function names()
 	return {
@@ -43,35 +49,6 @@ local function names()
 		Sell = Bindings.Name(Bindings.ReturnToCamp),
 		Place = Bindings.Name(Bindings.PlaceArtifact),
 		Journal = Bindings.Name(Bindings.Journal),
-	}
-end
-
-local function snapshot()
-	local d = State.Data
-	local owned = 0
-	for _ in pairs(d.OwnedTools or {}) do
-		owned += 1
-	end
-	local nextTool
-	for _, id in ipairs(Defs.ToolsByTier) do
-		if not (d.OwnedTools or {})[id] then
-			nextTool = Defs.Tools[id]
-			break
-		end
-	end
-	local found = CollectionSpec.Totals(d.Collection or {})
-	local stats = d.Stats or {}
-	return {
-		Cash = d.Cash or 0, Count = d.Count or 0, Capacity = math.max(d.Capacity or 1, 1),
-		Stats = { BlocksDug = stats.BlocksDug or 0, CashEarned = stats.CashEarned or 0, DeepestDepth = stats.DeepestDepth or 0 },
-		OwnedToolCount = owned,
-		NextToolPrice = nextTool and nextTool.Price or nil,
-		NextToolName = nextTool and nextTool.DisplayName or nil,
-		Carrying = d.Carrying ~= nil,
-		HasDeposited = (stats.RelicsExtracted or 0) > 0,
-		CollectionFound = found,
-		Touch = TOUCH,
-		depthMeters = depthMeters,
 	}
 end
 
@@ -83,33 +60,34 @@ local function markDone(id: string)
 	Remotes.Get("GuideDone"):FireServer(id)
 end
 
+-- The ONLY place the card is shown or hidden. Hiding hides the entire container.
 local function show(id: string?)
-	if id == current then
+	local c = card
+	if not c then
 		return
+	end
+	if id == current and c.Visible == (id ~= nil) then
+		return
+	end
+	if id ~= current then
+		shownAt = os.clock()
 	end
 	current = id
-	shownAt = os.clock()
-	if not id then
-		TweenService:Create(card, TweenInfo.new(0.25), { GroupTransparency = 1 }):Play()
-		return
-	end
-	card.Visible = true
-	TweenService:Create(card, TweenInfo.new(0.25), { GroupTransparency = 0 }):Play()
+	c.Visible = id ~= nil
 end
 
 local function refresh()
-	if not State.Loaded then
+	if not card or not State.Loaded then
 		return
 	end
 	local d = State.Data
 	local guide = d.Guide or {}
-	local s = snapshot()
-	-- retire anything the player has already accomplished (saved, so it never comes back)
+	local s = GuideSpec.StateFrom(d, d.GuideBase, { Touch = TOUCH, depthMeters = depthMeters })
+	-- retire anything already accomplished (saved on the server, so it never comes back)
 	for _, id in ipairs(GuideSpec.NewlySatisfied(s, guide)) do
 		markDone(id)
-		guide[id] = true
 	end
-	local done = setmetatable({}, { __index = function(_, id)
+	local done = setmetatable({ skipped = guide.skipped == true }, { __index = function(_, id)
 		return guide[id] or sent[id]
 	end })
 	local id = GuideSpec.Active(s, done)
@@ -118,7 +96,7 @@ local function refresh()
 		markDone(id)
 		id = GuideSpec.Active(s, done)
 	end
-	-- never on top of a menu
+	-- never on top of a menu; it returns afterwards only if still the active step
 	if id and InputMode.IsMenuOpen() then
 		id = nil
 	end
@@ -138,29 +116,52 @@ function GuideController.Dismiss(id: string)
 	end
 end
 
-function GuideController.Build(gui: ScreenGui)
-	card = mk("CanvasGroup", { Name = "GuideCard", Size = UDim2.fromOffset(430, 76), AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, TOUCH and -150 or -84), BackgroundColor3 = T.Panel, BackgroundTransparency = 0.08,
-		GroupTransparency = 1, Visible = false, Active = false }, gui)
-	corner(card, T.Corner)
-	stroke(card, T.Accent, 2)
-	mk("UISizeConstraint", { MaxSize = Vector2.new(430, 90) }, card)
-	titleLabel = label(card, "", 15, T.Accent, { Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(12, 6),
-		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
-	bodyLabel = label(card, "", 16, P.Cream, { Size = UDim2.new(1, -24, 1, -30), Position = UDim2.fromOffset(12, 28),
-		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
-	-- the card only informs: it must never swallow clicks meant for mining
-	for _, o in ipairs(card:GetDescendants()) do
-		if o:IsA("GuiObject") then
-			o.Active = false
-		end
+-- Skip tutorial: hide at once (no waiting for the server), record completion on the server.
+function GuideController.Skip()
+	show(nil)
+	for _, id in ipairs(GuideSpec.Order) do
+		sent[id] = true
 	end
+	Remotes.Get("GuideControl"):FireServer("skip")
+end
+
+-- Restart tutorial: forget what this client already reported; the server wipes the saved progress and sets a baseline.
+function GuideController.Restart()
+	table.clear(sent)
+	Remotes.Get("GuideControl"):FireServer("restart")
+end
+
+function GuideController.IsSkipped(): boolean
+	return State.Data.Guide ~= nil and State.Data.Guide.skipped == true
+end
+
+function GuideController.Build(gui: ScreenGui)
+	if card then
+		return -- one tutorial interface only
+	end
+	local c = mk("Frame", { Name = "GuideCard", Size = UDim2.fromOffset(430, 92), AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, TOUCH and -150 or -84), BackgroundColor3 = T.Panel, BackgroundTransparency = 0.08,
+		Visible = false, Active = false }, gui)
+	corner(c, T.Corner)
+	stroke(c, T.Accent, 2) -- the outline lives on the same Frame that is hidden
+	mk("UISizeConstraint", { MaxSize = Vector2.new(430, 100) }, c)
+	titleLabel = label(c, "", 15, T.Accent, { Size = UDim2.new(1, -150, 0, 20), Position = UDim2.fromOffset(12, 6),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	bodyLabel = label(c, "", 16, P.Cream, { Size = UDim2.new(1, -24, 0, 52), Position = UDim2.fromOffset(12, 28),
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
+	local skip = K.flatButton(c, "Skip tutorial", UDim2.fromOffset(110, 20), UDim2.new(1, -122, 0, 5), nil)
+	skip.TextSize = 12
+	skip.Name = "SkipButton"
+	skip.Activated:Connect(GuideController.Skip)
+	card = c
 end
 
 function GuideController.Init()
-	State.Connect(function()
-		refresh()
-	end)
+	if initialized then
+		return -- no duplicate event connections
+	end
+	initialized = true
+	State.Connect(refresh)
 	InputMode.OnChanged(refresh)
 	RunService.Heartbeat:Connect(function(dt)
 		acc += dt

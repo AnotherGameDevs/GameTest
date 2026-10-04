@@ -132,13 +132,13 @@ local function spawnWorldModel(id: string)
 	local hl = Instance.new("Highlight")
 	hl.FillColor = rar.Color
 	hl.OutlineColor = Color3.new(1, 1, 1)
-	hl.FillTransparency = 0.8
+	hl.FillTransparency = 0.92
 	hl.DepthMode = Enum.HighlightDepthMode.Occluded -- never visible through walls
 	hl.Parent = model
 	local light = Instance.new("PointLight")
 	light.Color = rar.Color
 	light.Range = 14
-	light.Brightness = 1.5
+	light.Brightness = 0.9
 	light.Parent = root
 
 	local prompt = Instance.new("ProximityPrompt")
@@ -370,7 +370,7 @@ function ArtifactService.ShowOnTable(treasureId: string)
 	model.Name = "DepositedDisplay"
 	local hl = Instance.new("Highlight")
 	hl.FillColor = Defs.Rarity[def.Rarity].Color
-	hl.FillTransparency = 0.6
+	hl.FillTransparency = 0.9
 	hl.Parent = model
 	model.Parent = folder
 	task.delay(Config.Artifacts.DisplaySeconds, function()

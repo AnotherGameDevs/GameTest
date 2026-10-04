@@ -42,10 +42,15 @@ CF.__mul = function(a, b)
 	if getmetatable(b) == V3 then return a.p + rot(a.r, b) end
 	return cf(a.p + rot(a.r, b.p), matmul(a.r, b.r))
 end
-CF.__sub = function(a, b) return cf(a.p - b.p, a.r) end -- only used as (cframe - cframe.Position)
+CF.__sub = function(a, b)
+	if getmetatable(b) == V3 then return cf(a.p - b, a.r) end -- cframe - cframe.Position = the rotation part
+	return cf(a.p - b.p, a.r)
+end -- only used as (cframe - cframe.Position)
 CF.__index = function(t, k)
 	if k == "Position" then return t.p end
 	if k == "LookVector" then return rot(t.r, v3(0, 0, -1)) end
+	if k == "RightVector" then return rot(t.r, v3(1, 0, 0)) end
+	if k == "UpVector" then return rot(t.r, v3(0, 1, 0)) end
 	return CF[k]
 end
 local function Rx(a) local c, s = math.cos(a), math.sin(a); return { 1, 0, 0, 0, c, -s, 0, s, c } end

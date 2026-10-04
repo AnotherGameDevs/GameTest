@@ -24,3 +24,9 @@ it every session starts fresh (expected, a warning is printed). **Do not enable 
 | 15 | Performance | dig 20 min: watch Workspace instance count (`#Workspace:GetDescendants()`), MicroProfiler, Script Performance; `LocalFX` stays small | untested |
 | 16 | Window sizes | 1920x1080, 1366x768, 1280x720, 1024x600, 800x600: shop, menu, journal fit; top HUD text does not overlap | untested |
 | 17 | Signs/world | walk the camp: no floating signs, spawn-pad snag, sand in the pit, view from spawn/entrance/deep/elevator | untested |
+| 18 | Tutorial panel | fresh profile: hint card appears with text; when nothing is active NO outline anywhere (normal play, journal open, shop open, settings open); Skip tutorial (card button via Alt, and Settings) clears it for good; Restart tutorial (Settings) starts from "DIG"; die/respawn/rejoin: finished steps do not return | untested |
+| 19 | Mine variation | descend: soil/clay/stone/ruins look different (patches/bands/seams/courses); remnants appear only on exposed faces and vanish with their block; pottery cache (clay), fossil patch (stone), broken masonry (ruins) exist and can be dug out; remnants never block the crosshair/mining | untested |
+| 20 | Reward tells | a block showing a coin/pottery/fossil/tablet tell actually drops that item; ambient remnants (grey/low) never drop anything | untested |
+| 21 | Fresh Dig + details | after a refresh: new arrangement, no leftover remnants, no duplicate pockets, instance count back to baseline | untested |
+| 22 | Artifact models | reveal, carry (3rd/1st person), world pickup, journal icon and shelf all show the new models; ring opening visible; necklace on stand; names fit on plates; shelf heading says "<name>'s Collection" | untested |
+

@@ -248,7 +248,8 @@ local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, fa
 			part.CanCollide = false
 			part.Transparency = 1
 			for _, child in ipairs(part:GetChildren()) do
-				if child:IsA("SurfaceGui") then
+				-- surface guis and buried-detail remnants go with the block at once (the server's destroy follows)
+				if child:IsA("SurfaceGui") or child.Name:sub(1, 7) == "Detail_" then
 					child:Destroy()
 				end
 			end
@@ -314,13 +315,13 @@ function Effects.RevealTreasure(info)
 		local hl = Instance.new("Highlight")
 		hl.FillColor = rar.Color
 		hl.OutlineColor = Color3.new(1, 1, 1)
-		hl.FillTransparency = 0.5
+		hl.FillTransparency = 0.9 -- rarity is the outline/light colour; the model's own materials are never hidden by a glow
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Parent = model
 		local light = Instance.new("PointLight")
 		light.Color = rar.Color
 		light.Range = 12 + order * 3
-		light.Brightness = 2
+		light.Brightness = 1.1
 		light.Parent = root
 		burst(start, Vector3.yAxis, rar.Color, cfg[3], 22, 0.8)
 	end

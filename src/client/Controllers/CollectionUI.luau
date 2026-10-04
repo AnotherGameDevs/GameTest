@@ -46,11 +46,12 @@ end
 local function icon(parent: Instance, id: string, def, discovered: boolean)
 	local vp = mk("ViewportFrame", { Size = UDim2.fromOffset(120, 96), Position = UDim2.fromOffset(15, 8), BackgroundTransparency = 1,
 		Ambient = Color3.fromRGB(150, 138, 124), LightColor = Color3.fromRGB(255, 244, 224), LightDirection = Vector3.new(-0.5, -1, -0.7) }, parent)
-	local model = TreasureModels.BuildAny(id, def)
+	-- the same source model as the reveal / carried / shelf versions, fitted to one common size and turned toward the viewer
+	local model = TreasureModels.BuildDisplay(id, def, 2.4)
+	model.Parent = vp
+	model:PivotTo(CFrame.Angles(0, math.rad(-24), 0) * TreasureModels.DisplayRotation(id))
 	local _, size = model:GetBoundingBox()
 	local radius = math.max(size.Magnitude / 2, 1.2)
-	model.Parent = vp
-	model:PivotTo(CFrame.Angles(0, math.rad(-28), 0) * CFrame.Angles(math.rad(14), 0, 0))
 	local cam = mk("Camera", { FieldOfView = 32 }, vp)
 	cam.CFrame = CFrame.lookAt(Vector3.new(0, 0, radius / math.sin(math.rad(16)) * 1.1), Vector3.zero)
 	vp.CurrentCamera = cam
@@ -180,12 +181,15 @@ function CollectionUI.Build(gui: ScreenGui)
 	corner(root, 14)
 	stroke(root, T.Line, 3)
 	K.fit(root, W, H)
-	header = label(root, "", 20, P.Cream, { Size = UDim2.new(1, -90, 0, 32), Position = UDim2.fromOffset(16, 8),
+	header = label(root, "", 20, P.Cream, { Size = UDim2.new(1, -90, 0, 24), Position = UDim2.fromOffset(16, 4),
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	label(root, "Your camp shelf is built on your screen only: other players never see it, and you never see theirs.", 12, K.Muted,
+		{ Size = UDim2.new(1, -90, 0, 16), Position = UDim2.fromOffset(16, 28), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd })
 	local close = K.flatButton(root, "X", UDim2.fromOffset(40, 32), UDim2.new(1, -52, 0, 8), P.Danger)
 	close.Activated:Connect(CollectionUI.Close)
 
-	setRow = mk("Frame", { Size = UDim2.new(1, -32, 0, 48), Position = UDim2.fromOffset(16, 48), BackgroundTransparency = 1 }, root)
+	setRow = mk("Frame", { Size = UDim2.new(1, -32, 0, 48), Position = UDim2.fromOffset(16, 50), BackgroundTransparency = 1 }, root)
 	mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8) }, setRow)
 
 	grid = mk("ScrollingFrame", { Size = UDim2.new(1, -32, 1, -112), Position = UDim2.fromOffset(16, 102), BackgroundTransparency = 1,

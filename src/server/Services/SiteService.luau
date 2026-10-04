@@ -7,6 +7,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
+local MineStyle = require(ReplicatedStorage.Shared.MineStyle)
+local MineDetails = require(script.Parent.MineDetails)
 
 local SiteService = {}
 
@@ -14,7 +16,10 @@ local health: { number } = {}
 local maxHealth: { number } = {}
 local loot: { [number]: string } = {}
 local parts: { [number]: Part } = {}
-local tints: { number } = {}
+local pocketOf: { [number]: string } = {} -- cell -> discovery pocket kind
+local detailBuilt: { [number]: boolean } = {}
+local liveDetails = 0
+local currentSeed = 0
 local folder: Folder
 local generation = 0
 local dugTotal = 0
@@ -22,24 +27,69 @@ local dugByLayer: { [string]: number } = {}
 local cellsByLayer: { [string]: number } = {}
 local generatedAt = os.clock()
 
+local FACE_NORMALS = { Vector3.yAxis, Vector3.xAxis, Vector3.zAxis, -Vector3.xAxis, -Vector3.zAxis, -Vector3.yAxis }
+local FACE_STEP = { { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0, 1 }, { -1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 } } -- cell offset behind each normal (y grows downward)
+
+-- A face is "open" when its neighbour is air (a dug cell), the sky above the top row, or the exit shaft beside the grid.
+-- The exit shaft's own face is never decorated (it is the way out and must stay clean).
+local function faceOpen(x: number, y: number, z: number, face: number): boolean
+	local o = FACE_STEP[face]
+	local nx, ny, nz = x + o[1], y + o[2], z + o[3]
+	if not Grid.InBounds(nx, ny, nz) then
+		return face == 1 and y == 0 -- only the open sky above the surface row
+	end
+	return (health[Grid.ToIndex(nx, ny, nz)] or 0) <= 0
+end
+
+-- Builds the cell's remnant if it has one and one of its faces is now open. Safe to call repeatedly.
+local function ensureDetail(idx: number)
+	local part = parts[idx]
+	if not part or detailBuilt[idx] or (health[idx] or 0) <= 0 then
+		return
+	end
+	if liveDetails >= Config.Mine.MaxDetails then
+		return
+	end
+	local x, y, z = Grid.FromIndex(idx)
+	local layer = Defs.LayerAtCell(y)
+	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, loot[idx], pocketOf[idx])
+	if not spec then
+		return
+	end
+	local isExitWall = SiteService.IsExitWall(x, z)
+	for i = 0, 5 do
+		local face = (spec.FaceRot + i) % 6 + 1
+		if faceOpen(x, y, z, face) and not (isExitWall and face == 3) then
+			local n = MineDetails.Build(spec.Kind, spec.Variant, part, part.Position, FACE_NORMALS[face])
+			if n > 0 then
+				detailBuilt[idx] = true
+				liveDetails += 1
+			end
+			return
+		end
+	end
+end
+
 local function spawnPart(idx: number)
 	if parts[idx] then
 		return
 	end
 	local x, y, z = Grid.FromIndex(idx)
 	local layer = Defs.LayerAtCell(y)
+	local style = MineStyle.Cell(x, y, z, layer.Id, currentSeed, pocketOf[idx])
 	local part = Instance.new("Part")
 	part.Name = tostring(idx)
 	part.Anchored = true
 	part.Size = Vector3.one * Grid.CellSize
 	part.Position = Grid.CellCenter(x, y, z)
-	part.Material = Enum.Material.SmoothPlastic
-	part.Color = layer.Color:Lerp(tints[idx] > 0 and Color3.new(1, 1, 1) or Color3.new(0, 0, 0), math.abs(tints[idx]))
+	part.Material = Enum.Material[style.Material]
+	part.Color = Color3.fromHex(style.Hex)
 	part.TopSurface = Enum.SurfaceType.Smooth
 	part.BottomSurface = Enum.SurfaceType.Smooth
 	part.CanTouch = false
 	part.Parent = folder
 	parts[idx] = part
+	ensureDetail(idx)
 end
 
 -- Cells on the grid's south edge that border the exit shaft (see Config.Exit).
@@ -53,9 +103,9 @@ function SiteService.IsExitWall(x: number, z: number): boolean
 	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + 1e-3
 end
 
-function SiteService.Generate(seed: number?)
+function SiteService.Generate(seedIn: number?)
 	generation += 1
-	seed = seed or Config.Site.Seed
+	local seed: number = seedIn or Config.Site.Seed
 	if folder then
 		folder:Destroy()
 	end
@@ -67,7 +117,10 @@ function SiteService.Generate(seed: number?)
 	table.clear(maxHealth)
 	table.clear(loot)
 	table.clear(parts)
-	table.clear(tints)
+	table.clear(pocketOf)
+	table.clear(detailBuilt)
+	liveDetails = 0
+	currentSeed = seed
 	table.clear(dugByLayer)
 	table.clear(cellsByLayer)
 	dugTotal = 0
@@ -80,12 +133,21 @@ function SiteService.Generate(seed: number?)
 		health[idx] = layer.Health
 		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 		maxHealth[idx] = layer.Health
-		tints[idx] = (rng:NextNumber() - 0.5) * 0.16
 		if rng:NextNumber() < layer.TreasureChance then
 			local id = Defs.PickTreasure(layer.Id, rng)
 			if id then
 				loot[idx] = id
 			end
+		end
+	end
+
+	-- Discovery pockets: compact, seeded, tier-appropriate arrangements (pottery cache / fossil patch / broken masonry).
+	-- Their cells get a pocket tint, and their loot is the pocket's own (replacing whatever was rolled for those cells).
+	for _, pocket in ipairs(MineStyle.Pockets(seed)) do
+		for _, c in ipairs(pocket.Cells) do
+			local pidx = Grid.ToIndex(c[1], c[2], c[3])
+			pocketOf[pidx] = pocket.Kind
+			loot[pidx] = c[4]
 		end
 	end
 
@@ -144,6 +206,10 @@ function SiteService.Damage(idx: number, amount: number): (number, boolean, stri
 		loot[idx] = nil
 		local part = parts[idx]
 		parts[idx] = nil
+		if detailBuilt[idx] then
+			detailBuilt[idx] = nil
+			liveDetails -= 1
+		end
 		if part then
 			part:Destroy()
 		end
@@ -161,6 +227,8 @@ function SiteService.ExposeAround(idx: number)
 			local ni = Grid.ToIndex(nx, ny, nz)
 			if health[ni] > 0 and not parts[ni] then
 				spawnPart(ni)
+			elseif parts[ni] then
+				ensureDetail(ni) -- a new face of an already-visible cell just opened
 			end
 		end
 	end

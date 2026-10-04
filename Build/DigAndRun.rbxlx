@@ -330,6 +330,15 @@ Config.Collection = {
 	ShelfReach = 12, -- the shelf is only built/visible when the player is this close
 }
 
+-- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
+Config.Mine = {
+	AmbientChance = { Soil = 0.07, Clay = 0.06, Stone = 0.07, Ruins = 0.07 }, -- chance an exposed non-loot cell carries an ambient remnant
+	TellChance = 0.45, -- chance a cell holding one of the "tellable" rewards shows its real reward when its face is exposed
+	PocketChance = 0.55, -- chance a non-loot cell INSIDE a pocket carries that pocket's remnant
+	MaxDetails = 220, -- hard cap on live detail objects in the whole mine
+	Pockets = { Cache = 3, Fossil = 3, Masonry = 2 }, -- discovery pockets per generation
+}
+
 -- Shared-mine replenishment ("Fresh Dig", docs/MINE_SHIFT.md).
 Config.Shift = {
 	Enabled = true,
@@ -381,6 +390,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
 	GuideDone = { 10, 5 },
+	GuideControl = { 3, 5 },
 	SetDisplay = { 6, 3 },
 }
 
@@ -485,9 +495,9 @@ Defs.Backpacks = {
 
 -- Treasure. Layers lists which layer ids can drop it; Weight is relative inside a layer.
 Defs.Treasure = {
-	old_coin = { Name = "Old Coin", Rarity = "Common", Value = 8, Layers = { Soil = 10, Clay = 6 }, Category = "Coins", Color = P.Gold, Shape = "Coin" },
+	old_coin = { Name = "Old Coin", Rarity = "Common", Value = 8, Layers = { Soil = 10, Clay = 6 }, Category = "Coins", Color = P.Gold, Shape = "Coin", Model = "coin" },
 	pottery_shard = { Name = "Pottery Shard", Rarity = "Common", Value = 12, Layers = { Soil = 8, Clay = 8 }, Category = "Pottery", Color = P.Clay, Shape = "Block", Model = "shard" },
-	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring" },
+	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring", Model = "ring" },
 	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block", Model = "figurine" },
 	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "fossil" },
 	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring", Model = "necklace" },
@@ -811,6 +821,9 @@ return GroundPlan
 -- `state` fields: Cash, Count, Capacity, Stats{BlocksDug, CashEarned, DeepestDepth}, OwnedToolCount, NextToolPrice,
 --   NextToolName, Carrying (bool), HasDeposited (bool), CollectionFound (number), Touch (bool), depthMeters (number)
 -- `names` = { Dig, Sell, Shop, Place, Journal } display strings for the CURRENT bindings.
+local Defs = require(script.Parent.Defs)
+local CollectionSpec = require(script.Parent.CollectionSpec)
+
 local GuideSpec = {}
 
 GuideSpec.Order = { "mine", "backpack", "sell", "upgrade", "elevator", "artifact", "collection" }
@@ -890,6 +903,9 @@ end
 
 -- The single hint to show: the first in order that is triggered, not yet done and not satisfied.
 function GuideSpec.Active(s, done: { [string]: boolean }): string?
+	if done.skipped then
+		return nil -- "Skip tutorial" was used: no guidance at all until the player restarts it from Settings
+	end
 	for _, id in ipairs(GuideSpec.Order) do
 		if not done[id] and not GuideSpec.Satisfied(id, s) and GuideSpec.Triggered(id, s) then
 			return id
@@ -901,6 +917,9 @@ end
 -- Ids that can be marked done because their condition is satisfied (so they are persisted and never reappear).
 function GuideSpec.NewlySatisfied(s, done: { [string]: boolean }): { string }
 	local out = {}
+	if done.skipped then
+		return out
+	end
 	for _, id in ipairs(GuideSpec.Order) do
 		if not done[id] and GuideSpec.Satisfied(id, s) then
 			table.insert(out, id)
@@ -909,11 +928,406 @@ function GuideSpec.NewlySatisfied(s, done: { [string]: boolean }): { string }
 	return out
 end
 
+-- Builds the snapshot GuideSpec works on from the server's player snapshot `d`, the saved restart baseline `base`
+-- (lifetime counters at the moment the tutorial was last restarted; {} for a fresh profile) and client-only extras.
+-- Everything is RELATIVE to the baseline, so restarting the tutorial for a veteran really starts from zero instead of
+-- instantly counting old progress as done.
+function GuideSpec.StateFrom(d, base, extras)
+	base = base or {}
+	local stats = d.Stats or {}
+	local owned = 0
+	for _ in pairs(d.OwnedTools or {}) do
+		owned += 1
+	end
+	local nextTool
+	for _, id in ipairs(Defs.ToolsByTier) do
+		if not (d.OwnedTools or {})[id] then
+			nextTool = Defs.Tools[id]
+			break
+		end
+	end
+	local found = CollectionSpec.Totals(d.Collection or {})
+	return {
+		Cash = d.Cash or 0, Count = d.Count or 0, Capacity = math.max(d.Capacity or 1, 1),
+		Stats = {
+			BlocksDug = math.max((stats.BlocksDug or 0) - (base.BlocksDug or 0), 0),
+			CashEarned = math.max((stats.CashEarned or 0) - (base.CashEarned or 0), 0),
+			DeepestDepth = stats.DeepestDepth or 0,
+		},
+		OwnedToolCount = math.max(owned - (base.Tools or 1), 0) + 1,
+		NextToolPrice = nextTool and nextTool.Price or nil,
+		NextToolName = nextTool and nextTool.DisplayName or nil,
+		Carrying = d.Carrying ~= nil,
+		HasDeposited = (stats.RelicsExtracted or 0) - (base.RelicsExtracted or 0) > 0,
+		CollectionFound = math.max(found - (base.Found or 0), 0),
+		Touch = extras.Touch == true,
+		depthMeters = extras.depthMeters or 0,
+	}
+end
+
+-- The baseline to save when the tutorial is restarted (computed on the server from the live profile).
+function GuideSpec.Baseline(data)
+	local owned = 0
+	for _ in pairs(data.OwnedTools or {}) do
+		owned += 1
+	end
+	local found = CollectionSpec.Totals(data.Collection or {})
+	local stats = data.Stats or {}
+	return { BlocksDug = stats.BlocksDug or 0, CashEarned = stats.CashEarned or 0, RelicsExtracted = stats.RelicsExtracted or 0,
+		Tools = math.max(owned, 1), Found = found }
+end
+
 return GuideSpec
 ]]></string>
         </Properties>
       </Item>
       <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">MineDetailSpecs</string>
+          <string name="Source"><![CDATA[-- Part specs for the small remnants that appear on exposed mine faces (see MineStyle.Detail). Local frame of every
+-- detail: origin = centre of the 4x4-stud cell face, +Z points OUT of the wall, X/Y lie in the face. Parts are embedded
+-- 0.04 studs into the wall so nothing floats. Ambient remnants are LOW (<= 0.14 studs) and tone-on-tone with the layer;
+-- "tells" (the visible sign of a REAL reward in that cell) stand proud (0.25+) and use that treasure's own colours, so
+-- the two are never confused. Tested in tests/mine_style_test.luau.
+local Kit = require(script.Parent.ModelKit)
+local Config = require(script.Parent.Config)
+
+local MineDetailSpecs = {}
+
+local V = Vector3.new
+local function hex(s: string): Color3
+	return Color3.fromHex(s)
+end
+local P = Config.Palette
+
+local function lay(name: string, size: Vector3, x: number, y: number, color: Color3, mat: Enum.Material?, rotZ: number?)
+	-- a block lying on the face: footprint (size.X, size.Y), height size.Z
+	return Kit.block(name, size, V(x, y, size.Z / 2 - 0.04), color, mat, V(0, 0, rotZ or 0))
+end
+
+local builders = {}
+
+-- Ambient ---------------------------------------------------------------------------------------------------------------
+function builders.pebbles() -- soil: two or three small stones
+	local a, b = hex("7B6A58"), hex("8C7A66")
+	return {
+		lay("StoneA", V(0.8, 0.6, 0.16), -0.5, 0.3, a, Enum.Material.Slate, 20),
+		lay("StoneB", V(0.5, 0.45, 0.14), 0.45, -0.25, b, Enum.Material.Slate, -15),
+		lay("StoneC", V(0.35, 0.3, 0.1), -0.1, -0.7, a, Enum.Material.Slate, 40),
+	}
+end
+
+function builders.roots() -- shallow soil: short root sections that run into the wall
+	local root, dark = hex("6A4A2E"), hex("4E3520")
+	return {
+		lay("Root", V(2.0, 0.16, 0.14), 0, 0.1, root, Enum.Material.Wood, 12),
+		lay("Branch", V(1.0, 0.11, 0.1), 0.55, 0.45, dark, Enum.Material.Wood, 52),
+		lay("Twig", V(0.7, 0.09, 0.09), -0.7, -0.25, dark, Enum.Material.Wood, -30),
+	}
+end
+
+function builders.sherds() -- clay: a cluster of broken pottery, muted so it reads as debris, not treasure
+	local a, b, rim = hex("A25F3B"), hex("8E5233"), hex("6E3F28")
+	return {
+		lay("SherdA", V(0.9, 0.55, 0.12), -0.4, 0.2, a, Enum.Material.Sandstone, 18),
+		lay("SherdB", V(0.6, 0.45, 0.12), 0.45, -0.1, b, Enum.Material.Sandstone, -28),
+		lay("SherdC", V(0.45, 0.35, 0.1), -0.05, -0.55, a, Enum.Material.Sandstone, 62),
+		lay("Rim", V(0.5, 0.1, 0.14), -0.4, 0.48, rim, Enum.Material.Sandstone, 18),
+	}
+end
+
+function builders.seam() -- stone: a thin mineral seam crossing the face
+	local mineral, quartz = hex("7FA3A0"), hex("B7C0C2")
+	return {
+		lay("Seam", V(3.2, 0.2, 0.08), 0, 0.2, mineral, Enum.Material.Slate, 28),
+		lay("Vein", V(1.6, 0.1, 0.1), 0.5, -0.1, quartz, Enum.Material.Slate, 28),
+	}
+end
+
+function builders.fossil_impression() -- stone: a faint spiral impression (flush, tone-on-tone)
+	local c = hex("8C939C")
+	local parts = {}
+	for i = 0, 9 do
+		local th = i * 0.75
+		local r = 0.1 * math.exp(0.2 * th)
+		parts[#parts + 1] = lay("Whorl" .. i, V(0.18 + r * 0.55, 0.11, 0.07), r * math.cos(th), r * math.sin(th), c, Enum.Material.Slate, math.deg(th) + 90)
+	end
+	return parts
+end
+
+function builders.worked_fragment() -- ruins: a broken, squared stone with a cut groove
+	local stone, groove = hex("CDBB92"), hex("8C7650")
+	return {
+		lay("Block", V(1.0, 0.7, 0.14), -0.1, 0.1, stone, Enum.Material.Limestone, 10),
+		lay("Groove", V(0.9, 0.09, 0.16), -0.1, 0.1, groove, Enum.Material.Limestone, 10),
+		lay("Chip", V(0.4, 0.3, 0.1), 0.55, -0.35, stone, Enum.Material.Limestone, -25),
+	}
+end
+
+function builders.carving() -- ruins: a shallow carved panel with a few glyph bars
+	local slab, glyph = hex("C2A265"), hex("7D6240")
+	local parts = { lay("Panel", V(1.9, 1.0, 0.1), 0, 0, slab, Enum.Material.Limestone, 0) }
+	for i = 1, 3 do
+		parts[#parts + 1] = lay("Glyph" .. i, V(i == 2 and 1.1 or 0.7, 0.1, 0.13), (i - 2) * 0.1, (i - 2) * 0.28, glyph, Enum.Material.Limestone, 0)
+	end
+	return parts
+end
+
+-- Tells (real rewards; colours match the treasure) -----------------------------------------------------------------------
+function builders.tell_coin()
+	local gold, rim = hex("B8964A"), hex("8F7330")
+	return {
+		Kit.cyl("CoinRim", "Z", 0.3, 1.0, V(0, 0, 0.11), rim, Enum.Material.Metal),
+		Kit.cyl("CoinFace", "Z", 0.34, 0.78, V(0, 0, 0.13), gold, Enum.Material.Metal),
+	}
+end
+
+function builders.tell_pottery()
+	local fire, band = hex("B5683F"), hex("E3D2B0")
+	return {
+		lay("PotA", V(1.1, 0.7, 0.3), -0.35, 0.15, fire, Enum.Material.SmoothPlastic, 15),
+		lay("PotB", V(0.7, 0.55, 0.28), 0.5, -0.2, fire, Enum.Material.SmoothPlastic, -30),
+		lay("PotBand", V(1.1, 0.12, 0.34), -0.35, 0.15, band, Enum.Material.SmoothPlastic, 15),
+	}
+end
+
+function builders.tell_fossil()
+	local bone = hex("D9CFB4")
+	local parts = {}
+	for i = 0, 9 do
+		local th = i * 0.75
+		local r = 0.1 * math.exp(0.2 * th)
+		parts[#parts + 1] = lay("Whorl" .. i, V(0.22 + r * 0.6, 0.15, 0.32), r * math.cos(th), r * math.sin(th), bone, Enum.Material.SmoothPlastic, math.deg(th) + 90)
+	end
+	return parts
+end
+
+function builders.tell_tablet()
+	local sand, glyph = P.Sandstone, hex("8C6B3E")
+	return {
+		lay("TabletEdge", V(1.5, 1.1, 0.3), 0, 0, sand, Enum.Material.Limestone, 8),
+		lay("TabletGlyph", V(0.9, 0.12, 0.34), 0, 0.1, glyph, Enum.Material.Limestone, 8),
+	}
+end
+
+MineDetailSpecs.Kinds = {}
+for kind in pairs(builders) do
+	table.insert(MineDetailSpecs.Kinds, kind)
+end
+table.sort(MineDetailSpecs.Kinds)
+
+function MineDetailSpecs.Has(kind: string): boolean
+	return builders[kind] ~= nil
+end
+
+-- Specs for one detail, turned by variant*90 degrees about the face normal so repeats do not look identical.
+function MineDetailSpecs.Build(kind: string, variant: number)
+	local list = builders[kind]()
+	if variant ~= 0 then
+		return Kit.Transform(list, 1, V(0, 0, 90 * variant))
+	end
+	return list
+end
+
+return MineDetailSpecs
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">MineStyle</string>
+          <string name="Source"><![CDATA[-- Pure, deterministic description of how the mine LOOKS and where small buried discoveries sit (no Roblox instances).
+-- Everything is a function of (cell, layer, seed), so every client/server agrees, regeneration with the same seed
+-- reproduces it exactly, and a new seed (mine refresh) gives a new arrangement. Tested in tests/mine_style_test.luau.
+--   * Cell(): colour + material per cell, built from PATCHES (blocky 3x2x3 regions) and wavy BANDS (strata), never
+--     per-cell noise. Each layer has a small palette.
+--   * Detail(): which small remnant (if any) a cell carries, and whether it is an ambient remnant or a "tell" of the
+--     cell's REAL loot. Reward tells only appear on cells that really hold that reward; ambient remnants never appear on
+--     loot cells and never use treasure colours.
+--   * Pockets(): a few compact discovery pockets (pottery cache in clay, fossil patch in stone, broken masonry in ruins).
+local Config = require(script.Parent.Config)
+
+local MineStyle = {}
+
+local MOD = 4294967296
+
+-- Exact 32-bit integer hash (all intermediate products stay below 2^53, so the result is identical everywhere).
+local function hash(x: number, y: number, z: number, seed: number, salt: number): number
+	local h = bit32.bxor((x * 73856093) % MOD, (y * 19349663) % MOD, (z * 83492791) % MOD, (seed * 2654435) % MOD, (salt * 40503) % MOD)
+	h = (h * 1664525 + 1013904223) % MOD
+	h = bit32.bxor(h, bit32.rshift(h, 15))
+	h = (h * 1664525 + 1013904223) % MOD
+	h = bit32.bxor(h, bit32.rshift(h, 13))
+	h = (h * 1664525 + 1013904223) % MOD
+	return h / MOD
+end
+MineStyle.Hash = hash
+
+-- Palettes ---------------------------------------------------------------------------------------------------------
+-- Colours are hex strings; materials are Enum.Material member names (converted by the caller).
+local PALETTE = {
+	Soil = { Material = "Ground", Base = { "9A623A", "93603A" }, Dark = "82522F", Light = "A9714A" },
+	Clay = { Material = "Sandstone", Base = { "C97846", "C27244" }, Band = { "B5683F", "D08550", "BE6F43" }, Lens = "D9A06A" },
+	Stone = { Material = "Slate", Base = { "68717C", "646D78" }, Dark = "59626D", Light = "77818C", Seam = { "6F9A9B", "A9B4B8" } },
+	Ruins = { Material = "Limestone", Base = { "D8B678", "D2B073" }, Course = "C7A667", Patch = "BE9E63", Carved = "A98A55" },
+}
+local POCKET_STYLE = { -- tinted regions that mark a discovery pocket as it is uncovered (subtle, same family as the layer)
+	Cache = { Hex = "9A4E2E", Alt = "B5683F", Material = "Sandstone" },
+	Fossil = { Hex = "8A8F96", Alt = "A39F92", Material = "Slate" },
+	Masonry = { Hex = "CDBB92", Alt = "B09A6E", Material = "Limestone" },
+}
+MineStyle.POCKET_LAYER = { Cache = "Clay", Fossil = "Stone", Masonry = "Ruins" }
+
+local function pick(list, h: number)
+	return list[math.min(#list, math.floor(h * #list) + 1)]
+end
+
+-- Wavy strata index: rows in the same band share a tone, and the band edge ripples gently across x/z.
+local function band(x: number, y: number, z: number, thickness: number, seed: number): number
+	local warp = math.sin(x * 0.55 + seed * 0.1) * 0.7 + math.cos(z * 0.45 + seed * 0.3) * 0.7
+	return math.floor((y + warp) / thickness)
+end
+
+-- Appearance of one cell. Returns { Hex, Material, Tone }.
+function MineStyle.Cell(x: number, y: number, z: number, layerId: string, seed: number, pocketKind: string?)
+	local pal = PALETTE[layerId] or PALETTE.Soil
+	local patch = hash(x // 3, y // 2, z // 3, seed, 1) -- one value per 3x2x3 region: patches, not noise
+	if pocketKind then
+		local ps = POCKET_STYLE[pocketKind]
+		if ps then
+			local alt = (x + z + y) % 2 == 0
+			return { Hex = alt and ps.Hex or ps.Alt, Material = ps.Material, Tone = "pocket" }
+		end
+	end
+	if layerId == "Soil" then
+		local hex = pick(pal.Base, hash(x, y, z, seed, 2))
+		local tone = "base"
+		if patch < 0.22 then hex, tone = pal.Dark, "patch" elseif patch > 0.84 then hex, tone = pal.Light, "patch" end
+		return { Hex = hex, Material = pal.Material, Tone = tone }
+	elseif layerId == "Clay" then
+		local b = band(x, y, z, 1, seed)
+		local hex, tone = pick(pal.Band, hash(b, 0, 0, seed, 3)), "band"
+		if patch > 0.9 then hex, tone = pal.Lens, "patch" end
+		return { Hex = hex, Material = pal.Material, Tone = tone }
+	elseif layerId == "Stone" then
+		local hex, tone = pick(pal.Base, hash(x, y, z, seed, 4)), "base"
+		if patch < 0.2 then hex, tone = pal.Dark, "patch" elseif patch > 0.86 then hex, tone = pal.Light, "patch" end
+		-- restrained mineral seams: thin diagonal planes, only on some cells of the plane
+		local plane = (x * 2 + z * 3 + y * 5 + seed) % 19
+		if plane == 0 and hash(x, y, z, seed, 5) < 0.55 then
+			hex, tone = pick(pal.Seam, hash(x, y, z, seed, 6)), "seam"
+		end
+		return { Hex = hex, Material = pal.Material, Tone = tone }
+	else -- Ruins: courses of worked stone (alternate rows), a few weathered patches and rare carved blocks
+		local hex, tone = pick(pal.Base, hash(x, y, z, seed, 7)), "base"
+		if (y + (x // 2)) % 2 == 1 then hex, tone = pal.Course, "course" end
+		if patch < 0.16 then hex, tone = pal.Patch, "patch" end
+		if hash(x, y, z, seed, 8) < 0.04 then hex, tone = pal.Carved, "carved" end
+		return { Hex = hex, Material = pal.Material, Tone = tone }
+	end
+end
+
+-- Details -----------------------------------------------------------------------------------------------------------
+MineStyle.AMBIENT = { -- remnants by layer (exactly the set asked for: roots/stones in soil, pottery in clay, seams + fossil
+	Soil = { "roots", "pebbles" }, -- impressions in stone, worked fragments + carvings in the ruins)
+	Clay = { "sherds" },
+	Stone = { "seam", "fossil_impression" },
+	Ruins = { "worked_fragment", "carving" },
+}
+MineStyle.POCKET_AMBIENT = { Cache = "sherds", Fossil = "fossil_impression", Masonry = "worked_fragment" }
+-- Rewards whose real cell shows a tell when its face is exposed. The tell IS the reward (same treasure id).
+MineStyle.TELLS = { old_coin = "tell_coin", pottery_shard = "tell_pottery", fossil_fragment = "tell_fossil", ruin_tablet = "tell_tablet" }
+
+-- Returns nil or { Kind, Variant (0-3), FaceRot (0-5), Tell (bool), Loot (treasure id for tells) }.
+function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed: number, lootId: string?, pocketKind: string?)
+	local variant = math.floor(hash(x, y, z, seed, 14) * 4)
+	local faceRot = math.floor(hash(x, y, z, seed, 15) * 6)
+	if lootId then
+		local tell = MineStyle.TELLS[lootId]
+		local chance = pocketKind and 0.9 or Config.Mine.TellChance
+		if tell and hash(x, y, z, seed, 12) < chance then
+			return { Kind = tell, Variant = variant, FaceRot = faceRot, Tell = true, Loot = lootId }
+		end
+		return nil -- loot cells never carry ambient remnants: a remnant must never promise a reward that is not there
+	end
+	if pocketKind then
+		if hash(x, y, z, seed, 16) < Config.Mine.PocketChance then
+			return { Kind = MineStyle.POCKET_AMBIENT[pocketKind], Variant = variant, FaceRot = faceRot, Tell = false }
+		end
+		return nil
+	end
+	if hash(x, y, z, seed, 11) >= (Config.Mine.AmbientChance[layerId] or 0) then
+		return nil
+	end
+	local kinds = MineStyle.AMBIENT[layerId]
+	if not kinds then
+		return nil
+	end
+	return { Kind = pick(kinds, hash(x, y, z, seed, 13)), Variant = variant, FaceRot = faceRot, Tell = false }
+end
+
+-- Pockets -----------------------------------------------------------------------------------------------------------
+local function layerRows(layerId: string): (number, number)
+	local from, to = 0, Config.Site.Depth - 1
+	for i, l in ipairs(Config.Layers) do
+		if l.Id == layerId then
+			from = l.FromCell
+			to = (Config.Layers[i + 1] and Config.Layers[i + 1].FromCell or Config.Site.Depth) - 1
+		end
+	end
+	return from, to
+end
+
+-- Pocket shapes: { dx, dy, dz, loot? }. Compact (at most 3x2x3) and fully inside the grid by construction.
+local SHAPES = {
+	Cache = { { 0, 0, 0, "clay_figurine" }, { 1, 0, 0, "pottery_shard" }, { -1, 0, 0, "pottery_shard" }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, 1, 0 } },
+	Fossil = { { -1, 0, -1 }, { 0, 0, -1, "fossil_fragment" }, { 1, 0, -1 }, { -1, 0, 0 }, { 0, 0, 0 }, { 1, 0, 0, "fossil_fragment" },
+		{ -1, 0, 1 }, { 0, 0, 1 }, { 1, 0, 1 } },
+	Masonry = { { 0, 0, 0, "ruin_tablet" }, { 1, 0, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 0 }, { 1, 1, 0 }, { 0, 1, 1 }, { 1, 1, 1 } },
+}
+MineStyle.POCKET_ORDER = { "Cache", "Fossil", "Masonry" }
+
+-- Returns a list of { Kind, Layer, Cells = { { x, y, z, Loot? } } }, deterministic in `seed`, non-overlapping.
+function MineStyle.Pockets(seed: number)
+	local out, used = {}, {}
+	local S = Config.Site
+	for _, kind in ipairs(MineStyle.POCKET_ORDER) do
+		local layerId = MineStyle.POCKET_LAYER[kind]
+		local r0, r1 = layerRows(layerId)
+		for n = 1, Config.Mine.Pockets[kind] or 0 do
+			for attempt = 1, 12 do
+				local cx = 2 + math.floor(hash(n, attempt, 1, seed, 100 + #kind) * (S.SizeX - 4))
+				local cz = 2 + math.floor(hash(n, attempt, 2, seed, 100 + #kind) * (S.SizeZ - 4))
+				local cy = r0 + 1 + math.floor(hash(n, attempt, 3, seed, 100 + #kind) * math.max(r1 - r0 - 2, 1))
+				local cells, ok = {}, true
+				for _, o in ipairs(SHAPES[kind]) do
+					local x, y, z = cx + o[1], cy + o[2], cz + o[3]
+					local key = (y * S.SizeZ + z) * S.SizeX + x
+					if x < 1 or x > S.SizeX - 2 or z < 1 or z > S.SizeZ - 2 or y < r0 or y > r1 or used[key] then
+						ok = false
+						break
+					end
+					table.insert(cells, { x, y, z, o[4], key })
+				end
+				if ok then
+					for _, c in ipairs(cells) do
+						used[c[5]] = true
+						c[5] = nil
+					end
+					table.insert(out, { Kind = kind, Layer = layerId, Cells = cells })
+					break
+				end
+			end
+		end
+	end
+	return out
+end
+
+return MineStyle
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">ModelKit</string>
           <string name="Source"><![CDATA[-- Tiny parts-only modelling kit for the "chunky dig-site" look. A model is a list of part specs positioned
@@ -1064,7 +1478,7 @@ return Kit
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">PackModels</string>
           <string name="Source"><![CDATA[-- Chunky backpack models for the shop (same Kit/palette as tools and artifacts). Five packs, each visibly bigger and
@@ -1167,7 +1581,7 @@ return PackModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">Remotes</string>
           <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
@@ -1194,6 +1608,7 @@ local EVENTS = {
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)
 	"GuideDone", -- C->S  (hintId) the player finished/dismissed a first-time hint
+	"GuideControl", -- C->S  ("skip" | "restart") skip the tutorial for good / restart it from the beginning
 	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
 	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
 	"MineShift", -- S->C  (phase, secondsOrNil) mine refresh warning / deferral / done
@@ -1223,7 +1638,7 @@ return Remotes
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="14">
         <Properties>
           <string name="Name">SettingsSpec</string>
           <string name="Source"><![CDATA[-- Player settings: one definition used by the client (UI + clamping) and the server (validation before saving).
@@ -1286,7 +1701,7 @@ return SettingsSpec
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="13">
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">ShiftSpec</string>
           <string name="Source"><![CDATA[-- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/collection_test.luau.
@@ -1307,7 +1722,7 @@ return ShiftSpec
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="14">
+      <Item class="ModuleScript" referent="16">
         <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
@@ -1671,13 +2086,19 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="15">
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">TreasureModels</string>
-          <string name="Source"><![CDATA[-- Polished chunky models for notable artifacts. Treasures without a Model id keep the generic coin/ring/gem/block
--- placeholder built by EffectsController. All models are ~2-2.8 studs across so reveal animations need no changes.
+          <string name="Source"><![CDATA[-- Artifact models. ONE source of truth: these part specs drive the discovery reveal, the carried artifact (world and
+-- first-person), the world pickup, the journal preview and the camp shelf. Only the scale (and, for displays, a gentle
+-- tilt) differs per use. See docs/ARTIFACT_MODELS.md for the per-artifact brief.
+--
+-- Style: chunky, hand-made archaeological objects built from deliberate shapes (arcs of tapered segments, stacked
+-- courses, layered rims), muted materials and restrained wear. Nothing relies on glow: no Neon anywhere, gems are glass.
+-- Rarity is shown by the reveal outline/light colour, never by the material.
+-- Frame of every model: +Y up, front faces +Z, origin near the centre, roughly 2-3 studs across.
+-- Mesh-dependent parts (none shipped): see the MESH NOTES in docs/ARTIFACT_MODELS.md.
 local Kit = require(script.Parent.ModelKit)
-local Config = require(script.Parent.Config)
 
 local TreasureModels = {}
 
@@ -1685,43 +2106,178 @@ local V = Vector3.new
 local function hex(s: string): Color3
 	return Color3.fromHex(s)
 end
-local P = Config.Palette
-local GOLD, GOLD_DARK = P.Gold, hex("C98A1E")
-local TEAL = P.Teal
+local SP, GL = Enum.Material.SmoothPlastic, Enum.Material.Glass
+
+-- Muted archaeological palette
+local TERRA, TERRA_DARK, TERRA_LIGHT, CLAY_DEEP = hex("B5683F"), hex("8E4F30"), hex("C98A5E"), hex("5B3A26")
+local PAINT, CREAM = hex("7A3322"), hex("E3D2B0")
+local BRONZE, BRONZE_DARK, BRONZE_LIGHT, PATINA = hex("A9744A"), hex("7D5232"), hex("BC8858"), hex("5E8374")
+local GOLD, GOLD_DARK = hex("C9A24B"), hex("9A7A32")
+local BONE, BONE_DARK = hex("D8CDB0"), hex("B9A57E")
+local SLATE, SLATE_DARK, SLATE_LIGHT = hex("6E7580"), hex("565D68"), hex("7B838E")
+local SAND, SAND_DARK, CARVE = hex("C9AE7C"), hex("A98E5E"), hex("7D6240")
+local LAPIS, TEAL = hex("3A72AE"), hex("3F8F88")
 
 local builders = {}
 
--- Epic. Golden scarab: stretched-sphere shell with a split wing line, six chunky legs, teal eyes and a teal sun gem.
-function builders.scarab()
+-- Helpers ------------------------------------------------------------------------------------------------------------
+-- A block whose X axis runs along the tangent of a circle at angle `deg` (0 = +X, 90 = +Y), centred on the arc.
+local function arcBlock(name: string, cx: number, cy: number, radius: number, deg: number, size: Vector3, z: number, color: Color3, mat: Enum.Material?)
+	local a = math.rad(deg)
+	return Kit.block(name, size, V(cx + radius * math.cos(a), cy + radius * math.sin(a), z), color, mat or SP, V(0, 0, deg + 90))
+end
+
+local function withTransparency(spec, t: number)
+	spec.Transparency = t
+	return spec
+end
+
+-- 1. Old coin (Common): thin, round, defined rim, raised sun emblem on the front. -------------------------------------
+function builders.coin()
 	local parts = {
-		Kit.ellipsoid("Shell", V(2.2, 1.3, 2.8), V(0, 0, 0.1), GOLD, Enum.Material.SmoothPlastic),
-		Kit.ellipsoid("Head", V(1.3, 0.8, 0.95), V(0, -0.05, -1.6), GOLD_DARK),
-		Kit.block("WingSplit", V(0.12, 0.14, 2.2), V(0, 0.64, 0.25), GOLD_DARK),
-		Kit.ball("SunGem", 0.6, V(0, 0.62, -0.55), TEAL, Enum.Material.Neon),
-		Kit.ball("EyeL", 0.3, V(-0.36, 0.08, -2.0), TEAL, Enum.Material.Neon),
-		Kit.ball("EyeR", 0.3, V(0.36, 0.08, -2.0), TEAL, Enum.Material.Neon),
+		Kit.cyl("Rim", "Z", 0.26, 2.3, V(0, 0, 0), GOLD_DARK, Enum.Material.Metal),
+		Kit.cyl("Face", "Z", 0.3, 1.9, V(0, 0, 0.02), GOLD, Enum.Material.Metal),
+		Kit.cyl("EmblemDisc", "Z", 0.38, 0.62, V(0, 0, 0.04), GOLD_DARK, Enum.Material.Metal),
 	}
-	for i, z in ipairs({ -0.7, 0.25, 1.15 }) do
-		for _, side in ipairs({ -1, 1 }) do
-			table.insert(parts, Kit.block(("Leg%d_%d"):format(i, side), V(0.9, 0.28, 0.34),
-				V(side * 1.35, -0.45, z), GOLD_DARK, Enum.Material.SmoothPlastic, V(0, side * (20 - i * 12), side * -12)))
-		end
+	for i = 0, 3 do -- four rays through the centre = an eight-point sunburst
+		table.insert(parts, Kit.block("Ray" .. i, V(1.45, 0.13, 0.38), V(0, 0, 0.04), GOLD_DARK, Enum.Material.Metal, V(0, 0, i * 45)))
 	end
 	return parts
 end
 
--- Rare. Cut gemstone: stepped brilliant-cut (crown, table, pavilion, culet), turned 45 degrees so it reads as a
--- diamond from any side.
+-- 2. Bronze ring (Uncommon): an open circular band built from 12 chunky segments, thickened at the top with a raised
+-- diamond, bronze with patina on a few segments. The centre is open (see tests). -----------------------------------------
+function builders.ring()
+	local parts = {}
+	local R = 0.95
+	for i = 0, 11 do
+		local deg = i * 30
+		if deg ~= 90 then -- the top is the bezel
+			local color = (i % 4 == 1) and BRONZE_DARK or BRONZE
+			if i == 4 or i == 9 then color = PATINA end
+			table.insert(parts, arcBlock("Band" .. i, 0, 0, R, deg, V(0.64, 0.34, 0.5), 0, color, Enum.Material.Metal))
+		end
+	end
+	table.insert(parts, Kit.block("Bezel", V(0.95, 0.66, 0.62), V(0, R + 0.02, 0), BRONZE_LIGHT, Enum.Material.Metal))
+	table.insert(parts, Kit.block("Emblem", V(0.4, 0.4, 0.14), V(0, R + 0.02, 0.34), BRONZE_DARK, Enum.Material.Metal, V(0, 0, 45)))
+	table.insert(parts, Kit.block("EmblemCut", V(0.14, 0.14, 0.17), V(0, R + 0.02, 0.36), PATINA, Enum.Material.Metal, V(0, 0, 45)))
+	return parts
+end
+
+-- 3. Clay figurine (Uncommon): hand-modelled terracotta figure on a base. ---------------------------------------------
+function builders.figurine()
+	return {
+		Kit.block("Base", V(1.55, 0.3, 1.15), V(0, -1.5, 0), CLAY_DEEP),
+		Kit.block("LowerTorso", V(1.1, 0.85, 0.72), V(0, -0.85, 0), TERRA),
+		Kit.block("Belt", V(0.98, 0.1, 0.66), V(0, -0.38, 0.02), TERRA_DARK),
+		Kit.block("UpperTorso", V(0.88, 0.75, 0.62), V(0, -0.0, 0), TERRA),
+		Kit.block("Shoulders", V(1.18, 0.26, 0.58), V(0, 0.38, 0), TERRA_DARK),
+		Kit.cyl("Neck", "Y", 0.32, 0.36, V(0, 0.68, 0), TERRA),
+		Kit.ellipsoid("Head", V(0.86, 1.0, 0.82), V(0, 1.2, 0), TERRA_LIGHT),
+		Kit.block("Nose", V(0.14, 0.3, 0.2), V(0, 1.12, 0.43), TERRA_LIGHT),
+		Kit.block("Brow", V(0.62, 0.07, 0.1), V(0, 1.4, 0.38), TERRA_DARK),
+		Kit.block("EyeL", V(0.15, 0.06, 0.05), V(-0.2, 1.28, 0.4), CLAY_DEEP),
+		Kit.block("EyeR", V(0.15, 0.06, 0.05), V(0.2, 1.28, 0.4), CLAY_DEEP),
+		Kit.block("Mouth", V(0.3, 0.05, 0.05), V(0, 0.88, 0.4), CLAY_DEEP),
+		-- distinct arms: the left hangs, the right is bent up toward the chest
+		Kit.block("ArmL", V(0.28, 0.9, 0.3), V(-0.78, -0.05, 0.02), TERRA, SP, V(0, 0, 6)),
+		Kit.ball("HandL", 0.3, V(-0.84, -0.55, 0.02), TERRA),
+		Kit.block("UpperArmR", V(0.28, 0.55, 0.3), V(0.8, 0.12, 0.02), TERRA, SP, V(0, 0, -10)),
+		Kit.block("ForearmR", V(0.26, 0.55, 0.28), V(0.66, -0.22, 0.2), TERRA, SP, V(0, 0, 55)),
+		Kit.ball("HandR", 0.28, V(0.4, -0.3, 0.32), TERRA),
+		-- wear: one chipped corner on the base, showing the paler fired clay beneath
+		Kit.block("Chip", V(0.38, 0.22, 0.3), V(-0.62, -1.44, 0.42), TERRA_LIGHT, SP, V(0, 0, 20)),
+		Kit.block("IncisedBelt", V(0.8, 0.04, 0.04), V(0, -0.62, 0.37), CLAY_DEEP),
+	}
+end
+
+-- 4. Fossil fragment (Uncommon): a broken slab of cool rock with an ammonite spiral standing out of its face. ------------
+function builders.fossil()
+	local parts = {
+		Kit.block("Slab", V(2.5, 2.0, 0.6), V(0, 0, -0.1), SLATE, Enum.Material.Slate),
+		Kit.block("ChunkTop", V(1.3, 0.85, 0.55), V(-0.75, 0.98, -0.08), SLATE_LIGHT, Enum.Material.Slate, V(0, 0, 9)),
+		Kit.block("ChunkRight", V(0.9, 1.3, 0.52), V(1.18, -0.3, -0.1), SLATE_DARK, Enum.Material.Slate, V(0, 0, -11)),
+		Kit.block("ChipA", V(0.5, 0.35, 0.5), V(-1.15, -0.85, -0.05), SLATE_DARK, Enum.Material.Slate, V(0, 0, 32)),
+		Kit.block("ChipB", V(0.4, 0.3, 0.5), V(0.5, -1.05, -0.05), SLATE_LIGHT, Enum.Material.Slate, V(0, 0, -20)),
+	}
+	-- the ammonite: a logarithmic spiral of tapered shell segments with a rib across each one
+	local cx, cy = -0.1, 0.05
+	for i = 0, 11 do
+		local th = i * 0.9
+		local r = 0.12 * math.exp(0.2 * th)
+		local w = 0.12 + 0.34 * r
+		local deg = math.deg(th)
+		local px, py = cx + r * math.cos(th), cy + r * math.sin(th)
+		table.insert(parts, Kit.block("Shell" .. i, V(r * 0.95 + 0.14, w, 0.2), V(px, py, 0.28), BONE, SP, V(0, 0, deg + 90)))
+		table.insert(parts, Kit.block("Rib" .. i, V(0.06, w * 0.9, 0.24), V(px, py, 0.29), BONE_DARK, SP, V(0, 0, deg + 90 + 90)))
+	end
+	return parts
+end
+
+-- 5. Ancient necklace (Rare): a beaded and linked loop with a pendant in a shaped gold setting, on a small neutral stand. -
+function builders.necklace()
+	local parts = {
+		Kit.cyl("StandBase", "Y", 0.16, 1.6, V(0, -2.0, -0.2), SLATE_DARK, Enum.Material.Slate),
+		Kit.cyl("StandColumn", "Y", 1.0, 0.5, V(0, -1.4, -0.2), SLATE, Enum.Material.Slate),
+		Kit.ellipsoid("Bust", V(1.9, 2.1, 0.55), V(0, 0.2, -0.3), hex("8A7F70"), Enum.Material.Fabric),
+	}
+	local R, cy, z = 1.0, 0.35, 0.2
+	local n = 0
+	for deg = 195, 525, 22 do -- sweep over the top, leaving the bottom open for the pendant
+		n += 1
+		local a = math.rad(deg)
+		local x, y = R * math.cos(a), cy + R * math.sin(a)
+		table.insert(parts, Kit.ball("Bead" .. n, 0.4, V(x, y, z), (n % 3 == 0) and GOLD_DARK or GOLD, Enum.Material.Metal))
+		local m = math.rad(deg + 11)
+		table.insert(parts, Kit.block("Link" .. n, V(0.32, 0.12, 0.12), V(R * math.cos(m), cy + R * math.sin(m), z), GOLD_DARK, Enum.Material.Metal, V(0, 0, deg + 11 + 90)))
+	end
+	-- drop links from both chain ends to the pendant
+	table.insert(parts, Kit.block("DropL", V(0.14, 0.5, 0.14), V(-0.62, -0.62, z), GOLD_DARK, Enum.Material.Metal, V(0, 0, -30)))
+	table.insert(parts, Kit.block("DropR", V(0.14, 0.5, 0.14), V(0.62, -0.62, z), GOLD_DARK, Enum.Material.Metal, V(0, 0, 30)))
+	table.insert(parts, Kit.block("Bail", V(0.5, 0.2, 0.2), V(0, -0.82, z), GOLD, Enum.Material.Metal))
+	table.insert(parts, Kit.block("Setting", V(0.95, 0.95, 0.24), V(0, -1.3, z), GOLD, Enum.Material.Metal, V(0, 0, 45)))
+	table.insert(parts, Kit.block("SettingRim", V(0.72, 0.72, 0.3), V(0, -1.3, z), GOLD_DARK, Enum.Material.Metal, V(0, 0, 45)))
+	table.insert(parts, withTransparency(Kit.block("InsetStone", V(0.5, 0.5, 0.34), V(0, -1.3, z), LAPIS, GL, V(0, 0, 45)), 0.1))
+	return parts
+end
+
+-- 6. Pottery shard (Common): a curved piece of vessel wall with visible thickness, different inside and outside, a painted
+-- band and dots, with uneven, deliberately broken edges. ----------------------------------------------------------------
+function builders.shard()
+	local parts = {}
+	local R = 1.6
+	local heights = { 0.9, 1.3, 1.1, 1.7, 1.4, 1.9, 1.2, 1.0, 0.7 } -- uneven, broken top edge
+	local n = #heights
+	for i, h in ipairs(heights) do
+		local phi = -56 + (i - 1) * 14
+		local a = math.rad(phi)
+		local x, z = R * math.sin(a), R * math.cos(a) - R
+		local tilt = (i == 1 or i == n) and 9 or 0 -- the two end pieces are cut at a slant
+		table.insert(parts, Kit.block("Outer" .. i, V(0.5, h, 0.2), V(x + math.sin(a) * 0.07, 0, z + math.cos(a) * 0.07), TERRA, SP, V(0, phi, tilt)))
+		table.insert(parts, Kit.block("Inner" .. i, V(0.5, h * 0.97, 0.14), V(x - math.sin(a) * 0.1, -0.01, z - math.cos(a) * 0.1), CLAY_DEEP, SP, V(0, phi, tilt)))
+	end
+	-- painted band + dots on the outer face
+	for i = 2, n - 1 do
+		local phi = -56 + (i - 1) * 14
+		local a = math.rad(phi)
+		local x, z = (R + 0.2) * math.sin(a), (R + 0.2) * math.cos(a) - R
+		table.insert(parts, Kit.block("Band" .. i, V(0.5, 0.17, 0.07), V(x, 0.18, z), PAINT, SP, V(0, phi, 0)))
+		table.insert(parts, Kit.block("Dot" .. i, V(0.12, 0.12, 0.08), V(x, -0.22, z), CREAM, SP, V(0, phi, 0)))
+	end
+	return parts
+end
+
+-- 7. Cut gemstone (Rare): a stepped brilliant-cut in glass (no glow). -----------------------------------------------------
 function builders.gem()
-	local crown, mid, deep = hex("7FE3FF"), hex("4DD2FF"), hex("2AA3D6")
+	local crown, mid, deep, tbl = hex("7FBBD2"), hex("5FA3BF"), hex("3F7E99"), hex("B7DCE8")
 	local function layer(name: string, size: number, h: number, y: number, color: Color3)
-		return Kit.block(name, V(size, h, size), V(0, y, 0), color, Enum.Material.Neon, V(0, 45, 0))
+		return Kit.block(name, V(size, h, size), V(0, y, 0), color, GL, V(0, 45, 0))
 	end
 	return {
 		layer("Girdle", 1.9, 0.25, 0, mid),
 		layer("Crown1", 1.55, 0.3, 0.27, crown),
 		layer("Crown2", 1.1, 0.3, 0.55, crown),
-		layer("Table", 0.65, 0.2, 0.78, hex("D9F6FF")),
+		layer("Table", 0.65, 0.2, 0.78, tbl),
 		layer("Pav1", 1.55, 0.3, -0.27, mid),
 		layer("Pav2", 1.1, 0.3, -0.55, deep),
 		layer("Pav3", 0.7, 0.3, -0.83, deep),
@@ -1729,122 +2285,107 @@ function builders.gem()
 	}
 end
 
--- Rare. Ancient necklace: gold bead loop with a teal pendant in a gold frame. Faces +/-Z.
-function builders.necklace()
-	local parts = {}
-	local r = 1.05
-	local n = 0
-	for deg = 0, 360, 24 do
-		-- phi measured from the top going round; leave a gap at the bottom for the pendant
-		if deg <= 148 or deg >= 212 then
-			n += 1
-			local phi = math.rad(deg)
-			local accent = (n % 3 == 0)
-			table.insert(parts, Kit.ball("Bead" .. n, accent and 0.5 or 0.4, V(math.sin(phi) * r, math.cos(phi) * r, 0),
-				accent and GOLD_DARK or GOLD))
-		end
-	end
-	table.insert(parts, Kit.block("Frame", V(0.95, 0.95, 0.3), V(0, -1.3, 0), GOLD, Enum.Material.SmoothPlastic, V(0, 0, 45)))
-	table.insert(parts, Kit.block("PendantGem", V(0.6, 0.6, 0.36), V(0, -1.3, 0), TEAL, Enum.Material.Neon, V(0, 0, 45)))
-	table.insert(parts, Kit.ball("Hook", 0.36, V(0, 1.2, 0), GOLD_DARK))
-	return parts
-end
-
--- Epic. Fossil claw: three tapering, curving segments in bone colour with a dark tip, on a small stone base.
-function builders.claw()
-	local BONE, BONE_DARK = P.Cream, hex("B9A57E")
-	return {
-		Kit.block("Base", V(1.9, 0.4, 1.3), V(0, -1.15, 0), hex("8A8F96"), Enum.Material.Slate),
-		Kit.block("Seg1", V(0.9, 1.1, 0.8), V(-0.15, -0.45, 0), BONE, Enum.Material.SmoothPlastic, V(0, 0, 8)),
-		Kit.block("Seg2", V(0.72, 1.0, 0.64), V(0.2, 0.45, 0), BONE, Enum.Material.SmoothPlastic, V(0, 0, -14)),
-		Kit.block("Seg3", V(0.52, 0.9, 0.46), V(0.75, 1.2, 0), BONE_DARK, Enum.Material.SmoothPlastic, V(0, 0, -38)),
-		Kit.block("Tip", V(0.3, 0.55, 0.3), V(1.3, 1.6, 0), hex("5A4A33"), Enum.Material.SmoothPlastic, V(0, 0, -58)),
-	}
-end
-
--- Rare. Ruin tablet: a slab of sandstone with carved glyph rows and a chipped corner. Faces +/-Z.
+-- 8. Ruin tablet (Rare): a slab of worked sandstone with a border, four rows of carved glyphs, a chipped corner and a crack. -
 function builders.tablet()
-	local SAND, CARVE = P.Sandstone, hex("8C6B3E")
 	local parts = {
 		Kit.block("Slab", V(2.0, 2.6, 0.5), V(0, 0, 0), SAND, Enum.Material.Sandstone),
-		Kit.block("Chip", V(0.7, 0.7, 0.52), V(0.85, 1.2, 0), hex("2B2F36"), Enum.Material.SmoothPlastic, V(0, 0, 45)),
+		Kit.block("BorderTop", V(1.7, 0.1, 0.56), V(0, 1.12, 0), SAND_DARK, Enum.Material.Sandstone),
+		Kit.block("BorderBottom", V(1.7, 0.1, 0.56), V(0, -1.12, 0), SAND_DARK, Enum.Material.Sandstone),
+		Kit.block("BorderL", V(0.1, 2.34, 0.56), V(-0.85, 0, 0), SAND_DARK, Enum.Material.Sandstone),
+		Kit.block("BorderR", V(0.1, 2.34, 0.56), V(0.85, 0, 0), SAND_DARK, Enum.Material.Sandstone),
+		Kit.block("Chip", V(0.7, 0.7, 0.54), V(0.92, 1.2, 0), SLATE_DARK, Enum.Material.Slate, V(0, 0, 45)),
+		Kit.block("Crack", V(0.07, 0.9, 0.56), V(-0.3, -0.45, 0), CARVE, SP, V(0, 0, 14)),
 	}
-	for i = 1, 4 do
-		table.insert(parts, Kit.block("Glyph" .. i, V(i % 2 == 0 and 1.3 or 1.0, 0.18, 0.54), V(-0.1, 0.95 - i * 0.45, 0), CARVE))
+	for row = 1, 4 do
+		for col = 1, 3 do
+			local wide = (row + col) % 2 == 0
+			table.insert(parts, Kit.block(("Glyph%d_%d"):format(row, col), V(wide and 0.36 or 0.2, 0.2, 0.58), V((col - 2) * 0.48, 0.85 - (row - 1) * 0.5, 0), CARVE, SP))
+		end
 	end
 	return parts
 end
 
--- Legendary. Sun pharaoh mask: a gold headdress with teal stripes, eyes, a nose bridge and a beard. Faces +Z.
-function builders.mask()
-	local STRIPE = hex("2D6FB5")
-	return {
-		Kit.block("Face", V(1.7, 2.2, 0.8), V(0, 0, 0), GOLD, Enum.Material.SmoothPlastic),
-		Kit.block("HeadCloth", V(2.5, 1.0, 1.1), V(0, 1.2, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
-		Kit.block("SideL", V(0.55, 2.4, 0.9), V(-1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
-		Kit.block("SideR", V(0.55, 2.4, 0.9), V(1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
-		Kit.block("StripeL", V(0.2, 2.0, 0.92), V(-1.4, -0.1, -0.1), STRIPE, Enum.Material.SmoothPlastic),
-		Kit.block("StripeR", V(0.2, 2.0, 0.92), V(1.4, -0.1, -0.1), STRIPE, Enum.Material.SmoothPlastic),
-		Kit.block("Brow", V(1.5, 0.22, 0.2), V(0, 0.45, 0.42), STRIPE, Enum.Material.SmoothPlastic),
-		Kit.block("EyeL", V(0.45, 0.28, 0.2), V(-0.42, 0.2, 0.42), TEAL, Enum.Material.Neon),
-		Kit.block("EyeR", V(0.45, 0.28, 0.2), V(0.42, 0.2, 0.42), TEAL, Enum.Material.Neon),
-		Kit.block("Nose", V(0.3, 0.8, 0.3), V(0, -0.2, 0.5), GOLD_DARK, Enum.Material.SmoothPlastic),
-		Kit.block("Mouth", V(0.7, 0.14, 0.2), V(0, -0.78, 0.42), GOLD_DARK, Enum.Material.SmoothPlastic),
-		Kit.block("Beard", V(0.5, 0.9, 0.4), V(0, -1.5, 0.2), STRIPE, Enum.Material.SmoothPlastic),
-		Kit.ball("CrownGem", 0.5, V(0, 1.55, 0.45), TEAL, Enum.Material.Neon),
+-- 9. Fossil claw (Epic): a curved bone claw of six tapering segments with knuckle ridges and a dark tip, on a rock base. ----
+function builders.claw()
+	local parts = {
+		Kit.block("Base", V(2.3, 0.5, 1.3), V(0.2, -1.6, 0), SLATE, Enum.Material.Slate, V(0, 0, 3)),
+		Kit.block("BaseChip", V(0.7, 0.35, 0.9), V(-0.7, -1.38, 0.1), SLATE_LIGHT, Enum.Material.Slate, V(0, 0, 18)),
 	}
-end
-
--- Uncommon. Clay figurine: a squat body, round head and stubby arms on a base.
-function builders.figurine()
-	local CLAY = P.Sandstone
-	return {
-		Kit.block("Base", V(1.4, 0.3, 1.0), V(0, -1.1, 0), P.Clay),
-		Kit.block("Body", V(1.0, 1.4, 0.8), V(0, -0.2, 0), CLAY),
-		Kit.ball("Head", 0.95, V(0, 0.95, 0), CLAY),
-		Kit.block("ArmL", V(0.3, 0.9, 0.35), V(-0.7, -0.15, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, -12)),
-		Kit.block("ArmR", V(0.3, 0.9, 0.35), V(0.7, -0.15, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, 12)),
-		Kit.block("EyeL", V(0.14, 0.14, 0.1), V(-0.2, 1.0, 0.45), P.Dark),
-		Kit.block("EyeR", V(0.14, 0.14, 0.1), V(0.2, 1.0, 0.45), P.Dark),
-	}
-end
-
--- Common. Pottery shard: two curved-looking fragments with a painted band.
-function builders.shard()
-	local CLAY = P.Clay
-	return {
-		Kit.block("PieceA", V(1.6, 1.3, 0.35), V(-0.2, 0, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, 14)),
-		Kit.block("PieceB", V(1.0, 0.9, 0.35), V(0.9, -0.5, 0.1), P.Dirt, Enum.Material.SmoothPlastic, V(0, 0, -22)),
-		Kit.block("Band", V(1.4, 0.22, 0.38), V(-0.2, 0.15, 0), P.Cream, Enum.Material.SmoothPlastic, V(0, 0, 14)),
-	}
-end
-
--- Uncommon. Fossil fragment: a spiral shell built from stacked rings, in a rock chunk.
-function builders.fossil()
-	local BONE = P.Cream
-	return {
-		Kit.block("Rock", V(2.2, 1.9, 0.7), V(0, 0, -0.2), hex("8A8F96"), Enum.Material.Slate),
-		Kit.cyl("Whorl1", "Z", 0.35, 1.7, V(0, 0, 0.2), BONE),
-		Kit.cyl("Whorl2", "Z", 0.4, 1.15, V(0, 0, 0.25), P.Sandstone),
-		Kit.cyl("Whorl3", "Z", 0.45, 0.6, V(0, 0, 0.3), BONE),
-	}
-end
-
--- Generic stand-ins for treasures that do not have a polished model yet.
-local function genericSpecs(def)
-	local c = def.Color
-	if def.Shape == "Coin" then
-		return { Kit.cyl("Body", "X", 0.5, 2.4, V(0, 0, 0), c) }
-	elseif def.Shape == "Ring" then
-		return { Kit.cyl("Body", "X", 0.8, 2.4, V(0, 0, 0), c) }
-	elseif def.Shape == "Gem" then
-		return { Kit.block("Body", V(1.8, 1.8, 1.8), V(0, 0, 0), c, Enum.Material.Neon) }
+	local cx, cy, R = -1.0, -1.15, 2.25
+	for i = 0, 5 do
+		local deg = 6 + i * 14
+		local t = i / 5
+		local w = 1.0 - 0.78 * t -- radial width tapers
+		local d = 0.85 - 0.55 * t -- thickness tapers
+		local color = (i == 5) and hex("5A4A33") or ((i % 2 == 0) and BONE or BONE_DARK)
+		table.insert(parts, arcBlock("Seg" .. i, cx, cy, R, deg, V(0.78, w, d), 0, color))
+		if i < 5 then -- knuckle ridge at the joint
+			table.insert(parts, arcBlock("Ridge" .. i, cx, cy, R, deg + 7, V(0.1, w + 0.08, d + 0.08), 0, BONE_DARK))
+		end
 	end
-	return { Kit.block("Body", V(2.2, 1.6, 1.8), V(0, 0, 0), c) }
+	return parts
 end
 
--- Part specs (origin-centred) for a treasure id, polished or generic. `Defs` is passed in to avoid a require
--- cycle (Defs does not depend on this module, but callers already hold it).
+-- 10. Golden scarab (Epic): beetle with a ridged shell, head, six legs, aged gold with lapis eyes and a teal glass gem. ----
+function builders.scarab()
+	local parts = {
+		Kit.ellipsoid("Shell", V(2.2, 1.3, 2.8), V(0, 0, 0.1), GOLD, Enum.Material.Metal),
+		Kit.ellipsoid("Head", V(1.3, 0.8, 0.95), V(0, -0.05, -1.6), GOLD_DARK, Enum.Material.Metal),
+		Kit.block("WingSplit", V(0.12, 0.14, 2.2), V(0, 0.64, 0.25), GOLD_DARK, Enum.Material.Metal),
+		Kit.ball("SunGem", 0.6, V(0, 0.62, -0.55), TEAL, GL),
+		Kit.ball("EyeL", 0.3, V(-0.36, 0.08, -2.0), LAPIS, GL),
+		Kit.ball("EyeR", 0.3, V(0.36, 0.08, -2.0), LAPIS, GL),
+	}
+	for i, z in ipairs({ -0.7, 0.25, 1.15 }) do
+		for _, side in ipairs({ -1, 1 }) do
+			table.insert(parts, Kit.block(("Leg%d_%d"):format(i, side), V(0.9, 0.28, 0.34),
+				V(side * 1.35, -0.45, z), GOLD_DARK, Enum.Material.Metal, V(0, side * (20 - i * 12), side * -12)))
+		end
+	end
+	return parts
+end
+
+-- 11. Sun pharaoh mask (Legendary): aged-gold funerary mask with a striped lapis headdress, inlaid eyes, nose, beard. ------
+function builders.mask()
+	return {
+		Kit.block("Face", V(1.7, 2.2, 0.8), V(0, 0, 0), GOLD, Enum.Material.Metal),
+		Kit.block("HeadCloth", V(2.5, 1.0, 1.1), V(0, 1.2, -0.1), GOLD_DARK, Enum.Material.Metal),
+		Kit.block("SideL", V(0.55, 2.4, 0.9), V(-1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.Metal),
+		Kit.block("SideR", V(0.55, 2.4, 0.9), V(1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.Metal),
+		Kit.block("StripeL", V(0.2, 2.0, 0.92), V(-1.4, -0.1, -0.1), LAPIS, SP),
+		Kit.block("StripeR", V(0.2, 2.0, 0.92), V(1.4, -0.1, -0.1), LAPIS, SP),
+		Kit.block("Brow", V(1.5, 0.22, 0.2), V(0, 0.45, 0.42), LAPIS, SP),
+		Kit.block("EyeL", V(0.45, 0.28, 0.2), V(-0.42, 0.2, 0.42), CREAM, SP),
+		Kit.block("EyeR", V(0.45, 0.28, 0.2), V(0.42, 0.2, 0.42), CREAM, SP),
+		Kit.block("PupilL", V(0.16, 0.2, 0.22), V(-0.42, 0.2, 0.43), LAPIS, SP),
+		Kit.block("PupilR", V(0.16, 0.2, 0.22), V(0.42, 0.2, 0.43), LAPIS, SP),
+		Kit.block("Nose", V(0.3, 0.8, 0.3), V(0, -0.2, 0.5), GOLD_DARK, Enum.Material.Metal),
+		Kit.block("Mouth", V(0.7, 0.14, 0.2), V(0, -0.78, 0.42), GOLD_DARK, Enum.Material.Metal),
+		Kit.block("Beard", V(0.5, 0.9, 0.4), V(0, -1.5, 0.2), LAPIS, SP),
+		Kit.ball("CrownGem", 0.5, V(0, 1.55, 0.45), TEAL, GL),
+	}
+end
+
+-- Generic stand-ins for any future treasure without a model (all current treasures have one). ----------------------------
+local function genericSpecs(def)
+	return { Kit.block("Body", V(2.2, 1.6, 1.8), V(0, 0, 0), def.Color, SP) }
+end
+
+-- Display --------------------------------------------------------------------------------------------------------------
+-- Pitch (degrees about X, applied for the journal and the camp shelf only) that turns an object toward a viewer standing in
+-- front of and a little above it: + tips the top toward the viewer, - tips the front face upward.
+TreasureModels.DisplayPitch = {
+	bronze_ring = -28, old_coin = -22, cut_gemstone = 18, golden_scarab = 32, ruin_tablet = -8,
+	pottery_shard = -6, fossil_fragment = -14, fossil_claw = -4,
+}
+-- Extra yaw (degrees) so asymmetric objects show their best side.
+TreasureModels.DisplayYaw = { pottery_shard = -18, fossil_claw = -12 }
+
+function TreasureModels.DisplayRotation(treasureId: string): CFrame
+	return CFrame.Angles(math.rad(TreasureModels.DisplayPitch[treasureId] or 0), math.rad(TreasureModels.DisplayYaw[treasureId] or 0), 0)
+end
+
+-- Part specs (origin-centred) for a treasure id. `def` is the Defs entry (passed in to avoid a require cycle).
 function TreasureModels.Specs(treasureId: string, def)
 	local builder = def.Model and builders[def.Model]
 	if builder then
@@ -1853,9 +2394,35 @@ function TreasureModels.Specs(treasureId: string, def)
 	return genericSpecs(def)
 end
 
+-- Largest side of the model's part bounds, in studs (rotation-aware, from the specs).
+function TreasureModels.MaxExtent(specs): number
+	local lo, hi = V(1e9, 1e9, 1e9), V(-1e9, -1e9, -1e9)
+	for _, s in ipairs(specs) do
+		local r = s.Offset.RightVector
+		local u = s.Offset.UpVector
+		local b = s.Offset.LookVector
+		local hx, hy, hz = s.Size.X / 2, s.Size.Y / 2, s.Size.Z / 2
+		local ex = math.abs(r.X) * hx + math.abs(u.X) * hy + math.abs(b.X) * hz
+		local ey = math.abs(r.Y) * hx + math.abs(u.Y) * hy + math.abs(b.Y) * hz
+		local ez = math.abs(r.Z) * hx + math.abs(u.Z) * hy + math.abs(b.Z) * hz
+		local p = s.Offset.Position
+		lo = V(math.min(lo.X, p.X - ex), math.min(lo.Y, p.Y - ey), math.min(lo.Z, p.Z - ez))
+		hi = V(math.max(hi.X, p.X + ex), math.max(hi.Y, p.Y + ey), math.max(hi.Z, p.Z + ez))
+	end
+	return math.max(hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z)
+end
+
 -- Anchored, ready-to-animate Model (PrimaryPart "Root" at the origin). Always succeeds.
 function TreasureModels.BuildAny(treasureId: string, def): Model
 	return Kit.BuildModel(TreasureModels.Specs(treasureId, def), treasureId)
+end
+
+-- The SAME model for a display (journal / shelf): scaled so its largest side equals `targetSize` studs, so every artifact
+-- has a consistent size relative to its pedestal. Callers pose it (see DisplayRotation).
+function TreasureModels.BuildDisplay(treasureId: string, def, targetSize: number): Model
+	local specs = TreasureModels.Specs(treasureId, def)
+	local scale = targetSize / math.max(TreasureModels.MaxExtent(specs), 0.1)
+	return Kit.BuildModel(Kit.Transform(specs, scale, nil), treasureId)
 end
 
 -- Kept for callers that only want polished models.
@@ -1871,7 +2438,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="16">
+      <Item class="ModuleScript" referent="18">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -1921,7 +2488,7 @@ return Util
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="17">
+      <Item class="ModuleScript" referent="19">
         <Properties>
           <string name="Name">ViewmodelMath</string>
           <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
@@ -1998,15 +2565,15 @@ return ViewmodelMath
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="18">
+  <Item class="ServerScriptService" referent="20">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="19">
+    <Item class="Folder" referent="21">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="20">
+      <Item class="Script" referent="22">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -2069,11 +2636,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="21">
+      <Item class="Folder" referent="23">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="22">
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -2091,7 +2658,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="23">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -2225,7 +2792,7 @@ return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -2362,13 +2929,13 @@ local function spawnWorldModel(id: string)
 	local hl = Instance.new("Highlight")
 	hl.FillColor = rar.Color
 	hl.OutlineColor = Color3.new(1, 1, 1)
-	hl.FillTransparency = 0.8
+	hl.FillTransparency = 0.92
 	hl.DepthMode = Enum.HighlightDepthMode.Occluded -- never visible through walls
 	hl.Parent = model
 	local light = Instance.new("PointLight")
 	light.Color = rar.Color
 	light.Range = 14
-	light.Brightness = 1.5
+	light.Brightness = 0.9
 	light.Parent = root
 
 	local prompt = Instance.new("ProximityPrompt")
@@ -2600,7 +3167,7 @@ function ArtifactService.ShowOnTable(treasureId: string)
 	model.Name = "DepositedDisplay"
 	local hl = Instance.new("Highlight")
 	hl.FillColor = Defs.Rarity[def.Rarity].Color
-	hl.FillTransparency = 0.6
+	hl.FillTransparency = 0.9
 	hl.Parent = model
 	model.Parent = folder
 	task.delay(Config.Artifacts.DisplaySeconds, function()
@@ -2754,7 +3321,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -2781,7 +3348,7 @@ return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">CollectionService</string>
             <string name="Source"><![CDATA[-- Player-facing progress that is just saved flags: the camp-shelf selection and first-time hint progress. The server
@@ -2834,16 +3401,42 @@ local function guideDone(player: Player, id: any)
 	StateService.Push(player)
 end
 
+-- "Skip tutorial" clears guidance and records completion; "restart" wipes the saved progress and stores a baseline so
+-- old lifetime stats are not mistaken for new progress. Both are saved in the profile (no replay on respawn/rejoin).
+local function guideControl(player: Player, action: any)
+	if not RateLimiter.Check(player, "GuideControl") then
+		return
+	end
+	local data = DataService.Get(player)
+	if not data then
+		return
+	end
+	if action == "skip" then
+		for _, id in ipairs(GuideSpec.Order) do
+			data.Guide[id] = true
+		end
+		data.Guide.skipped = true
+	elseif action == "restart" then
+		table.clear(data.Guide)
+		data.GuideBase = GuideSpec.Baseline(data)
+	else
+		return
+	end
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+end
+
 function CollectionService.Init()
 	Remotes.Get("SetDisplay").OnServerEvent:Connect(setDisplay)
 	Remotes.Get("GuideDone").OnServerEvent:Connect(guideDone)
+	Remotes.Get("GuideControl").OnServerEvent:Connect(guideControl)
 end
 
 return CollectionService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -2973,7 +3566,7 @@ return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -3006,7 +3599,8 @@ local function defaultData()
 		UnlockedSites = {},
 		Collection = {}, -- [treasureId] = { Count, FirstFound }
 		Display = {}, -- treasure ids shown on the player's camp shelf (subset of Collection)
-		Guide = {}, -- [hintId] = true once a first-time hint is finished
+		Guide = {}, -- [hintId] = true once a first-time hint is finished; Guide.skipped = true after "Skip tutorial"
+		GuideBase = {}, -- lifetime counters at the last tutorial restart (GuideSpec.Baseline); {} = never restarted
 		Stats = {
 			BlocksDug = 0, TreasureFound = 0, CashEarned = 0,
 			RelicsDiscovered = 0, RelicsExtracted = 0, RelicsStolen = 0, DeepestDepth = 0,
@@ -3267,7 +3861,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -3408,7 +4002,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -3566,7 +4160,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -3798,7 +4392,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">ElevatorService</string>
             <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
@@ -3957,7 +4551,7 @@ return ElevatorService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -4060,7 +4654,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="36">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -4127,7 +4721,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="35">
+        <Item class="ModuleScript" referent="37">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -4211,7 +4805,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="38">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -4308,7 +4902,54 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="39">
+          <Properties>
+            <string name="Name">MineDetails</string>
+            <string name="Source"><![CDATA[-- Builds the small remnants on a mine cell's exposed face. Every detail part is a CHILD of the cell's own Part, so when
+-- that cell is destroyed the Part (and with it every remnant) disappears in the same instant: nothing can be left floating.
+-- Parts never collide, are never hit by mining rays (CanQuery = false), and cast no shadows.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Kit = require(ReplicatedStorage.Shared.ModelKit)
+local MineDetailSpecs = require(ReplicatedStorage.Shared.MineDetailSpecs)
+
+local MineDetails = {}
+
+-- Frame at the face centre looking INTO the wall: local +Z points out of the cell.
+local function faceFrame(center: Vector3, normal: Vector3, half: number): CFrame
+	local origin = center + normal * half
+	local up = math.abs(normal.Y) > 0.9 and Vector3.xAxis or Vector3.yAxis
+	return CFrame.lookAt(origin, origin - normal, up)
+end
+
+-- Returns the number of parts created (0 if the kind is unknown).
+function MineDetails.Build(kind: string, variant: number, cell: BasePart, center: Vector3, normal: Vector3): number
+	if not MineDetailSpecs.Has(kind) then
+		return 0
+	end
+	local frame = faceFrame(center, normal, cell.Size.X / 2)
+	local n = 0
+	for _, spec in ipairs(MineDetailSpecs.Build(kind, variant)) do
+		local p = Kit.make(spec)
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanTouch = false
+		p.CanQuery = false -- never intercepts the dig ray, the crosshair or a click
+		p.CastShadow = false
+		p.Massless = true
+		p.Name = "Detail_" .. spec.Name
+		p.CFrame = frame * spec.Offset
+		p.Parent = cell
+		n += 1
+	end
+	cell:SetAttribute("Detail", kind)
+	return n
+end
+
+return MineDetails
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="40">
           <Properties>
             <string name="Name">MineShiftService</string>
             <string name="Source"><![CDATA[-- "Fresh Dig": replenishes the shared mine when it is exhausted (docs/MINE_SHIFT.md).
@@ -4415,7 +5056,7 @@ return MineShiftService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -4464,7 +5105,7 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -4500,7 +5141,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="43">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -4512,6 +5153,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
+local MineStyle = require(ReplicatedStorage.Shared.MineStyle)
+local MineDetails = require(script.Parent.MineDetails)
 
 local SiteService = {}
 
@@ -4519,7 +5162,10 @@ local health: { number } = {}
 local maxHealth: { number } = {}
 local loot: { [number]: string } = {}
 local parts: { [number]: Part } = {}
-local tints: { number } = {}
+local pocketOf: { [number]: string } = {} -- cell -> discovery pocket kind
+local detailBuilt: { [number]: boolean } = {}
+local liveDetails = 0
+local currentSeed = 0
 local folder: Folder
 local generation = 0
 local dugTotal = 0
@@ -4527,24 +5173,69 @@ local dugByLayer: { [string]: number } = {}
 local cellsByLayer: { [string]: number } = {}
 local generatedAt = os.clock()
 
+local FACE_NORMALS = { Vector3.yAxis, Vector3.xAxis, Vector3.zAxis, -Vector3.xAxis, -Vector3.zAxis, -Vector3.yAxis }
+local FACE_STEP = { { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0, 1 }, { -1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 } } -- cell offset behind each normal (y grows downward)
+
+-- A face is "open" when its neighbour is air (a dug cell), the sky above the top row, or the exit shaft beside the grid.
+-- The exit shaft's own face is never decorated (it is the way out and must stay clean).
+local function faceOpen(x: number, y: number, z: number, face: number): boolean
+	local o = FACE_STEP[face]
+	local nx, ny, nz = x + o[1], y + o[2], z + o[3]
+	if not Grid.InBounds(nx, ny, nz) then
+		return face == 1 and y == 0 -- only the open sky above the surface row
+	end
+	return (health[Grid.ToIndex(nx, ny, nz)] or 0) <= 0
+end
+
+-- Builds the cell's remnant if it has one and one of its faces is now open. Safe to call repeatedly.
+local function ensureDetail(idx: number)
+	local part = parts[idx]
+	if not part or detailBuilt[idx] or (health[idx] or 0) <= 0 then
+		return
+	end
+	if liveDetails >= Config.Mine.MaxDetails then
+		return
+	end
+	local x, y, z = Grid.FromIndex(idx)
+	local layer = Defs.LayerAtCell(y)
+	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, loot[idx], pocketOf[idx])
+	if not spec then
+		return
+	end
+	local isExitWall = SiteService.IsExitWall(x, z)
+	for i = 0, 5 do
+		local face = (spec.FaceRot + i) % 6 + 1
+		if faceOpen(x, y, z, face) and not (isExitWall and face == 3) then
+			local n = MineDetails.Build(spec.Kind, spec.Variant, part, part.Position, FACE_NORMALS[face])
+			if n > 0 then
+				detailBuilt[idx] = true
+				liveDetails += 1
+			end
+			return
+		end
+	end
+end
+
 local function spawnPart(idx: number)
 	if parts[idx] then
 		return
 	end
 	local x, y, z = Grid.FromIndex(idx)
 	local layer = Defs.LayerAtCell(y)
+	local style = MineStyle.Cell(x, y, z, layer.Id, currentSeed, pocketOf[idx])
 	local part = Instance.new("Part")
 	part.Name = tostring(idx)
 	part.Anchored = true
 	part.Size = Vector3.one * Grid.CellSize
 	part.Position = Grid.CellCenter(x, y, z)
-	part.Material = Enum.Material.SmoothPlastic
-	part.Color = layer.Color:Lerp(tints[idx] > 0 and Color3.new(1, 1, 1) or Color3.new(0, 0, 0), math.abs(tints[idx]))
+	part.Material = Enum.Material[style.Material]
+	part.Color = Color3.fromHex(style.Hex)
 	part.TopSurface = Enum.SurfaceType.Smooth
 	part.BottomSurface = Enum.SurfaceType.Smooth
 	part.CanTouch = false
 	part.Parent = folder
 	parts[idx] = part
+	ensureDetail(idx)
 end
 
 -- Cells on the grid's south edge that border the exit shaft (see Config.Exit).
@@ -4558,9 +5249,9 @@ function SiteService.IsExitWall(x: number, z: number): boolean
 	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + 1e-3
 end
 
-function SiteService.Generate(seed: number?)
+function SiteService.Generate(seedIn: number?)
 	generation += 1
-	seed = seed or Config.Site.Seed
+	local seed: number = seedIn or Config.Site.Seed
 	if folder then
 		folder:Destroy()
 	end
@@ -4572,7 +5263,10 @@ function SiteService.Generate(seed: number?)
 	table.clear(maxHealth)
 	table.clear(loot)
 	table.clear(parts)
-	table.clear(tints)
+	table.clear(pocketOf)
+	table.clear(detailBuilt)
+	liveDetails = 0
+	currentSeed = seed
 	table.clear(dugByLayer)
 	table.clear(cellsByLayer)
 	dugTotal = 0
@@ -4585,12 +5279,21 @@ function SiteService.Generate(seed: number?)
 		health[idx] = layer.Health
 		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 		maxHealth[idx] = layer.Health
-		tints[idx] = (rng:NextNumber() - 0.5) * 0.16
 		if rng:NextNumber() < layer.TreasureChance then
 			local id = Defs.PickTreasure(layer.Id, rng)
 			if id then
 				loot[idx] = id
 			end
+		end
+	end
+
+	-- Discovery pockets: compact, seeded, tier-appropriate arrangements (pottery cache / fossil patch / broken masonry).
+	-- Their cells get a pocket tint, and their loot is the pocket's own (replacing whatever was rolled for those cells).
+	for _, pocket in ipairs(MineStyle.Pockets(seed)) do
+		for _, c in ipairs(pocket.Cells) do
+			local pidx = Grid.ToIndex(c[1], c[2], c[3])
+			pocketOf[pidx] = pocket.Kind
+			loot[pidx] = c[4]
 		end
 	end
 
@@ -4649,6 +5352,10 @@ function SiteService.Damage(idx: number, amount: number): (number, boolean, stri
 		loot[idx] = nil
 		local part = parts[idx]
 		parts[idx] = nil
+		if detailBuilt[idx] then
+			detailBuilt[idx] = nil
+			liveDetails -= 1
+		end
 		if part then
 			part:Destroy()
 		end
@@ -4666,6 +5373,8 @@ function SiteService.ExposeAround(idx: number)
 			local ni = Grid.ToIndex(nx, ny, nz)
 			if health[ni] > 0 and not parts[ni] then
 				spawnPart(ni)
+			elseif parts[ni] then
+				ensureDetail(ni) -- a new face of an already-visible cell just opened
 			end
 		end
 	end
@@ -4762,7 +5471,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="44">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -4802,6 +5511,7 @@ function StateService.Snapshot(player: Player)
 		Collection = data.Collection,
 		Display = data.Display,
 		Guide = data.Guide,
+		GuideBase = data.GuideBase,
 	}
 end
 
@@ -4825,7 +5535,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="42">
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -4887,7 +5597,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="43">
+        <Item class="ModuleScript" referent="46">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -4990,7 +5700,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="44">
+        <Item class="ModuleScript" referent="47">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -5344,7 +6054,7 @@ return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="45">
+        <Item class="ModuleScript" referent="48">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -5581,7 +6291,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="46">
+        <Item class="ModuleScript" referent="49">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -5684,7 +6394,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="47">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -5815,23 +6525,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="48">
+  <Item class="StarterPlayer" referent="51">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="49">
+    <Item class="StarterPlayerScripts" referent="52">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="50">
+      <Item class="Folder" referent="53">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="51">
+        <Item class="Folder" referent="54">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="52">
+          <Item class="ModuleScript" referent="55">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -5939,7 +6649,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="53">
+          <Item class="ModuleScript" referent="56">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -5970,7 +6680,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="54">
+          <Item class="ModuleScript" referent="57">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -6278,13 +6988,14 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="55">
+          <Item class="ModuleScript" referent="58">
             <Properties>
               <string name="Name">CampShelf</string>
               <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
--- see it and it never shows anyone else's finds (the sign says "<name>'s shelf"). It is plain parts in a local folder -
--- nothing replicates, nothing is shared geometry, and it cannot collide with the server's world.
--- Models are the same ones used by the journal (TreasureModels), scaled to fit the plinths.
+-- see it and it never shows anyone else's finds. (The "only you see this" explanation lives in the Journal, not on the
+-- world sign.) It is plain, non-colliding parts in a local folder: nothing replicates and it cannot collide with the world.
+-- Artifacts are the SAME source models used by reveals, carrying and the journal (TreasureModels), fitted to one common
+-- size so they sit consistently on their pedestals, with a name plate on the shelf front (never on the pedestal itself).
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -6304,7 +7015,10 @@ local folder: Folder?
 local lastKey = ""
 
 local WOOD, WOOD_DARK, SIGN = Color3.fromHex("A8703E"), Color3.fromHex("6E4527"), Color3.fromHex("2A3037")
-local PLINTH = 2.4 -- spacing between plinths along Z
+local PLINTH_STONE = Color3.fromHex("8A8F96")
+local SPACING = 2.7 -- distance between pedestals along Z
+local ARTIFACT_SIZE = 1.8 -- every artifact's largest side, in studs
+local BASE_H, PLINTH_H = 1.0, 0.6 -- shelf base height, pedestal height
 
 local function part(parent: Instance, name: string, size: Vector3, pos: Vector3, color: Color3, material: Enum.Material?): Part
 	local p = Instance.new("Part")
@@ -6323,6 +7037,28 @@ local function part(parent: Instance, name: string, size: Vector3, pos: Vector3,
 	return p
 end
 
+-- A text plate that fits any name: scaled text with a size cap, wrapped to two lines, on its own SurfaceGui.
+local function textPlate(plate: Part, face: Enum.NormalId, text: string, color: Color3, maxSize: number)
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = face
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = 50
+	gui.Parent = plate
+	local l = Instance.new("TextLabel")
+	l.Size = UDim2.fromScale(1, 1)
+	l.BackgroundTransparency = 1
+	l.Font = Enum.Font.FredokaOne
+	l.TextScaled = true
+	l.TextWrapped = true
+	l.TextColor3 = color
+	l.Text = text
+	l.Parent = gui
+	local limit = Instance.new("UITextSizeConstraint")
+	limit.MaxTextSize = maxSize
+	limit.MinTextSize = 8
+	limit.Parent = l
+end
+
 local function build(display: { string })
 	if folder then
 		folder:Destroy()
@@ -6334,58 +7070,40 @@ local function build(display: { string })
 
 	local c = Config.Collection.ShelfPosition
 	local slots = Config.Collection.DisplaySlots
-	local span = (slots - 1) * PLINTH
+	local span = (slots - 1) * SPACING
 	local ground = c.Y + 0.5 -- camp floor top (WorldCamp)
-	-- frame: back board (west), base, top rail, two posts. The shelf FACES east, toward the arrival area.
-	part(f, "Back", V(0.4, 3.6, span + 3.2), V(c.X - 0.8, ground + 1.8, c.Z), WOOD_DARK)
-	part(f, "Base", V(2.0, 0.5, span + 3.2), V(c.X, ground + 0.25, c.Z), WOOD)
-	part(f, "Roof", V(2.2, 0.35, span + 3.4), V(c.X, ground + 4.0, c.Z), WOOD_DARK)
-	for _, dz in ipairs({ -(span / 2 + 1.5), span / 2 + 1.5 }) do
-		part(f, "Post", V(0.4, 3.8, 0.4), V(c.X + 0.8, ground + 1.9, c.Z + dz), WOOD_DARK)
+	local length = span + 3.4
+	local topY = ground + BASE_H + PLINTH_H -- pedestal top
+	local roofY = ground + 4.4
+
+	-- frame: back board (west), base, roof, two posts. The shelf FACES east, toward the arrival area.
+	part(f, "Back", V(0.4, 4.0, length), V(c.X - 0.8, ground + 2.0, c.Z), WOOD_DARK)
+	part(f, "Base", V(2.0, BASE_H, length), V(c.X, ground + BASE_H / 2, c.Z), WOOD)
+	part(f, "Roof", V(2.2, 0.35, length + 0.2), V(c.X, roofY, c.Z), WOOD_DARK)
+	for _, dz in ipairs({ -(length / 2 - 0.2), length / 2 - 0.2 }) do
+		part(f, "Post", V(0.4, roofY - ground, 0.4), V(c.X + 0.8, ground + (roofY - ground) / 2, c.Z + dz), WOOD_DARK)
 	end
 
-	-- sign on the roof's front edge (SurfaceGui, so it never shows through the wood)
-	local board = part(f, "Sign", V(0.25, 0.9, span + 1.2), V(c.X + 1.15, ground + 4.6, c.Z), SIGN, Enum.Material.SmoothPlastic)
-	local gui = Instance.new("SurfaceGui")
-	gui.Face = Enum.NormalId.Right
-	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-	gui.PixelsPerStud = 40
-	gui.Parent = board
-	local l = Instance.new("TextLabel")
-	l.Size = UDim2.fromScale(1, 1)
-	l.BackgroundTransparency = 1
-	l.Font = Enum.Font.FredokaOne
-	l.TextScaled = true
-	l.TextColor3 = Config.Palette.Gold
-	l.Text = ("%s's SHELF  -  only you see this"):format(player.DisplayName)
-	l.Parent = gui
+	-- one modest heading on the roof's front edge: "<name>'s Collection"
+	local board = part(f, "Sign", V(0.2, 0.7, math.min(length, 7.4)), V(c.X + 1.15, roofY + 0.55, c.Z), SIGN, Enum.Material.SmoothPlastic)
+	textPlate(board, Enum.NormalId.Right, ("%s's Collection"):format(player.DisplayName), Config.Palette.Gold, 26)
 
 	for i = 1, slots do
-		local z = c.Z - span / 2 + (i - 1) * PLINTH
-		part(f, "Plinth" .. i, V(1.4, 1.0, 1.6), V(c.X + 0.2, ground + 1.0, z), Color3.fromHex("8A8F96"), Enum.Material.Slate)
+		local z = c.Z - span / 2 + (i - 1) * SPACING
+		part(f, "Plinth" .. i, V(1.5, PLINTH_H, 1.9), V(c.X + 0.1, ground + BASE_H + PLINTH_H / 2, z), PLINTH_STONE, Enum.Material.Slate)
 		local id = display[i]
 		if id then
 			local def = Defs.Treasure[id]
-			local model = TreasureModels.BuildAny(id, def)
-			local _, size = model:GetBoundingBox()
-			model:ScaleTo(math.min(1, 2.0 / math.max(size.X, size.Y, size.Z)))
+			local model = TreasureModels.BuildDisplay(id, def, ARTIFACT_SIZE)
 			model.Parent = f
-			local _, scaled = model:GetBoundingBox()
-			-- face east (+X), standing on the plinth top (plinth top = ground + 1.5)
-			model:PivotTo(CFrame.new(c.X + 0.2, ground + 1.55 + scaled.Y / 2, z) * CFrame.Angles(0, math.rad(90), 0))
-			local tag = Instance.new("SurfaceGui")
-			tag.Face = Enum.NormalId.Right
-			tag.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-			tag.PixelsPerStud = 40
-			tag.Parent = f:FindFirstChild("Plinth" .. i)
-			local t = Instance.new("TextLabel")
-			t.Size = UDim2.fromScale(1, 1)
-			t.BackgroundTransparency = 1
-			t.Font = Enum.Font.FredokaOne
-			t.TextScaled = true
-			t.TextColor3 = Defs.Rarity[def.Rarity].Color
-			t.Text = def.Name
-			t.Parent = tag
+			-- face east (+X), pose for the viewer, then rest it on the pedestal top with a hair of clearance
+			model:PivotTo(CFrame.Angles(0, math.rad(90), 0) * TreasureModels.DisplayRotation(id))
+			local cf, size = model:GetBoundingBox()
+			local offset = V(c.X + 0.1, topY + 0.03 + size.Y / 2, z) - cf.Position
+			model:PivotTo(model:GetPivot() + offset)
+			-- name plate on the shelf front, under the pedestal
+			local plate = part(f, "Plate" .. i, V(0.08, 0.62, 2.3), V(c.X + 1.04, ground + BASE_H / 2, z), SIGN, Enum.Material.SmoothPlastic)
+			textPlate(plate, Enum.NormalId.Right, def.Name, Defs.Rarity[def.Rarity].Color, 22)
 		end
 	end
 end
@@ -6405,7 +7123,7 @@ return CampShelf
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="56">
+          <Item class="ModuleScript" referent="59">
             <Properties>
               <string name="Name">CollectionUI</string>
               <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
@@ -6456,11 +7174,12 @@ end
 local function icon(parent: Instance, id: string, def, discovered: boolean)
 	local vp = mk("ViewportFrame", { Size = UDim2.fromOffset(120, 96), Position = UDim2.fromOffset(15, 8), BackgroundTransparency = 1,
 		Ambient = Color3.fromRGB(150, 138, 124), LightColor = Color3.fromRGB(255, 244, 224), LightDirection = Vector3.new(-0.5, -1, -0.7) }, parent)
-	local model = TreasureModels.BuildAny(id, def)
+	-- the same source model as the reveal / carried / shelf versions, fitted to one common size and turned toward the viewer
+	local model = TreasureModels.BuildDisplay(id, def, 2.4)
+	model.Parent = vp
+	model:PivotTo(CFrame.Angles(0, math.rad(-24), 0) * TreasureModels.DisplayRotation(id))
 	local _, size = model:GetBoundingBox()
 	local radius = math.max(size.Magnitude / 2, 1.2)
-	model.Parent = vp
-	model:PivotTo(CFrame.Angles(0, math.rad(-28), 0) * CFrame.Angles(math.rad(14), 0, 0))
 	local cam = mk("Camera", { FieldOfView = 32 }, vp)
 	cam.CFrame = CFrame.lookAt(Vector3.new(0, 0, radius / math.sin(math.rad(16)) * 1.1), Vector3.zero)
 	vp.CurrentCamera = cam
@@ -6590,12 +7309,15 @@ function CollectionUI.Build(gui: ScreenGui)
 	corner(root, 14)
 	stroke(root, T.Line, 3)
 	K.fit(root, W, H)
-	header = label(root, "", 20, P.Cream, { Size = UDim2.new(1, -90, 0, 32), Position = UDim2.fromOffset(16, 8),
+	header = label(root, "", 20, P.Cream, { Size = UDim2.new(1, -90, 0, 24), Position = UDim2.fromOffset(16, 4),
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	label(root, "Your camp shelf is built on your screen only: other players never see it, and you never see theirs.", 12, K.Muted,
+		{ Size = UDim2.new(1, -90, 0, 16), Position = UDim2.fromOffset(16, 28), TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd })
 	local close = K.flatButton(root, "X", UDim2.fromOffset(40, 32), UDim2.new(1, -52, 0, 8), P.Danger)
 	close.Activated:Connect(CollectionUI.Close)
 
-	setRow = mk("Frame", { Size = UDim2.new(1, -32, 0, 48), Position = UDim2.fromOffset(16, 48), BackgroundTransparency = 1 }, root)
+	setRow = mk("Frame", { Size = UDim2.new(1, -32, 0, 48), Position = UDim2.fromOffset(16, 50), BackgroundTransparency = 1 }, root)
 	mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8) }, setRow)
 
 	grid = mk("ScrollingFrame", { Size = UDim2.new(1, -32, 1, -112), Position = UDim2.fromOffset(16, 102), BackgroundTransparency = 1,
@@ -6623,7 +7345,7 @@ return CollectionUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="57">
+          <Item class="ModuleScript" referent="60">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -7052,7 +7774,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="58">
+          <Item class="ModuleScript" referent="61">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -7305,7 +8027,8 @@ local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, fa
 			part.CanCollide = false
 			part.Transparency = 1
 			for _, child in ipairs(part:GetChildren()) do
-				if child:IsA("SurfaceGui") then
+				-- surface guis and buried-detail remnants go with the block at once (the server's destroy follows)
+				if child:IsA("SurfaceGui") or child.Name:sub(1, 7) == "Detail_" then
 					child:Destroy()
 				end
 			end
@@ -7371,13 +8094,13 @@ function Effects.RevealTreasure(info)
 		local hl = Instance.new("Highlight")
 		hl.FillColor = rar.Color
 		hl.OutlineColor = Color3.new(1, 1, 1)
-		hl.FillTransparency = 0.5
+		hl.FillTransparency = 0.9 -- rarity is the outline/light colour; the model's own materials are never hidden by a glow
 		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		hl.Parent = model
 		local light = Instance.new("PointLight")
 		light.Color = rar.Color
 		light.Range = 12 + order * 3
-		light.Brightness = 2
+		light.Brightness = 1.1
 		light.Parent = root
 		burst(start, Vector3.yAxis, rar.Color, cfg[3], 22, 0.8)
 	end
@@ -7483,25 +8206,30 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="59">
+          <Item class="ModuleScript" referent="62">
             <Properties>
               <string name="Name">GuideController</string>
-              <string name="Source"><![CDATA[-- First-time hints. One short card at a time, bottom-centre (clear of the crosshair and the HUD), chosen by the pure
--- GuideSpec from the server snapshot. A hint ends when the player has done the thing, after its timeout, or when
--- they open the thing it points at; ended hints are saved by the server (GuideDone) and never return.
--- Text always uses the CURRENT bindings. No tutorial world, no forced steps, nothing blocks play.
+              <string name="Source"><![CDATA[-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
+-- snapshot. Rules:
+--   * The card is ONE plain Frame that owns its background, outline, title, text and Skip button. When there is no active
+--     hint the whole Frame is hidden (Visible = false), so an empty outline can never be left on screen. (The earlier
+--     version faded a CanvasGroup; a UIStroke on a CanvasGroup is drawn outside the group and ignores GroupTransparency,
+--     so the gold outline stayed behind after the text faded.) There are no tweens or delayed callbacks any more, so an old
+--     step cannot reappear later.
+--   * A hint ends when the player has done the thing (saved on the server via GuideDone), after its timeout, or when they use
+--     the thing it points at. Finished hints are part of the profile: they do not replay after death, respawn or rejoin.
+--   * It is hidden while any menu (shop, settings, journal, Roblox menu) is open and comes back only if still relevant.
+--   * "Skip tutorial" (card button or Settings) and "Restart tutorial" (Settings) go through GuideControl on the server.
+--   * Guidance is separate from objectives and toasts; hiding it never touches those.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
-local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local GuideSpec = require(ReplicatedStorage.Shared.GuideSpec)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
-local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
 local State = require(script.Parent.State)
 local InputMode = require(script.Parent.InputMode)
@@ -7516,14 +8244,15 @@ local TOUCH = UserInputService.TouchEnabled
 
 local GuideController = {}
 
-local card: Frame
+local card: Frame? = nil
 local titleLabel: TextLabel
 local bodyLabel: TextLabel
 local current: string? = nil
 local shownAt = 0
-local sent: { [string]: boolean } = {} -- ids already reported to the server this session
+local sent: { [string]: boolean } = {} -- ids already reported to the server (cleared on restart)
 local depthMeters = 0
 local acc = 0
+local initialized = false
 
 local function names()
 	return {
@@ -7531,35 +8260,6 @@ local function names()
 		Sell = Bindings.Name(Bindings.ReturnToCamp),
 		Place = Bindings.Name(Bindings.PlaceArtifact),
 		Journal = Bindings.Name(Bindings.Journal),
-	}
-end
-
-local function snapshot()
-	local d = State.Data
-	local owned = 0
-	for _ in pairs(d.OwnedTools or {}) do
-		owned += 1
-	end
-	local nextTool
-	for _, id in ipairs(Defs.ToolsByTier) do
-		if not (d.OwnedTools or {})[id] then
-			nextTool = Defs.Tools[id]
-			break
-		end
-	end
-	local found = CollectionSpec.Totals(d.Collection or {})
-	local stats = d.Stats or {}
-	return {
-		Cash = d.Cash or 0, Count = d.Count or 0, Capacity = math.max(d.Capacity or 1, 1),
-		Stats = { BlocksDug = stats.BlocksDug or 0, CashEarned = stats.CashEarned or 0, DeepestDepth = stats.DeepestDepth or 0 },
-		OwnedToolCount = owned,
-		NextToolPrice = nextTool and nextTool.Price or nil,
-		NextToolName = nextTool and nextTool.DisplayName or nil,
-		Carrying = d.Carrying ~= nil,
-		HasDeposited = (stats.RelicsExtracted or 0) > 0,
-		CollectionFound = found,
-		Touch = TOUCH,
-		depthMeters = depthMeters,
 	}
 end
 
@@ -7571,33 +8271,34 @@ local function markDone(id: string)
 	Remotes.Get("GuideDone"):FireServer(id)
 end
 
+-- The ONLY place the card is shown or hidden. Hiding hides the entire container.
 local function show(id: string?)
-	if id == current then
+	local c = card
+	if not c then
 		return
+	end
+	if id == current and c.Visible == (id ~= nil) then
+		return
+	end
+	if id ~= current then
+		shownAt = os.clock()
 	end
 	current = id
-	shownAt = os.clock()
-	if not id then
-		TweenService:Create(card, TweenInfo.new(0.25), { GroupTransparency = 1 }):Play()
-		return
-	end
-	card.Visible = true
-	TweenService:Create(card, TweenInfo.new(0.25), { GroupTransparency = 0 }):Play()
+	c.Visible = id ~= nil
 end
 
 local function refresh()
-	if not State.Loaded then
+	if not card or not State.Loaded then
 		return
 	end
 	local d = State.Data
 	local guide = d.Guide or {}
-	local s = snapshot()
-	-- retire anything the player has already accomplished (saved, so it never comes back)
+	local s = GuideSpec.StateFrom(d, d.GuideBase, { Touch = TOUCH, depthMeters = depthMeters })
+	-- retire anything already accomplished (saved on the server, so it never comes back)
 	for _, id in ipairs(GuideSpec.NewlySatisfied(s, guide)) do
 		markDone(id)
-		guide[id] = true
 	end
-	local done = setmetatable({}, { __index = function(_, id)
+	local done = setmetatable({ skipped = guide.skipped == true }, { __index = function(_, id)
 		return guide[id] or sent[id]
 	end })
 	local id = GuideSpec.Active(s, done)
@@ -7606,7 +8307,7 @@ local function refresh()
 		markDone(id)
 		id = GuideSpec.Active(s, done)
 	end
-	-- never on top of a menu
+	-- never on top of a menu; it returns afterwards only if still the active step
 	if id and InputMode.IsMenuOpen() then
 		id = nil
 	end
@@ -7626,29 +8327,52 @@ function GuideController.Dismiss(id: string)
 	end
 end
 
-function GuideController.Build(gui: ScreenGui)
-	card = mk("CanvasGroup", { Name = "GuideCard", Size = UDim2.fromOffset(430, 76), AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, TOUCH and -150 or -84), BackgroundColor3 = T.Panel, BackgroundTransparency = 0.08,
-		GroupTransparency = 1, Visible = false, Active = false }, gui)
-	corner(card, T.Corner)
-	stroke(card, T.Accent, 2)
-	mk("UISizeConstraint", { MaxSize = Vector2.new(430, 90) }, card)
-	titleLabel = label(card, "", 15, T.Accent, { Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(12, 6),
-		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
-	bodyLabel = label(card, "", 16, P.Cream, { Size = UDim2.new(1, -24, 1, -30), Position = UDim2.fromOffset(12, 28),
-		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
-	-- the card only informs: it must never swallow clicks meant for mining
-	for _, o in ipairs(card:GetDescendants()) do
-		if o:IsA("GuiObject") then
-			o.Active = false
-		end
+-- Skip tutorial: hide at once (no waiting for the server), record completion on the server.
+function GuideController.Skip()
+	show(nil)
+	for _, id in ipairs(GuideSpec.Order) do
+		sent[id] = true
 	end
+	Remotes.Get("GuideControl"):FireServer("skip")
+end
+
+-- Restart tutorial: forget what this client already reported; the server wipes the saved progress and sets a baseline.
+function GuideController.Restart()
+	table.clear(sent)
+	Remotes.Get("GuideControl"):FireServer("restart")
+end
+
+function GuideController.IsSkipped(): boolean
+	return State.Data.Guide ~= nil and State.Data.Guide.skipped == true
+end
+
+function GuideController.Build(gui: ScreenGui)
+	if card then
+		return -- one tutorial interface only
+	end
+	local c = mk("Frame", { Name = "GuideCard", Size = UDim2.fromOffset(430, 92), AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, TOUCH and -150 or -84), BackgroundColor3 = T.Panel, BackgroundTransparency = 0.08,
+		Visible = false, Active = false }, gui)
+	corner(c, T.Corner)
+	stroke(c, T.Accent, 2) -- the outline lives on the same Frame that is hidden
+	mk("UISizeConstraint", { MaxSize = Vector2.new(430, 100) }, c)
+	titleLabel = label(c, "", 15, T.Accent, { Size = UDim2.new(1, -150, 0, 20), Position = UDim2.fromOffset(12, 6),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	bodyLabel = label(c, "", 16, P.Cream, { Size = UDim2.new(1, -24, 0, 52), Position = UDim2.fromOffset(12, 28),
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
+	local skip = K.flatButton(c, "Skip tutorial", UDim2.fromOffset(110, 20), UDim2.new(1, -122, 0, 5), nil)
+	skip.TextSize = 12
+	skip.Name = "SkipButton"
+	skip.Activated:Connect(GuideController.Skip)
+	card = c
 end
 
 function GuideController.Init()
-	State.Connect(function()
-		refresh()
-	end)
+	if initialized then
+		return -- no duplicate event connections
+	end
+	initialized = true
+	State.Connect(refresh)
 	InputMode.OnChanged(refresh)
 	RunService.Heartbeat:Connect(function(dt)
 		acc += dt
@@ -7670,7 +8394,7 @@ return GuideController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="60">
+          <Item class="ModuleScript" referent="63">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -7746,7 +8470,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="61">
+          <Item class="ModuleScript" referent="64">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -7828,7 +8552,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="62">
+          <Item class="ModuleScript" referent="65">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -7846,6 +8570,7 @@ local InputMode = require(script.Parent.InputMode)
 local Bindings = require(script.Parent.Bindings)
 local Audio = require(script.Parent.AudioController)
 local K = require(script.Parent.UIKit)
+local Guide = require(script.Parent.GuideController)
 
 local P = Config.Palette
 local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
@@ -8000,6 +8725,19 @@ local function buildSettings(parent: Instance)
 	makeSlider(body, 100, "MasterVolume", "Master volume", "%.2f")
 	makeToggle(body, 180, "CameraShake", "Camera shake")
 	makeToggle(body, 216, "InvertY", "Invert vertical look")
+	-- tutorial controls (the hints are separate from objectives and notifications)
+	local skip = flatButton(body, "Skip tutorial", UDim2.fromOffset(160, 30), UDim2.fromOffset(0, 258), nil)
+	skip.TextSize = 15
+	skip.Activated:Connect(function()
+		Audio.Play("UI")
+		Guide.Skip()
+	end)
+	local restart = flatButton(body, "Restart tutorial", UDim2.fromOffset(160, 30), UDim2.fromOffset(174, 258), nil)
+	restart.TextSize = 15
+	restart.Activated:Connect(function()
+		Audio.Play("UI")
+		Guide.Restart()
+	end)
 end
 
 local function buildControls(parent: Instance)
@@ -8120,7 +8858,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="63">
+          <Item class="ModuleScript" referent="66">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -8193,7 +8931,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="64">
+          <Item class="ModuleScript" referent="67">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -8310,7 +9048,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="65">
+          <Item class="ModuleScript" referent="68">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
@@ -8827,7 +9565,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="66">
+          <Item class="ModuleScript" referent="69">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -8841,6 +9579,7 @@ local State = {
 		Cash = 0, Reputation = 0, Count = 0, Capacity = 1, BackpackValue = 0,
 		ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId,
 		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any, Settings = {} :: any,
+		Collection = {} :: any, Display = {} :: any, Guide = {} :: any, GuideBase = {} :: any, Stats = {} :: any,
 	},
 	Loaded = false,
 }
@@ -8872,7 +9611,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="67">
+          <Item class="ModuleScript" referent="70">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -8948,7 +9687,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="68">
+          <Item class="ModuleScript" referent="71">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -9434,7 +10173,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="69">
+          <Item class="ModuleScript" referent="72">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -9548,7 +10287,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="70">
+          <Item class="ModuleScript" referent="73">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -9693,7 +10432,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="71">
+        <Item class="LocalScript" referent="74">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.

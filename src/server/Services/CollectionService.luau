@@ -48,9 +48,35 @@ local function guideDone(player: Player, id: any)
 	StateService.Push(player)
 end
 
+-- "Skip tutorial" clears guidance and records completion; "restart" wipes the saved progress and stores a baseline so
+-- old lifetime stats are not mistaken for new progress. Both are saved in the profile (no replay on respawn/rejoin).
+local function guideControl(player: Player, action: any)
+	if not RateLimiter.Check(player, "GuideControl") then
+		return
+	end
+	local data = DataService.Get(player)
+	if not data then
+		return
+	end
+	if action == "skip" then
+		for _, id in ipairs(GuideSpec.Order) do
+			data.Guide[id] = true
+		end
+		data.Guide.skipped = true
+	elseif action == "restart" then
+		table.clear(data.Guide)
+		data.GuideBase = GuideSpec.Baseline(data)
+	else
+		return
+	end
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+end
+
 function CollectionService.Init()
 	Remotes.Get("SetDisplay").OnServerEvent:Connect(setDisplay)
 	Remotes.Get("GuideDone").OnServerEvent:Connect(guideDone)
+	Remotes.Get("GuideControl").OnServerEvent:Connect(guideControl)
 end
 
 return CollectionService
