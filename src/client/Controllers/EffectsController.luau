@@ -12,6 +12,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local Audio = require(script.Parent.AudioController)
 local UI = require(script.Parent.UIController)
+local CameraController = require(script.Parent.CameraController)
 
 local player = Players.LocalPlayer
 local Effects = {}
@@ -27,6 +28,7 @@ local FEEL = {
 	CameraKickImpact = 0.05,
 	CameraKickBreak = 0.16,
 	CameraKickDecay = 7,
+	CameraKickInFirstPerson = false, -- first-person starts with no mining kick; flip to test
 }
 
 local fxFolder = Instance.new("Folder")
@@ -159,6 +161,9 @@ end
 -- Camera kick -------------------------------------------------------------------------------
 local kick = 0
 local function cameraKick(amount: number)
+	if CameraController.IsFirstPerson() and not FEEL.CameraKickInFirstPerson then
+		return
+	end
 	kick = math.max(kick, amount)
 end
 
@@ -231,6 +236,16 @@ local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, fa
 	if dead then
 		if part then
 			shaking[part] = nil
+			-- Make the broken block instantly invisible to targeting/collision on this client, so a held click
+			-- retargets the block behind it without waiting for the server's destroy to replicate.
+			part.CanQuery = false
+			part.CanCollide = false
+			part.Transparency = 1
+			for _, child in ipairs(part:GetChildren()) do
+				if child:IsA("SurfaceGui") then
+					child:Destroy()
+				end
+			end
 		end
 		local color = layerColorAt(y)
 		burst(center, Vector3.yAxis, color, FEEL.BreakChunks, 24, 1.3)
@@ -365,6 +380,10 @@ function Effects.RevealTreasure(info)
 		end
 		model:Destroy()
 	end)
+end
+
+function Effects.GetFolder(): Folder
+	return fxFolder
 end
 
 function Effects.Init()

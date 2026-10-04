@@ -1,5 +1,9 @@
--- Input + targeting for digging. Desktop: hold click/tap on dirt. Mobile: tap/hold the dirt, or hold the DIG button
--- (auto-aims forward-down). The client only *requests* hits; the server validates everything.
+-- Input + targeting for digging.
+--   Desktop first person : ray from the exact screen centre (the crosshair), re-cast every frame.
+--   Desktop third person : ray from the mouse cursor.
+--   Touch                : unchanged (tap/hold the dirt, or hold the DIG button which auto-aims).
+-- ONE targeting result per frame drives both the highlight and the hit request. The client only *requests*
+-- hits; the server validates tool, cooldown, reach, cell state and rewards.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -9,12 +13,14 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Effects = require(script.Parent.EffectsController)
 local UI = require(script.Parent.UIController)
+local CameraController = require(script.Parent.CameraController)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
@@ -24,52 +30,86 @@ local FEEL = {
 	SwingPitchSign = 1, -- flip to -1 if the shovel swings the wrong way
 	SwingWindup = 0.9, -- radians
 	SwingStrike = 0.7,
+	FirstPersonRayPadding = 6, -- studs beyond the reach limit that first person still reports a target
 }
 
 local TOUCH = UserInputService.TouchEnabled
 local digHit = Remotes.Get("DigHit")
 
 local pointerHeld = false
-local pointerPos: Vector2? = nil
+local pointerPos: Vector2? = nil -- touch only
 local buttonHeld = false
 local lastSent = 0
 local targetBox: SelectionBox
 local swingToken = 0
 
+-- Ignore the local character (incl. the held shovel) and cosmetic effects; everything solid still blocks.
+-- RespectCanCollide skips non-solid helpers (invisible prompts, fading chunks, locally-broken blocks).
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.RespectCanCollide = true
+
+local function refreshFilter()
+	local list: { Instance } = { Effects.GetFolder() }
+	if player.Character then
+		table.insert(list, player.Character)
+	end
+	rayParams.FilterDescendantsInstances = list
+end
+
+type Target = {
+	Part: Part,
+	Position: Vector3,
+	Normal: Vector3,
+	X: number,
+	Y: number,
+	Z: number,
+	InReach: boolean,
+}
+
 local function viewportPos(input: InputObject): Vector2
 	return Vector2.new(input.Position.X, input.Position.Y) + GuiService:GetGuiInset()
 end
 
-local function siteParams(): RaycastParams?
+-- Casts one ray. Only counts if the FIRST relevant surface is a dig cell.
+local function castDig(origin: Vector3, dir: Vector3): Target?
+	local result = Workspace:Raycast(origin, dir, rayParams)
+	if not result then
+		return nil
+	end
+	local inst = result.Instance
 	local site = Workspace:FindFirstChild("DigSite")
-	if not site then
+	if not site or inst.Parent ~= site or not inst:IsA("Part") then
 		return nil
 	end
-	local rp = RaycastParams.new()
-	rp.FilterType = Enum.RaycastFilterType.Include
-	rp.FilterDescendantsInstances = { site }
-	return rp
-end
-
-local function castResult(origin: Vector3, dir: Vector3): (Part?, Vector3?, Vector3?)
-	local rp = siteParams()
-	if not rp then
+	local idx = tonumber(inst.Name)
+	if not idx or idx < 1 or idx > Grid.Count then
 		return nil
 	end
-	local r = Workspace:Raycast(origin, dir, rp)
-	if r and r.Instance:IsA("Part") and tonumber(r.Instance.Name) then
-		return r.Instance, r.Position, r.Normal
+	local x, y, z = Grid.FromIndex(idx)
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	local inReach = false
+	if hrp then
+		-- exactly the server's rule (Defs.DigReachLimit, HRP -> cell centre)
+		inReach = ((hrp :: BasePart).Position - Grid.CellCenter(x, y, z)).Magnitude <= Defs.DigReachLimit(State.Tool())
 	end
-	return nil
+	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach }
 end
 
-local function aimFromScreen(vp: Vector2): (Part?, Vector3?, Vector3?)
+local function aimScreen(vp: Vector2, length: number): Target?
+	local ray = Workspace.CurrentCamera:ViewportPointToRay(vp.X, vp.Y)
+	return castDig(ray.Origin, ray.Direction * length)
+end
+
+-- First person: the crosshair. Always the exact viewport centre, recomputed every frame.
+local function aimCenter(): Target?
 	local cam = Workspace.CurrentCamera
-	local ray = cam:ViewportPointToRay(vp.X, vp.Y)
-	return castResult(ray.Origin, ray.Direction * 300)
+	local c = cam.ViewportSize / 2
+	return aimScreen(c, Defs.DigReachLimit(State.Tool()) + FEEL.FirstPersonRayPadding)
 end
 
-local function aimAuto(): (Part?, Vector3?, Vector3?)
+-- Touch DIG button: forward-down from the character, then straight down.
+local function aimAuto(): Target?
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	if not hrp then
 		return nil
@@ -83,20 +123,25 @@ local function aimAuto(): (Part?, Vector3?, Vector3?)
 		Vector3.new(0, -1, 0),
 	}
 	for _, d in ipairs(dirs) do
-		local part, pos, normal = castResult(origin, d * (reach + 2))
-		if part then
-			return part, pos, normal
+		local t = castDig(origin, d * (reach + 2))
+		if t then
+			return t
 		end
 	end
 	return nil
 end
 
-local function inReach(part: Part): boolean
-	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-	if not hrp then
-		return false
+local function acquireTarget(): Target?
+	if CameraController.IsFirstPerson() then
+		return aimCenter()
 	end
-	return (hrp.Position - part.Position).Magnitude <= State.Tool().Reach + Grid.CellSize
+	if buttonHeld then
+		return aimAuto()
+	end
+	if TOUCH then
+		return (pointerHeld and pointerPos) and aimScreen(pointerPos, 300) or nil
+	end
+	return aimScreen(UserInputService:GetMouseLocation(), 300)
 end
 
 local function swing(interval: number)
@@ -134,6 +179,7 @@ local function swing(interval: number)
 	end)
 end
 
+-- Third person / touch only. First person lets the camera and normal controls own orientation.
 local function faceTarget(pos: Vector3)
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	if not hrp then
@@ -145,17 +191,64 @@ local function faceTarget(pos: Vector3)
 	end
 end
 
-local function currentAim(): (Part?, Vector3?, Vector3?)
-	if buttonHeld then
-		return aimAuto()
+-- Drops every held input. Mining only resumes after a FRESH press.
+function DigController.ClearInput()
+	pointerHeld = false
+	buttonHeld = false
+	pointerPos = nil
+end
+
+local function isBlocked(): boolean
+	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil
+end
+
+local function onStep()
+	local blocked = isBlocked()
+	if blocked then
+		DigController.ClearInput()
 	end
-	if pointerHeld and pointerPos then
-		return aimFromScreen(pointerPos)
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		DigController.ClearInput()
+		blocked = true
 	end
-	if not TOUCH then
-		return aimFromScreen(UserInputService:GetMouseLocation())
+
+	local target: Target? = nil
+	if not blocked then
+		target = acquireTarget()
+		if target and not target.Part.Parent then
+			target = nil
+		end
 	end
-	return nil
+
+	-- Highlight + crosshair come from the very same result the hit request uses below.
+	if target then
+		targetBox.Adornee = target.Part
+		targetBox.Color3 = target.InReach and P.Gold or P.Danger
+		CameraController.SetCrosshairState(target.InReach and "hit" or "far")
+	else
+		targetBox.Adornee = nil
+		CameraController.SetCrosshairState("none")
+	end
+
+	if blocked or not target or not (pointerHeld or buttonHeld) or not target.InReach then
+		return
+	end
+
+	local interval = 1 / State.Tool().Rate
+	local now = os.clock()
+	if now - lastSent < interval then
+		return
+	end
+	lastSent = now
+
+	digHit:FireServer(target.X, target.Y, target.Z)
+	if not CameraController.IsFirstPerson() then
+		faceTarget(target.Part.Position)
+	end
+	swing(interval)
+	Effects.NoteFace(target.Part, target.Normal)
+	Effects.Impact(target.Part, target.Position, target.Normal)
 end
 
 function DigController.Init()
@@ -167,8 +260,29 @@ function DigController.Init()
 	targetBox.SurfaceTransparency = 0.85
 	targetBox.Parent = Workspace
 
+	refreshFilter()
+
+	local function onCharacter(char: Model)
+		refreshFilter()
+		DigController.ClearInput()
+		local hum = char:WaitForChild("Humanoid", 10)
+		if hum then
+			(hum :: Humanoid).Died:Connect(DigController.ClearInput)
+		end
+	end
+	player.CharacterAdded:Connect(onCharacter)
+	if player.Character then
+		task.spawn(onCharacter, player.Character)
+	end
+
+	-- Anything that steals the cursor/keyboard drops held mining.
+	UI.OnMenuChanged(DigController.ClearInput)
+	UserInputService.WindowFocusReleased:Connect(DigController.ClearInput)
+	UserInputService.TextBoxFocused:Connect(DigController.ClearInput)
+	GuiService.MenuOpened:Connect(DigController.ClearInput)
+
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then
+		if processed or isBlocked() then
 			return
 		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -179,7 +293,9 @@ function DigController.Init()
 		end
 	end)
 	UserInputService.InputChanged:Connect(function(input)
-		if pointerHeld and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		if pointerHeld and input.UserInputType == Enum.UserInputType.Touch then
+			pointerPos = viewportPos(input)
+		elseif pointerHeld and TOUCH and input.UserInputType == Enum.UserInputType.MouseMovement then
 			pointerPos = viewportPos(input)
 		end
 	end)
@@ -191,7 +307,7 @@ function DigController.Init()
 		end
 	end)
 
-	-- Mobile DIG button
+	-- Mobile DIG button (unchanged)
 	if TOUCH then
 		local btn = Instance.new("TextButton")
 		btn.Name = "DigButton"
@@ -224,39 +340,8 @@ function DigController.Init()
 		end)
 	end
 
-	RunService.RenderStepped:Connect(function()
-		local part, pos, normal = currentAim()
-		if part and not part.Parent then
-			part = nil
-		end
-		if part then
-			targetBox.Adornee = part
-			targetBox.Color3 = inReach(part) and P.Gold or P.Danger
-		else
-			targetBox.Adornee = nil
-		end
-
-		if not (pointerHeld or buttonHeld) or not part or not pos or not normal then
-			return
-		end
-		if State.Data.Count == nil or not inReach(part) then
-			return
-		end
-		local tool = State.Tool()
-		local interval = 1 / tool.Rate
-		local now = os.clock()
-		if now - lastSent < interval then
-			return
-		end
-		lastSent = now
-
-		local x, y, z = Grid.FromIndex(tonumber(part.Name) :: number)
-		digHit:FireServer(x, y, z)
-		faceTarget(part.Position)
-		swing(interval)
-		Effects.NoteFace(part, normal)
-		Effects.Impact(part, pos, normal)
-	end)
+	-- After the camera has updated, so the centre ray uses this frame's final camera.
+	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 1, onStep)
 end
 
 return DigController

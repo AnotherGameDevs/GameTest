@@ -26,6 +26,14 @@ local TOUCH = UserInputService.TouchEnabled
 local gui: ScreenGui
 local refs: { [string]: any } = {}
 local shopOpen = false
+local cursorFree = false -- held "free cursor" key (first-person)
+local menuCallbacks: { () -> () } = {}
+
+local function menuChanged()
+	for _, cb in ipairs(menuCallbacks) do
+		task.spawn(cb)
+	end
+end
 
 local function mk(class: string, props: { [string]: any }, parent: Instance?): any
 	local o = Instance.new(class)
@@ -188,15 +196,41 @@ local function renderShop()
 	end
 end
 
+-- True while any interactive menu wants the cursor (shop, or the held free-cursor key).
+function UI.IsMenuOpen(): boolean
+	return shopOpen or cursorFree
+end
+
+function UI.OnMenuChanged(cb: () -> ())
+	table.insert(menuCallbacks, cb)
+end
+
+-- First-person locks the mouse; a visible Modal button is Roblox's supported way to release it.
+function UI.SetCursorFree(free: boolean)
+	if cursorFree == free then
+		return
+	end
+	cursorFree = free
+	if refs.cursorFree then
+		refs.cursorFree.Visible = free
+	end
+	menuChanged()
+end
+
 function UI.OpenShop()
 	shopOpen = true
+	menuChanged()
 	refs.shop.Visible = true
 	renderShop()
 	Audio.Play("UI")
 end
 
 function UI.CloseShop()
+	local was = shopOpen
 	shopOpen = false
+	if was then
+		menuChanged()
+	end
 	refs.shop.Visible = false
 end
 
@@ -342,6 +376,11 @@ local function build()
 		BorderSizePixel = 0, ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, shop)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }, refs.shopList)
 	refs.shop = shop
+	-- Invisible Modal button: while the shop is visible the mouse cursor is released (even in first person).
+	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
+		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, shop)
+	refs.cursorFree = mk("TextButton", { Name = "CursorFree", Text = "", BackgroundTransparency = 1, Modal = true,
+		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5), Visible = false }, gui)
 end
 
 function UI.GetGui(): ScreenGui

@@ -148,6 +148,12 @@ Defs.Treasure = {
 	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
 }
 
+-- The ONE reach rule. Server validates with it; the client reach indicator uses the same function.
+-- Distance is measured from the character's HumanoidRootPart to the dig cell's centre.
+function Defs.DigReachLimit(tool): number
+	return tool.Reach + Config.Dig.ReachPadding + Config.Site.CellSize
+end
+
 function Defs.LayerAtCell(y: number)
 	local found = Config.Layers[1]
 	for _, layer in ipairs(Config.Layers) do
@@ -711,7 +717,7 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 		return
 	end
 	local center = Grid.CellCenter(x, y, z)
-	local maxDist = tool.Reach + Config.Dig.ReachPadding + Grid.CellSize
+	local maxDist = Defs.DigReachLimit(tool)
 	if (hrp.Position - center).Magnitude > maxDist then
 		return
 	end
@@ -1694,9 +1700,208 @@ return Audio
           </Item>
           <Item class="ModuleScript" referent="27">
             <Properties>
+              <string name="Name">CameraController</string>
+              <string name="Source"><![CDATA[-- Desktop camera: Roblox's built-in first-person (LockFirstPerson) + a temporary V toggle to compare with
+-- third person. Also owns the crosshair and the "free cursor" key. Does nothing on touch devices.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local UI = require(script.Parent.UIController)
+
+local P = Config.Palette
+local player = Players.LocalPlayer
+
+local CameraController = {}
+
+local TOGGLE_KEY = Enum.KeyCode.V -- temporary comparison toggle
+local FREE_CURSOR_KEY = Enum.KeyCode.LeftAlt -- hold to release the cursor in first person (e.g. click TO CAMP)
+local START_FIRST_PERSON = true
+local THIRD_PERSON_DISTANCE = 12
+local SHOVEL_FADE = 0.8 -- LocalTransparencyModifier applied only while the shovel covers the crosshair
+
+local desktop = not UserInputService.TouchEnabled
+local wantFirst = START_FIRST_PERSON
+
+local crossGui: ScreenGui
+local cross: Frame
+local crossStroke: UIStroke
+local hint: TextLabel
+local crossState = "none"
+
+local toolParams = RaycastParams.new()
+toolParams.FilterType = Enum.RaycastFilterType.Include
+local lastTool: Instance? = nil
+local fade = 0
+
+function CameraController.IsDesktop(): boolean
+	return desktop
+end
+
+function CameraController.IsFirstPerson(): boolean
+	return desktop and wantFirst
+end
+
+-- "hit" (in reach), "far" (valid block out of reach) or "none"
+function CameraController.SetCrosshairState(state: string)
+	crossState = state
+end
+
+local function applyMode()
+	if not desktop then
+		return
+	end
+	if wantFirst then
+		player.CameraMode = Enum.CameraMode.LockFirstPerson
+	else
+		player.CameraMode = Enum.CameraMode.Classic
+		-- Pull the camera back out of first person, then give the player their normal zoom range again.
+		player.CameraMinZoomDistance = THIRD_PERSON_DISTANCE
+		task.delay(0.15, function()
+			player.CameraMinZoomDistance = 0.5
+		end)
+	end
+	if hint then
+		hint.Text = wantFirst and "FIRST PERSON  -  V: switch view  -  hold ALT: free cursor"
+			or "THIRD PERSON  -  V: switch view"
+	end
+end
+
+function CameraController.Toggle()
+	if desktop then
+		wantFirst = not wantFirst
+		applyMode()
+	end
+end
+
+local function buildHud()
+	crossGui = Instance.new("ScreenGui")
+	crossGui.Name = "CameraHUD"
+	crossGui.ResetOnSpawn = false
+	crossGui.IgnoreGuiInset = true -- so scale 0.5/0.5 is exactly ViewportSize / 2, where the ray is cast
+	crossGui.DisplayOrder = 5
+	crossGui.Parent = player:WaitForChild("PlayerGui")
+
+	cross = Instance.new("Frame")
+	cross.Name = "Crosshair"
+	cross.AnchorPoint = Vector2.new(0.5, 0.5)
+	cross.Position = UDim2.fromScale(0.5, 0.5)
+	cross.Size = UDim2.fromOffset(6, 6)
+	cross.BackgroundColor3 = P.Cream
+	cross.BorderSizePixel = 0
+	cross.Active = false
+	cross.Visible = false
+	cross.Parent = crossGui
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(1, 0)
+	c.Parent = cross
+	crossStroke = Instance.new("UIStroke")
+	crossStroke.Color = P.Dark
+	crossStroke.Thickness = 1.5
+	crossStroke.Parent = cross
+
+	hint = Instance.new("TextLabel")
+	hint.Name = "ViewHint"
+	hint.BackgroundTransparency = 1
+	hint.AnchorPoint = Vector2.new(0.5, 1)
+	hint.Position = UDim2.new(0.5, 0, 1, -8)
+	hint.Size = UDim2.fromOffset(520, 20)
+	hint.Font = Enum.Font.FredokaOne
+	hint.TextSize = 14
+	hint.TextColor3 = P.Cream
+	hint.TextTransparency = 0.35
+	hint.TextStrokeTransparency = 0.6
+	hint.Visible = desktop
+	hint.Parent = crossGui
+end
+
+-- Fades the held shovel only while it would sit on top of the crosshair (one extra ray; no art changes).
+local function updateToolClearance(dt: number)
+	local char = player.Character
+	local tool = char and char:FindFirstChild("Shovel")
+	local target = 0
+	if tool and CameraController.IsFirstPerson() and not UI.IsMenuOpen() then
+		if tool ~= lastTool then
+			lastTool = tool
+			toolParams.FilterDescendantsInstances = { tool }
+		end
+		local cam = Workspace.CurrentCamera
+		local vp = cam.ViewportSize / 2
+		local ray = cam:ViewportPointToRay(vp.X, vp.Y)
+		if Workspace:Raycast(ray.Origin, ray.Direction * 40, toolParams) then
+			target = SHOVEL_FADE
+		end
+	end
+	fade += (target - fade) * math.min(1, dt * 14)
+	if tool and (fade > 0.01 or target > 0) then
+		for _, d in ipairs(tool:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.LocalTransparencyModifier = fade
+			end
+		end
+	elseif tool and fade <= 0.01 and lastTool == tool then
+		for _, d in ipairs(tool:GetDescendants()) do
+			if d:IsA("BasePart") and d.LocalTransparencyModifier ~= 0 then
+				d.LocalTransparencyModifier = 0
+			end
+		end
+	end
+end
+
+function CameraController.Init()
+	buildHud()
+	if not desktop then
+		return
+	end
+	applyMode()
+	player.CharacterAdded:Connect(applyMode)
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed or UserInputService:GetFocusedTextBox() then
+			return
+		end
+		if input.KeyCode == TOGGLE_KEY then
+			CameraController.Toggle()
+		elseif input.KeyCode == FREE_CURSOR_KEY and wantFirst then
+			UI.SetCursorFree(true)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.KeyCode == FREE_CURSOR_KEY then
+			UI.SetCursorFree(false)
+		end
+	end)
+	UserInputService.WindowFocusReleased:Connect(function()
+		UI.SetCursorFree(false)
+	end)
+
+	RunService.RenderStepped:Connect(function(dt)
+		local show = CameraController.IsFirstPerson() and not UI.IsMenuOpen()
+			and player.Character ~= nil
+		cross.Visible = show
+		if show then
+			cross.BackgroundColor3 = crossState == "hit" and P.Gold or (crossState == "far" and P.Danger or P.Cream)
+		end
+		updateToolClearance(dt)
+	end)
+end
+
+return CameraController
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="28">
+            <Properties>
               <string name="Name">DigController</string>
-              <string name="Source"><![CDATA[-- Input + targeting for digging. Desktop: hold click/tap on dirt. Mobile: tap/hold the dirt, or hold the DIG button
--- (auto-aims forward-down). The client only *requests* hits; the server validates everything.
+              <string name="Source"><![CDATA[-- Input + targeting for digging.
+--   Desktop first person : ray from the exact screen centre (the crosshair), re-cast every frame.
+--   Desktop third person : ray from the mouse cursor.
+--   Touch                : unchanged (tap/hold the dirt, or hold the DIG button which auto-aims).
+-- ONE targeting result per frame drives both the highlight and the hit request. The client only *requests*
+-- hits; the server validates tool, cooldown, reach, cell state and rewards.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -1706,12 +1911,14 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Effects = require(script.Parent.EffectsController)
 local UI = require(script.Parent.UIController)
+local CameraController = require(script.Parent.CameraController)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
@@ -1721,52 +1928,86 @@ local FEEL = {
 	SwingPitchSign = 1, -- flip to -1 if the shovel swings the wrong way
 	SwingWindup = 0.9, -- radians
 	SwingStrike = 0.7,
+	FirstPersonRayPadding = 6, -- studs beyond the reach limit that first person still reports a target
 }
 
 local TOUCH = UserInputService.TouchEnabled
 local digHit = Remotes.Get("DigHit")
 
 local pointerHeld = false
-local pointerPos: Vector2? = nil
+local pointerPos: Vector2? = nil -- touch only
 local buttonHeld = false
 local lastSent = 0
 local targetBox: SelectionBox
 local swingToken = 0
 
+-- Ignore the local character (incl. the held shovel) and cosmetic effects; everything solid still blocks.
+-- RespectCanCollide skips non-solid helpers (invisible prompts, fading chunks, locally-broken blocks).
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.RespectCanCollide = true
+
+local function refreshFilter()
+	local list: { Instance } = { Effects.GetFolder() }
+	if player.Character then
+		table.insert(list, player.Character)
+	end
+	rayParams.FilterDescendantsInstances = list
+end
+
+type Target = {
+	Part: Part,
+	Position: Vector3,
+	Normal: Vector3,
+	X: number,
+	Y: number,
+	Z: number,
+	InReach: boolean,
+}
+
 local function viewportPos(input: InputObject): Vector2
 	return Vector2.new(input.Position.X, input.Position.Y) + GuiService:GetGuiInset()
 end
 
-local function siteParams(): RaycastParams?
+-- Casts one ray. Only counts if the FIRST relevant surface is a dig cell.
+local function castDig(origin: Vector3, dir: Vector3): Target?
+	local result = Workspace:Raycast(origin, dir, rayParams)
+	if not result then
+		return nil
+	end
+	local inst = result.Instance
 	local site = Workspace:FindFirstChild("DigSite")
-	if not site then
+	if not site or inst.Parent ~= site or not inst:IsA("Part") then
 		return nil
 	end
-	local rp = RaycastParams.new()
-	rp.FilterType = Enum.RaycastFilterType.Include
-	rp.FilterDescendantsInstances = { site }
-	return rp
-end
-
-local function castResult(origin: Vector3, dir: Vector3): (Part?, Vector3?, Vector3?)
-	local rp = siteParams()
-	if not rp then
+	local idx = tonumber(inst.Name)
+	if not idx or idx < 1 or idx > Grid.Count then
 		return nil
 	end
-	local r = Workspace:Raycast(origin, dir, rp)
-	if r and r.Instance:IsA("Part") and tonumber(r.Instance.Name) then
-		return r.Instance, r.Position, r.Normal
+	local x, y, z = Grid.FromIndex(idx)
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	local inReach = false
+	if hrp then
+		-- exactly the server's rule (Defs.DigReachLimit, HRP -> cell centre)
+		inReach = ((hrp :: BasePart).Position - Grid.CellCenter(x, y, z)).Magnitude <= Defs.DigReachLimit(State.Tool())
 	end
-	return nil
+	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach }
 end
 
-local function aimFromScreen(vp: Vector2): (Part?, Vector3?, Vector3?)
+local function aimScreen(vp: Vector2, length: number): Target?
+	local ray = Workspace.CurrentCamera:ViewportPointToRay(vp.X, vp.Y)
+	return castDig(ray.Origin, ray.Direction * length)
+end
+
+-- First person: the crosshair. Always the exact viewport centre, recomputed every frame.
+local function aimCenter(): Target?
 	local cam = Workspace.CurrentCamera
-	local ray = cam:ViewportPointToRay(vp.X, vp.Y)
-	return castResult(ray.Origin, ray.Direction * 300)
+	local c = cam.ViewportSize / 2
+	return aimScreen(c, Defs.DigReachLimit(State.Tool()) + FEEL.FirstPersonRayPadding)
 end
 
-local function aimAuto(): (Part?, Vector3?, Vector3?)
+-- Touch DIG button: forward-down from the character, then straight down.
+local function aimAuto(): Target?
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	if not hrp then
 		return nil
@@ -1780,20 +2021,25 @@ local function aimAuto(): (Part?, Vector3?, Vector3?)
 		Vector3.new(0, -1, 0),
 	}
 	for _, d in ipairs(dirs) do
-		local part, pos, normal = castResult(origin, d * (reach + 2))
-		if part then
-			return part, pos, normal
+		local t = castDig(origin, d * (reach + 2))
+		if t then
+			return t
 		end
 	end
 	return nil
 end
 
-local function inReach(part: Part): boolean
-	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-	if not hrp then
-		return false
+local function acquireTarget(): Target?
+	if CameraController.IsFirstPerson() then
+		return aimCenter()
 	end
-	return (hrp.Position - part.Position).Magnitude <= State.Tool().Reach + Grid.CellSize
+	if buttonHeld then
+		return aimAuto()
+	end
+	if TOUCH then
+		return (pointerHeld and pointerPos) and aimScreen(pointerPos, 300) or nil
+	end
+	return aimScreen(UserInputService:GetMouseLocation(), 300)
 end
 
 local function swing(interval: number)
@@ -1831,6 +2077,7 @@ local function swing(interval: number)
 	end)
 end
 
+-- Third person / touch only. First person lets the camera and normal controls own orientation.
 local function faceTarget(pos: Vector3)
 	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	if not hrp then
@@ -1842,17 +2089,64 @@ local function faceTarget(pos: Vector3)
 	end
 end
 
-local function currentAim(): (Part?, Vector3?, Vector3?)
-	if buttonHeld then
-		return aimAuto()
+-- Drops every held input. Mining only resumes after a FRESH press.
+function DigController.ClearInput()
+	pointerHeld = false
+	buttonHeld = false
+	pointerPos = nil
+end
+
+local function isBlocked(): boolean
+	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil
+end
+
+local function onStep()
+	local blocked = isBlocked()
+	if blocked then
+		DigController.ClearInput()
 	end
-	if pointerHeld and pointerPos then
-		return aimFromScreen(pointerPos)
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		DigController.ClearInput()
+		blocked = true
 	end
-	if not TOUCH then
-		return aimFromScreen(UserInputService:GetMouseLocation())
+
+	local target: Target? = nil
+	if not blocked then
+		target = acquireTarget()
+		if target and not target.Part.Parent then
+			target = nil
+		end
 	end
-	return nil
+
+	-- Highlight + crosshair come from the very same result the hit request uses below.
+	if target then
+		targetBox.Adornee = target.Part
+		targetBox.Color3 = target.InReach and P.Gold or P.Danger
+		CameraController.SetCrosshairState(target.InReach and "hit" or "far")
+	else
+		targetBox.Adornee = nil
+		CameraController.SetCrosshairState("none")
+	end
+
+	if blocked or not target or not (pointerHeld or buttonHeld) or not target.InReach then
+		return
+	end
+
+	local interval = 1 / State.Tool().Rate
+	local now = os.clock()
+	if now - lastSent < interval then
+		return
+	end
+	lastSent = now
+
+	digHit:FireServer(target.X, target.Y, target.Z)
+	if not CameraController.IsFirstPerson() then
+		faceTarget(target.Part.Position)
+	end
+	swing(interval)
+	Effects.NoteFace(target.Part, target.Normal)
+	Effects.Impact(target.Part, target.Position, target.Normal)
 end
 
 function DigController.Init()
@@ -1864,8 +2158,29 @@ function DigController.Init()
 	targetBox.SurfaceTransparency = 0.85
 	targetBox.Parent = Workspace
 
+	refreshFilter()
+
+	local function onCharacter(char: Model)
+		refreshFilter()
+		DigController.ClearInput()
+		local hum = char:WaitForChild("Humanoid", 10)
+		if hum then
+			(hum :: Humanoid).Died:Connect(DigController.ClearInput)
+		end
+	end
+	player.CharacterAdded:Connect(onCharacter)
+	if player.Character then
+		task.spawn(onCharacter, player.Character)
+	end
+
+	-- Anything that steals the cursor/keyboard drops held mining.
+	UI.OnMenuChanged(DigController.ClearInput)
+	UserInputService.WindowFocusReleased:Connect(DigController.ClearInput)
+	UserInputService.TextBoxFocused:Connect(DigController.ClearInput)
+	GuiService.MenuOpened:Connect(DigController.ClearInput)
+
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then
+		if processed or isBlocked() then
 			return
 		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -1876,7 +2191,9 @@ function DigController.Init()
 		end
 	end)
 	UserInputService.InputChanged:Connect(function(input)
-		if pointerHeld and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		if pointerHeld and input.UserInputType == Enum.UserInputType.Touch then
+			pointerPos = viewportPos(input)
+		elseif pointerHeld and TOUCH and input.UserInputType == Enum.UserInputType.MouseMovement then
 			pointerPos = viewportPos(input)
 		end
 	end)
@@ -1888,7 +2205,7 @@ function DigController.Init()
 		end
 	end)
 
-	-- Mobile DIG button
+	-- Mobile DIG button (unchanged)
 	if TOUCH then
 		local btn = Instance.new("TextButton")
 		btn.Name = "DigButton"
@@ -1921,46 +2238,15 @@ function DigController.Init()
 		end)
 	end
 
-	RunService.RenderStepped:Connect(function()
-		local part, pos, normal = currentAim()
-		if part and not part.Parent then
-			part = nil
-		end
-		if part then
-			targetBox.Adornee = part
-			targetBox.Color3 = inReach(part) and P.Gold or P.Danger
-		else
-			targetBox.Adornee = nil
-		end
-
-		if not (pointerHeld or buttonHeld) or not part or not pos or not normal then
-			return
-		end
-		if State.Data.Count == nil or not inReach(part) then
-			return
-		end
-		local tool = State.Tool()
-		local interval = 1 / tool.Rate
-		local now = os.clock()
-		if now - lastSent < interval then
-			return
-		end
-		lastSent = now
-
-		local x, y, z = Grid.FromIndex(tonumber(part.Name) :: number)
-		digHit:FireServer(x, y, z)
-		faceTarget(part.Position)
-		swing(interval)
-		Effects.NoteFace(part, normal)
-		Effects.Impact(part, pos, normal)
-	end)
+	-- After the camera has updated, so the centre ray uses this frame's final camera.
+	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 1, onStep)
 end
 
 return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="28">
+          <Item class="ModuleScript" referent="29">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -1977,6 +2263,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local Audio = require(script.Parent.AudioController)
 local UI = require(script.Parent.UIController)
+local CameraController = require(script.Parent.CameraController)
 
 local player = Players.LocalPlayer
 local Effects = {}
@@ -1992,6 +2279,7 @@ local FEEL = {
 	CameraKickImpact = 0.05,
 	CameraKickBreak = 0.16,
 	CameraKickDecay = 7,
+	CameraKickInFirstPerson = false, -- first-person starts with no mining kick; flip to test
 }
 
 local fxFolder = Instance.new("Folder")
@@ -2124,6 +2412,9 @@ end
 -- Camera kick -------------------------------------------------------------------------------
 local kick = 0
 local function cameraKick(amount: number)
+	if CameraController.IsFirstPerson() and not FEEL.CameraKickInFirstPerson then
+		return
+	end
 	kick = math.max(kick, amount)
 end
 
@@ -2196,6 +2487,16 @@ local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, fa
 	if dead then
 		if part then
 			shaking[part] = nil
+			-- Make the broken block instantly invisible to targeting/collision on this client, so a held click
+			-- retargets the block behind it without waiting for the server's destroy to replicate.
+			part.CanQuery = false
+			part.CanCollide = false
+			part.Transparency = 1
+			for _, child in ipairs(part:GetChildren()) do
+				if child:IsA("SurfaceGui") then
+					child:Destroy()
+				end
+			end
 		end
 		local color = layerColorAt(y)
 		burst(center, Vector3.yAxis, color, FEEL.BreakChunks, 24, 1.3)
@@ -2332,6 +2633,10 @@ function Effects.RevealTreasure(info)
 	end)
 end
 
+function Effects.GetFolder(): Folder
+	return fxFolder
+end
+
 function Effects.Init()
 	Remotes.Get("DigResult").OnClientEvent:Connect(function(payload)
 		local mine = payload.Digger == player.UserId
@@ -2350,7 +2655,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="29">
+          <Item class="ModuleScript" referent="30">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -2371,7 +2676,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="30">
+          <Item class="ModuleScript" referent="31">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -2416,7 +2721,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="31">
+          <Item class="ModuleScript" referent="32">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- All UI is built from code (no manual UI objects). Scale-based + UIScale so it works on phones and desktop.
@@ -2447,6 +2752,14 @@ local TOUCH = UserInputService.TouchEnabled
 local gui: ScreenGui
 local refs: { [string]: any } = {}
 local shopOpen = false
+local cursorFree = false -- held "free cursor" key (first-person)
+local menuCallbacks: { () -> () } = {}
+
+local function menuChanged()
+	for _, cb in ipairs(menuCallbacks) do
+		task.spawn(cb)
+	end
+end
 
 local function mk(class: string, props: { [string]: any }, parent: Instance?): any
 	local o = Instance.new(class)
@@ -2609,15 +2922,41 @@ local function renderShop()
 	end
 end
 
+-- True while any interactive menu wants the cursor (shop, or the held free-cursor key).
+function UI.IsMenuOpen(): boolean
+	return shopOpen or cursorFree
+end
+
+function UI.OnMenuChanged(cb: () -> ())
+	table.insert(menuCallbacks, cb)
+end
+
+-- First-person locks the mouse; a visible Modal button is Roblox's supported way to release it.
+function UI.SetCursorFree(free: boolean)
+	if cursorFree == free then
+		return
+	end
+	cursorFree = free
+	if refs.cursorFree then
+		refs.cursorFree.Visible = free
+	end
+	menuChanged()
+end
+
 function UI.OpenShop()
 	shopOpen = true
+	menuChanged()
 	refs.shop.Visible = true
 	renderShop()
 	Audio.Play("UI")
 end
 
 function UI.CloseShop()
+	local was = shopOpen
 	shopOpen = false
+	if was then
+		menuChanged()
+	end
 	refs.shop.Visible = false
 end
 
@@ -2763,6 +3102,11 @@ local function build()
 		BorderSizePixel = 0, ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, shop)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }, refs.shopList)
 	refs.shop = shop
+	-- Invisible Modal button: while the shop is visible the mouse cursor is released (even in first person).
+	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
+		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, shop)
+	refs.cursorFree = mk("TextButton", { Name = "CursorFree", Text = "", BackgroundTransparency = 1, Modal = true,
+		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5), Visible = false }, gui)
 end
 
 function UI.GetGui(): ScreenGui
@@ -2833,7 +3177,7 @@ return UI
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="32">
+        <Item class="LocalScript" referent="33">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
@@ -2843,12 +3187,14 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Controllers = script.Parent:WaitForChild("Controllers")
 local State = require(Controllers.State)
 local UI = require(Controllers.UIController)
+local Camera = require(Controllers.CameraController)
 local Effects = require(Controllers.EffectsController)
 local Dig = require(Controllers.DigController)
 local Interaction = require(Controllers.InteractionController)
 
 State.Init()
 UI.Init()
+Camera.Init()
 Effects.Init()
 Dig.Init()
 Interaction.Init()

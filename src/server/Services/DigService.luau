@@ -52,7 +52,7 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 		return
 	end
 	local center = Grid.CellCenter(x, y, z)
-	local maxDist = tool.Reach + Config.Dig.ReachPadding + Grid.CellSize
+	local maxDist = Defs.DigReachLimit(tool)
 	if (hrp.Position - center).Magnitude > maxDist then
 		return
 	end

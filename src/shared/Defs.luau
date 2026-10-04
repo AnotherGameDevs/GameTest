@@ -47,6 +47,12 @@ Defs.Treasure = {
 	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
 }
 
+-- The ONE reach rule. Server validates with it; the client reach indicator uses the same function.
+-- Distance is measured from the character's HumanoidRootPart to the dig cell's centre.
+function Defs.DigReachLimit(tool): number
+	return tool.Reach + Config.Dig.ReachPadding + Config.Site.CellSize
+end
+
 function Defs.LayerAtCell(y: number)
 	local found = Config.Layers[1]
 	for _, layer in ipairs(Config.Layers) do
