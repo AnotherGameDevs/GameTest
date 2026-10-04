@@ -338,7 +338,14 @@ def build_all():
         d = os.path.join(OUT, tid); os.makedirs(d, exist_ok=True)
         allv = np.concatenate([np.concatenate(t) for t in m.groups.values()])
         lo, hi = allv.min(axis=0), allv.max(axis=0)
-        entry = {"bounds_min": [round(float(x), 3) for x in lo], "bounds_max": [round(float(x), 3) for x in hi], "groups": {}}
+        # Recentre the WHOLE object (every group by the same offset) so the pivot is the bounding-box centre: it then does not matter
+        # whether an importer keeps the authored origin or recentres each mesh, and the bounds are symmetric about the origin.
+        centre = (lo + hi) / 2
+        for g in m.groups:
+            m.groups[g] = [t - centre for t in m.groups[g]]
+        allv = np.concatenate([np.concatenate(t) for t in m.groups.values()])
+        lo, hi = allv.min(axis=0), allv.max(axis=0)
+        entry = {"pivot": "bounding-box centre of the whole object (same for every group)", "units": "studs (1 OBJ unit = 1 stud)", "up": "+Y", "front": "+Z", "bounds_min": [round(float(x), 3) for x in lo], "bounds_max": [round(float(x), 3) for x in hi], "groups": {}}
         for g, tris in m.groups.items():
             write_obj(os.path.join(d, g + ".obj"), tris, f"{tid}_{g}")
             hexc, mat = groups[g]

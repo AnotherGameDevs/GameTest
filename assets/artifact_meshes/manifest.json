@@ -1,14 +1,18 @@
 {
  "pottery_shard": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
    -1.285,
-   -1.224,
-   -0.851
+   -1.273,
+   -0.441
   ],
   "bounds_max": [
    1.285,
-   1.321,
-   0.03
+   1.273,
+   0.441
   ],
   "groups": {
    "outer": {
@@ -38,14 +42,18 @@
   }
  },
  "cut_gemstone": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
    -1.0,
-   -1.05,
+   -0.825,
    -1.0
   ],
   "bounds_max": [
    1.0,
-   0.6,
+   0.825,
    1.0
   ],
   "groups": {
@@ -64,15 +72,19 @@
   }
  },
  "fossil_fragment": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
-   -1.158,
-   -1.012,
-   -0.436
+   -1.304,
+   -1.048,
+   -0.432
   ],
   "bounds_max": [
-   1.45,
-   1.085,
-   0.428
+   1.304,
+   1.048,
+   0.432
   ],
   "groups": {
    "rock": {
@@ -90,14 +102,18 @@
   }
  },
  "clay_figurine": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
-   -0.87,
-   -1.55,
+   -0.888,
+   -1.695,
    -0.556
   ],
   "bounds_max": [
-   0.906,
-   1.84,
+   0.888,
+   1.695,
    0.556
   ],
   "groups": {
@@ -122,14 +138,18 @@
   }
  },
  "fossil_claw": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
-   -1.0,
-   -1.823,
+   -1.362,
+   -1.579,
    -0.683
   ],
   "bounds_max": [
-   1.724,
-   1.335,
+   1.362,
+   1.579,
    0.683
   ],
   "groups": {
@@ -154,15 +174,19 @@
   }
  },
  "golden_scarab": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
    -1.694,
-   -0.756,
-   -1.854
+   -0.653,
+   -1.865
   ],
   "bounds_max": [
    1.694,
-   0.55,
-   1.876
+   0.653,
+   1.865
   ],
   "groups": {
    "shell": {
@@ -192,15 +216,19 @@
   }
  },
  "sun_mask": {
+  "pivot": "bounding-box centre of the whole object (same for every group)",
+  "units": "studs (1 OBJ unit = 1 stud)",
+  "up": "+Y",
+  "front": "+Z",
   "bounds_min": [
    -1.4,
-   -1.95,
-   -0.55
+   -1.75,
+   -0.641
   ],
   "bounds_max": [
    1.4,
-   1.55,
-   0.732
+   1.75,
+   0.641
   ],
   "groups": {
    "gold": {

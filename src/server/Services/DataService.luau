@@ -10,6 +10,7 @@ local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
 local SessionLock = require(script.Parent.SessionLock)
+local SaveMode = require(script.Parent.SaveMode)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
@@ -61,7 +62,8 @@ end
 local store
 if Config.Data.Enabled then
 	local ok, result = pcall(function()
-		return DataStoreService:GetDataStore(Config.Data.StoreName)
+		-- Studio sessions NEVER touch the production store, even if Studio API access is on for the production place.
+		return DataStoreService:GetDataStore(RunService:IsStudio() and Config.Data.StudioStoreName or Config.Data.StoreName)
 	end)
 	if ok then
 		store = result
@@ -72,7 +74,7 @@ end
 
 local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
 local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
-local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, LastWrite: number, Saving: boolean } } = {}
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
 local lastSaveWarn: { [Player]: number } = {}
 
@@ -175,10 +177,8 @@ end
 
 local function load(player: Player)
 	local data
-	local noSave = false
-	local failReason: string? = nil
+	local readOk, locked = true, false
 	if store then
-		local locked = false
 		local ok, result = attempt(function()
 			local read
 			store:UpdateAsync(key(player), function(old)
@@ -194,44 +194,53 @@ local function load(player: Player)
 			end)
 			return read
 		end, 4)
-		if locked then
-			failReason = "Your saved progress is still open on another server. Please rejoin in about a minute."
-			warn("[DataService] Profile locked by another server for " .. player.Name)
-		elseif ok then
+		readOk = ok
+		if ok then
 			data = result
-		else
-			failReason = "Your saved progress could not be loaded. Please rejoin in a moment - nothing was overwritten."
+		end
+		if locked then
+			warn("[DataService] Profile locked by another server for " .. player.Name)
+		elseif not ok then
 			warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
 		end
-		if failReason then
-			noSave = true
+	end
+
+	local hasData = type(data) == "table"
+	local migrateOk = true
+	if hasData then
+		data.SessionLock = nil
+		local okMigrate, errMigrate = pcall(migrate, data)
+		migrateOk = okMigrate
+		if not okMigrate then
+			warn("[DataService] Could not migrate " .. player.Name .. "'s save: " .. tostring(errMigrate))
 		end
 	end
-	if failReason and not isStudio() then
-		-- Production: never let someone play (and lose progress) on a stand-in profile.
+
+	-- One decision for every outcome (SaveMode, unit-tested): anything we could not use is NEVER saved over.
+	local mode = SaveMode.Decide({ StoreAvailable = store ~= nil, ReadOk = readOk and not locked, Locked = locked, HasData = hasData,
+		MigrateOk = migrateOk, IsStudio = isStudio() })
+	if mode.Kick then
+		-- we may hold the lock from a successful read: let go of it, then refuse the join
+		if store and readOk and not locked then
+			pcall(function()
+				store:UpdateAsync(key(player), function(old)
+					if old and old.SessionLock and old.SessionLock.JobId == game.JobId then
+						old.SessionLock = nil
+						return old
+					end
+					return nil
+				end)
+			end)
+		end
 		if player.Parent then
-			player:Kick(failReason)
+			player:Kick(SaveMode.KickMessages[mode.Reason] or "Your saved progress could not be loaded.")
 		end
 		return
 	end
-	if type(data) ~= "table" then
+	if mode.UseDefaults then
 		data = defaultData()
-	else
-		data.SessionLock = nil
-		local okMigrate, errMigrate = pcall(migrate, data)
-		if not okMigrate then
-			-- never play on (or save over) a profile we could not understand
-			warn("[DataService] Could not migrate " .. player.Name .. "'s save: " .. tostring(errMigrate))
-			noSave = true
-			if not isStudio() then
-				if player.Parent then
-					player:Kick("Your saved progress could not be read. Please rejoin - nothing was overwritten.")
-				end
-				return
-			end
-			data = defaultData()
-		end
 	end
+	local noSave = not mode.Persist
 	if not player.Parent then
 		if store and not noSave then
 			-- joined and left before the profile was kept: release the lock we just took
@@ -247,13 +256,21 @@ local function load(player: Player)
 		end
 		return
 	end
-	if noSave and isStudio() then
-		warn("[DataService] DataStore unavailable in Studio - progress this session will not persist.")
+	if noSave then
+		warn(("[DataService] %s plays on a MEMORY-ONLY profile (%s): nothing will be saved this session."):format(player.Name, mode.Reason))
+	elseif isStudio() then
+		print(("[DataService] Studio session saving to the TEST store '%s' (%s)."):format(Config.Data.StudioStoreName, mode.Reason))
 	end
-	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, LastWrite = os.clock(), Saving = false }
+	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false }
 	for _, cb in ipairs(loadedCallbacks) do
 		task.spawn(cb, player, data)
 	end
+end
+
+-- "loaded" / "new-player" (saving) or the reason this profile is memory-only (no-datastore, locked, read-failed, migration-failed).
+function DataService.SaveStatus(player: Player): string?
+	local p = profiles[player]
+	return p and ((p.NoSave and "memory-only: " or "saving: ") .. p.SaveReason) or nil
 end
 
 function DataService.IsPersistent(player: Player): boolean

@@ -2,8 +2,8 @@
 
 **Engine-verified features: NONE.** Nothing in this project has ever been run in Roblox Studio or on a live server (this environment has no
 Studio). The columns below keep three things apart: *Implemented* (code exists), *Offline-verified* (unit tests / type-check / desk review) and
-*Engine-verified* (observed in Studio). Every row's Engine column is ❌ until you send playtest results. In-engine tests: `docs/PLAYTEST_PLAN.md`,
-`docs/RELIC_PLAYTEST.md`.
+*Engine-verified* (observed in Studio). Every row's Engine column is ❌ until you send playtest results. In-engine tests: **`docs/STUDIO_INTEGRATION_CHECKLIST.md` (start here)**, `docs/PLAYTEST_PLAN.md`,
+`docs/RELIC_PLAYTEST.md`. Pre-flight without Studio: `python3 tools/preflight.py`.
 
 ## Audit summary (Stage 1)
 Found at the start of this pass: complete server-authoritative loop, 8-tier tools, carry-to-camp artifacts, elevator,

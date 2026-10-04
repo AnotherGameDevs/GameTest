@@ -365,7 +365,9 @@ Config.Collection = {
 -- documented FALLBACK for the artifacts listed in TreasureModels.MeshRequired (their silhouette requirement is not met by parts).
 -- Entry: Config.MeshAssets[treasureId] = { { Name = "outer", MeshId = "rbxassetid://123", Color = "B5683F", Material = "SmoothPlastic",
 --   Size = Vector3.new(x, y, z) (the mesh's native bounding size in studs, from assets/artifact_meshes/manifest.json) }, ... }
+-- MESH_ASSETS_BEGIN (rewritten by tools/apply_mesh_ids.py - do not hand-edit between the markers)
 Config.MeshAssets = {}
+-- MESH_ASSETS_END
 
 -- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
 Config.Mine = {
@@ -426,7 +428,8 @@ Config.Starting = {
 
 Config.Data = {
 	Enabled = true, -- false = never touch DataStore (everything in memory)
-	StoreName = "DigAndRun_PlayerData_v1",
+	StoreName = "DigAndRun_PlayerData_v1", -- PRODUCTION store (published servers only)
+	StudioStoreName = "DigAndRun_STUDIO_TEST_v1", -- Studio sessions use this isolated store, never the production one
 	AutosaveInterval = 60,
 	CurrentVersion = 3, -- v2: eight-tier tool progression; v3: collection display + onboarding progress
 }
@@ -4015,6 +4018,7 @@ local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
 local SessionLock = require(script.Parent.SessionLock)
+local SaveMode = require(script.Parent.SaveMode)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
@@ -4066,7 +4070,8 @@ end
 local store
 if Config.Data.Enabled then
 	local ok, result = pcall(function()
-		return DataStoreService:GetDataStore(Config.Data.StoreName)
+		-- Studio sessions NEVER touch the production store, even if Studio API access is on for the production place.
+		return DataStoreService:GetDataStore(RunService:IsStudio() and Config.Data.StudioStoreName or Config.Data.StoreName)
 	end)
 	if ok then
 		store = result
@@ -4077,7 +4082,7 @@ end
 
 local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
 local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
-local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, LastWrite: number, Saving: boolean } } = {}
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
 local lastSaveWarn: { [Player]: number } = {}
 
@@ -4180,10 +4185,8 @@ end
 
 local function load(player: Player)
 	local data
-	local noSave = false
-	local failReason: string? = nil
+	local readOk, locked = true, false
 	if store then
-		local locked = false
 		local ok, result = attempt(function()
 			local read
 			store:UpdateAsync(key(player), function(old)
@@ -4199,44 +4202,53 @@ local function load(player: Player)
 			end)
 			return read
 		end, 4)
-		if locked then
-			failReason = "Your saved progress is still open on another server. Please rejoin in about a minute."
-			warn("[DataService] Profile locked by another server for " .. player.Name)
-		elseif ok then
+		readOk = ok
+		if ok then
 			data = result
-		else
-			failReason = "Your saved progress could not be loaded. Please rejoin in a moment - nothing was overwritten."
+		end
+		if locked then
+			warn("[DataService] Profile locked by another server for " .. player.Name)
+		elseif not ok then
 			warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
 		end
-		if failReason then
-			noSave = true
+	end
+
+	local hasData = type(data) == "table"
+	local migrateOk = true
+	if hasData then
+		data.SessionLock = nil
+		local okMigrate, errMigrate = pcall(migrate, data)
+		migrateOk = okMigrate
+		if not okMigrate then
+			warn("[DataService] Could not migrate " .. player.Name .. "'s save: " .. tostring(errMigrate))
 		end
 	end
-	if failReason and not isStudio() then
-		-- Production: never let someone play (and lose progress) on a stand-in profile.
+
+	-- One decision for every outcome (SaveMode, unit-tested): anything we could not use is NEVER saved over.
+	local mode = SaveMode.Decide({ StoreAvailable = store ~= nil, ReadOk = readOk and not locked, Locked = locked, HasData = hasData,
+		MigrateOk = migrateOk, IsStudio = isStudio() })
+	if mode.Kick then
+		-- we may hold the lock from a successful read: let go of it, then refuse the join
+		if store and readOk and not locked then
+			pcall(function()
+				store:UpdateAsync(key(player), function(old)
+					if old and old.SessionLock and old.SessionLock.JobId == game.JobId then
+						old.SessionLock = nil
+						return old
+					end
+					return nil
+				end)
+			end)
+		end
 		if player.Parent then
-			player:Kick(failReason)
+			player:Kick(SaveMode.KickMessages[mode.Reason] or "Your saved progress could not be loaded.")
 		end
 		return
 	end
-	if type(data) ~= "table" then
+	if mode.UseDefaults then
 		data = defaultData()
-	else
-		data.SessionLock = nil
-		local okMigrate, errMigrate = pcall(migrate, data)
-		if not okMigrate then
-			-- never play on (or save over) a profile we could not understand
-			warn("[DataService] Could not migrate " .. player.Name .. "'s save: " .. tostring(errMigrate))
-			noSave = true
-			if not isStudio() then
-				if player.Parent then
-					player:Kick("Your saved progress could not be read. Please rejoin - nothing was overwritten.")
-				end
-				return
-			end
-			data = defaultData()
-		end
 	end
+	local noSave = not mode.Persist
 	if not player.Parent then
 		if store and not noSave then
 			-- joined and left before the profile was kept: release the lock we just took
@@ -4252,13 +4264,21 @@ local function load(player: Player)
 		end
 		return
 	end
-	if noSave and isStudio() then
-		warn("[DataService] DataStore unavailable in Studio - progress this session will not persist.")
+	if noSave then
+		warn(("[DataService] %s plays on a MEMORY-ONLY profile (%s): nothing will be saved this session."):format(player.Name, mode.Reason))
+	elseif isStudio() then
+		print(("[DataService] Studio session saving to the TEST store '%s' (%s)."):format(Config.Data.StudioStoreName, mode.Reason))
 	end
-	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, LastWrite = os.clock(), Saving = false }
+	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false }
 	for _, cb in ipairs(loadedCallbacks) do
 		task.spawn(cb, player, data)
 	end
+end
+
+-- "loaded" / "new-player" (saving) or the reason this profile is memory-only (no-datastore, locked, read-failed, migration-failed).
+function DataService.SaveStatus(player: Player): string?
+	local p = profiles[player]
+	return p and ((p.NoSave and "memory-only: " or "saving: ") .. p.SaveReason) or nil
 end
 
 function DataService.IsPersistent(player: Player): boolean
@@ -6642,6 +6662,49 @@ return RelicService
         </Item>
         <Item class="ModuleScript" referent="48">
           <Properties>
+            <string name="Name">SaveMode</string>
+            <string name="Source"><![CDATA[-- Pure decision: what DataService may do with a player's profile after trying to load it (tests/saving_test.luau).
+-- The one rule that matters: a profile that exists in the DataStore but could not be read, was locked by another live server, or
+-- could not be migrated is NEVER saved over. Stand-in default profiles are memory-only; in a published server the player is kicked instead.
+local SaveMode = {}
+
+-- ctx = { StoreAvailable, ReadOk, Locked, HasData, MigrateOk, IsStudio }
+-- returns { Persist = may this profile ever be written?, UseDefaults = start from a default profile?, Kick = message or nil, Reason = string }
+function SaveMode.Decide(ctx)
+	if not ctx.StoreAvailable then
+		return { Persist = false, UseDefaults = true, Kick = nil, Reason = "no-datastore" } -- memory only, nothing to overwrite
+	end
+	local problem
+	if ctx.Locked then
+		problem = "locked"
+	elseif not ctx.ReadOk then
+		problem = "read-failed"
+	elseif ctx.HasData and not ctx.MigrateOk then
+		problem = "migration-failed"
+	end
+	if problem then
+		return {
+			Persist = false, -- never write over what we could not use
+			UseDefaults = true,
+			Kick = (not ctx.IsStudio) and problem or nil, -- published servers kick; Studio plays on a memory-only stand-in
+			Reason = problem,
+		}
+	end
+	return { Persist = true, UseDefaults = not ctx.HasData, Kick = nil, Reason = ctx.HasData and "loaded" or "new-player" }
+end
+
+SaveMode.KickMessages = {
+	locked = "Your saved progress is still open on another server. Please rejoin in about a minute.",
+	["read-failed"] = "Your saved progress could not be loaded. Please rejoin in a moment - nothing was overwritten.",
+	["migration-failed"] = "Your saved progress could not be read. Please rejoin - nothing was overwritten.",
+}
+
+return SaveMode
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="49">
+          <Properties>
             <string name="Name">SessionLock</string>
             <string name="Source"><![CDATA[-- Pure session-lock rules for DataService (tests/saving_test.luau). A profile records which server (JobId) owns it and when it last
 -- refreshed that claim. A second server may not load a profile that another LIVE server holds; a lock older than `timeout` is treated
@@ -6662,7 +6725,7 @@ return SessionLock
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="49">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -6698,7 +6761,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="50">
+        <Item class="ModuleScript" referent="51">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -7054,7 +7117,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="51">
+        <Item class="ModuleScript" referent="52">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -7120,7 +7183,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="52">
+        <Item class="ModuleScript" referent="53">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -7182,7 +7245,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="53">
+        <Item class="ModuleScript" referent="54">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -7288,7 +7351,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="54">
+        <Item class="ModuleScript" referent="55">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -7698,7 +7761,7 @@ return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="55">
+        <Item class="ModuleScript" referent="56">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -7935,7 +7998,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="56">
+        <Item class="ModuleScript" referent="57">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -8038,7 +8101,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="57">
+        <Item class="ModuleScript" referent="58">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -8169,23 +8232,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="58">
+  <Item class="StarterPlayer" referent="59">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="59">
+    <Item class="StarterPlayerScripts" referent="60">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="60">
+      <Item class="Folder" referent="61">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="61">
+        <Item class="Folder" referent="62">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="62">
+          <Item class="ModuleScript" referent="63">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -8293,7 +8356,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="63">
+          <Item class="ModuleScript" referent="64">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -8325,7 +8388,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="64">
+          <Item class="ModuleScript" referent="65">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -8633,7 +8696,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="65">
+          <Item class="ModuleScript" referent="66">
             <Properties>
               <string name="Name">CampShelf</string>
               <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
@@ -8768,7 +8831,7 @@ return CampShelf
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="66">
+          <Item class="ModuleScript" referent="67">
             <Properties>
               <string name="Name">CollectionUI</string>
               <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
@@ -8990,7 +9053,7 @@ return CollectionUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="67">
+          <Item class="ModuleScript" referent="68">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -9421,7 +9484,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="68">
+          <Item class="ModuleScript" referent="69">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -9864,7 +9927,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="69">
+          <Item class="ModuleScript" referent="70">
             <Properties>
               <string name="Name">GuideController</string>
               <string name="Source"><![CDATA[-- First-time hints ("tutorial"). One short card at a time, bottom-centre, chosen by the pure GuideSpec from the server
@@ -10052,7 +10115,7 @@ return GuideController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="70">
+          <Item class="ModuleScript" referent="71">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -10128,7 +10191,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="71">
+          <Item class="ModuleScript" referent="72">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -10210,7 +10273,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="72">
+          <Item class="ModuleScript" referent="73">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -10516,7 +10579,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="73">
+          <Item class="ModuleScript" referent="74">
             <Properties>
               <string name="Name">RelicController</string>
               <string name="Source"><![CDATA[-- Client side of the contested relic (docs/RELIC_PVP.md). Everything shown here is read from server-published Workspace attributes
@@ -10874,7 +10937,7 @@ return RelicController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="74">
+          <Item class="ModuleScript" referent="75">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -10947,7 +11010,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="75">
+          <Item class="ModuleScript" referent="76">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -11064,7 +11127,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="76">
+          <Item class="ModuleScript" referent="77">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
@@ -11599,7 +11662,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="77">
+          <Item class="ModuleScript" referent="78">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -11645,7 +11708,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="78">
+          <Item class="ModuleScript" referent="79">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -11721,7 +11784,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="79">
+          <Item class="ModuleScript" referent="80">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -12251,7 +12314,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="80">
+          <Item class="ModuleScript" referent="81">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -12365,7 +12428,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="81">
+          <Item class="ModuleScript" referent="82">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -12510,7 +12573,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="82">
+        <Item class="LocalScript" referent="83">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.

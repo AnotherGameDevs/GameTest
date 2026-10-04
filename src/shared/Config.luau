@@ -144,7 +144,9 @@ Config.Collection = {
 -- documented FALLBACK for the artifacts listed in TreasureModels.MeshRequired (their silhouette requirement is not met by parts).
 -- Entry: Config.MeshAssets[treasureId] = { { Name = "outer", MeshId = "rbxassetid://123", Color = "B5683F", Material = "SmoothPlastic",
 --   Size = Vector3.new(x, y, z) (the mesh's native bounding size in studs, from assets/artifact_meshes/manifest.json) }, ... }
+-- MESH_ASSETS_BEGIN (rewritten by tools/apply_mesh_ids.py - do not hand-edit between the markers)
 Config.MeshAssets = {}
+-- MESH_ASSETS_END
 
 -- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
 Config.Mine = {
@@ -205,7 +207,8 @@ Config.Starting = {
 
 Config.Data = {
 	Enabled = true, -- false = never touch DataStore (everything in memory)
-	StoreName = "DigAndRun_PlayerData_v1",
+	StoreName = "DigAndRun_PlayerData_v1", -- PRODUCTION store (published servers only)
+	StudioStoreName = "DigAndRun_STUDIO_TEST_v1", -- Studio sessions use this isolated store, never the production one
 	AutosaveInterval = 60,
 	CurrentVersion = 3, -- v2: eight-tier tool progression; v3: collection display + onboarding progress
 }
