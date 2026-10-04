@@ -6,9 +6,15 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 
+local RunService = game:GetService("RunService")
 local DataService = require(script.Parent.DataService)
 
 local MetricsService = {}
+
+-- Telemetry is a development tool: always on in Studio playtests, off in published servers unless Config enables it.
+local function enabled(): boolean
+	return Config.Metrics.Enabled or RunService:IsStudio()
+end
 
 type Window = { Blocks: number, Cash: number, Items: number, ActiveSeconds: { [number]: boolean }, Start: number }
 local windows: { [Player]: Window } = {}
@@ -29,7 +35,7 @@ local function get(player: Player): Window
 end
 
 function MetricsService.Hit(player: Player, blocksCleared: number)
-	if not Config.Metrics.Enabled then
+	if not enabled() then
 		return
 	end
 	local w = get(player)
@@ -39,7 +45,7 @@ function MetricsService.Hit(player: Player, blocksCleared: number)
 end
 
 function MetricsService.Sold(player: Player, cash: number, items: number)
-	if not Config.Metrics.Enabled then
+	if not enabled() then
 		return
 	end
 	local w = get(player)
@@ -67,7 +73,7 @@ local function report()
 end
 
 function MetricsService.Init()
-	if not Config.Metrics.Enabled then
+	if not enabled() then
 		return
 	end
 	Players.PlayerRemoving:Connect(function(p)

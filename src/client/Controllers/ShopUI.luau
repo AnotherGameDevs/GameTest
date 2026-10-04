@@ -1,6 +1,6 @@
--- The Equipment Shop: left tabs (Tools / Backpacks / Utility / Cosmetics), a rotating 3D preview of the ACTUAL
--- tool model with an Inspect view, stat bars with an equipped-vs-selected comparison, price + purchase, and a
--- thumbnail strip of every item. Utility and Cosmetics are visible "coming soon" tabs.
+-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
+-- Inspect view, stat bars with an equipped-vs-selected comparison, price + purchase, and a thumbnail strip of every item.
+-- Only tabs that work exist: there are no placeholder tabs.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
@@ -20,13 +20,9 @@ local mk, corner, stroke, label, button = K.mk, K.corner, K.stroke, K.label, K.b
 
 local ShopUI = {}
 
-local TABS = { "Tools", "Backpacks", "Utility", "Cosmetics" }
+local TABS = { "Tools", "Backpacks" }
 local FAMILY_NAMES = { Hand = "HAND TOOL", Excavation = "EXCAVATION TOOL", Industrial = "INDUSTRIAL" }
 local FAMILY_COLORS = { Hand = Color3.fromHex("D9A066"), Excavation = P.Gold, Industrial = P.Danger }
-local COMING_SOON = {
-	Utility = { "Lantern", "Treasure scanner", "Rope", "Beacon" },
-	Cosmetics = { "Tool skins", "Helmets", "Backpack styles", "Titles" },
-}
 
 local root: Frame
 local refs: { [string]: any } = {}
@@ -37,7 +33,10 @@ local sel = { Kind = "Tool", Id = "rusty_shovel" }
 local onClose: (() -> ())?
 
 -- Maximums used to normalise the stat bars across every tier.
-local MAX = { Power = 1, Rate = 1, Extra = 3, ReachMin = 8, ReachMax = 12 }
+local MAX = { Power = 1, Rate = 1, Extra = 3, ReachMin = 8, ReachMax = 12, Capacity = 1 }
+for _, def in pairs(Defs.Backpacks) do
+	MAX.Capacity = math.max(MAX.Capacity, def.Capacity)
+end
 for _, def in pairs(Defs.Tools) do
 	MAX.Power = math.max(MAX.Power, def.Power)
 	MAX.Rate = math.max(MAX.Rate, def.Rate)
@@ -92,7 +91,7 @@ local function appearanceOf(it): string?
 	if it.Kind == "Tool" then
 		local skin = State.Data.Skins and State.Data.Skins.ToolSkin
 		return Appearances.Resolve(it.Def, skin)
-	elseif it.Kind == "Consumable" then
+	elseif it.Kind == "Consumable" or it.Kind == "Backpack" then
 		return it.Def.Appearance
 	end
 	return nil
@@ -147,21 +146,6 @@ local function renderDetail()
 	local actionBox = refs.action
 	clearChildren(actionBox)
 
-	if tab == "Utility" or tab == "Cosmetics" then
-		refs.pvName.Text = tab:upper()
-		refs.pvTier.Text = "COMING SOON"
-		refs.pvTier.TextColor3 = K.Muted
-		refs.inspectBtn.Visible = false
-		ShopPreview.Show(previews.main, nil)
-		label(box, "Planned for this shop:", 18, P.Cream, { Size = UDim2.fromOffset(280, 24), Position = UDim2.fromOffset(0, 0),
-			TextXAlignment = Enum.TextXAlignment.Left })
-		for i, name in ipairs(COMING_SOON[tab]) do
-			label(box, "-  " .. name, 17, K.Muted, { Size = UDim2.fromOffset(280, 22), Position = UDim2.fromOffset(8, 22 + i * 24),
-				TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
-		end
-		return
-	end
-
 	local it = itemOf(sel.Kind, sel.Id)
 	if not it then
 		return
@@ -172,13 +156,13 @@ local function renderDetail()
 	if it.Kind == "Backpack" then
 		refs.pvTier.Text = "BACKPACK"
 		refs.pvTier.TextColor3 = P.Teal
-		refs.inspectBtn.Visible = false
-		ShopPreview.Show(previews.main, nil)
+		refs.inspectBtn.Visible = true
+		ShopPreview.Show(previews.main, appearanceOf(it))
 		label(box, def.Blurb or "", 16, P.Cream, { Size = UDim2.fromOffset(290, 54), Position = UDim2.fromOffset(0, 0),
 			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
 			TextStrokeTransparency = 1 })
 		local cur = Defs.Backpacks[d.BackpackId]
-		statBar(box, 70, "Capacity", def.Capacity / 40, (not st.Equipped) and (cur.Capacity / 40) or nil,
+		statBar(box, 70, "Capacity", def.Capacity / MAX.Capacity, (not st.Equipped) and (cur.Capacity / MAX.Capacity) or nil,
 			st.Equipped and tostring(def.Capacity) or delta(def.Capacity, cur.Capacity, "%d", false),
 			colorFor(def.Capacity - cur.Capacity))
 	else
@@ -209,12 +193,23 @@ local function renderDetail()
 			-- swings to break one block, per layer (lower is better)
 			local parts = {}
 			for _, layer in ipairs(Config.Layers) do
-				local n, c = Defs.HitsToBreak(def, layer), Defs.HitsToBreak(cur, layer)
-				local text = same and tostring(n) or (n == c and tostring(n) or ("%d>%d"):format(c, n))
-				parts[#parts + 1] = ('<font color="#%s">%s %s</font>'):format(
-					colorFor(c - n, false):ToHex(), layer.Name:sub(1, 1) .. layer.Name:sub(2):lower(), text)
+				local nice = layer.Name:sub(1, 1) .. layer.Name:sub(2):lower()
+				if not Defs.LayerAllows(def, layer) then
+					parts[#parts + 1] = ('<font color="#%s">%s locked</font>'):format(K.Muted:ToHex(), nice)
+				else
+					local n = Defs.HitsToBreak(def, layer)
+					local text, color = tostring(n), P.Cream
+					if Defs.LayerAllows(cur, layer) then
+						local c = Defs.HitsToBreak(cur, layer)
+						text = (same or n == c) and tostring(n) or ("%d>%d"):format(c, n)
+						color = colorFor(c - n, false)
+					else
+						text, color = tostring(n) .. " (new!)", K.Good
+					end
+					parts[#parts + 1] = ('<font color="#%s">%s %s</font>'):format(color:ToHex(), nice, text)
+				end
 			end
-			label(box, "Swings to break:  " .. table.concat(parts, "   "), 14, P.Cream, { Size = UDim2.fromOffset(290, 36),
+			label(box, "Swings to break:  " .. table.concat(parts, "  "), 14, P.Cream, { Size = UDim2.fromOffset(290, 36),
 				Position = UDim2.fromOffset(0, 156), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
 				TextWrapped = true, TextStrokeTransparency = 1, RichText = true })
 		else
@@ -289,10 +284,6 @@ end
 local function renderList()
 	local list = refs.list
 	clearChildren(list)
-	if tab == "Utility" or tab == "Cosmetics" then
-		label(list, "Nothing here yet.", 16, K.Muted, { Size = UDim2.new(1, 0, 0, 30), TextStrokeTransparency = 1 })
-		return
-	end
 	local d = State.Data
 	for i, it in ipairs(tabItems()) do
 		local st = itemState(it, d)
@@ -315,7 +306,6 @@ local function renderList()
 			ShopPreview.Update(pv, 0)
 		else
 			vp:Destroy()
-			label(card, "PACK", 15, P.Teal, { Size = UDim2.fromOffset(62, 66), Position = UDim2.fromOffset(6, 6) })
 		end
 		label(card, (it.Def.Tier and (it.Def.Tier .. ". ") or "") .. it.Def.DisplayName, 15, P.Cream, {
 			Size = UDim2.new(1, -78, 0, 36), Position = UDim2.fromOffset(72, 4), TextXAlignment = Enum.TextXAlignment.Left,
@@ -423,6 +413,7 @@ function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
 		Visible = false }, gui)
 	corner(root, 16)
 	stroke(root, Color3.fromHex("C9A46B"), 4)
+	K.fit(root, 880, 486)
 
 	label(root, "EQUIPMENT SHOP", 30, P.Cream, { Size = UDim2.fromOffset(300, 40), Position = UDim2.fromOffset(16, 8),
 		TextXAlignment = Enum.TextXAlignment.Left })
@@ -439,7 +430,7 @@ function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
 		corner(b, 10)
 		stroke(b, P.Dark, 2)
 		local glyph = mk("Frame", { Size = UDim2.fromOffset(30, 30), Position = UDim2.fromOffset(8, 16),
-			BackgroundColor3 = ({ Tools = P.Gold, Backpacks = P.Clay, Utility = P.Teal, Cosmetics = P.Danger })[name] }, b)
+			BackgroundColor3 = ({ Tools = P.Gold, Backpacks = P.Clay })[name] }, b)
 		corner(glyph, 8)
 		label(glyph, name:sub(1, 1), 18, P.Dark, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
 		label(b, name, 17, P.Cream, { Size = UDim2.fromOffset(78, 62), Position = UDim2.fromOffset(44, 0),

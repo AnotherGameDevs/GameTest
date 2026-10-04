@@ -17,6 +17,10 @@ local parts: { [number]: Part } = {}
 local tints: { number } = {}
 local folder: Folder
 local generation = 0
+local dugTotal = 0
+local dugByLayer: { [string]: number } = {}
+local cellsByLayer: { [string]: number } = {}
+local generatedAt = os.clock()
 
 local function spawnPart(idx: number)
 	if parts[idx] then
@@ -64,12 +68,17 @@ function SiteService.Generate(seed: number?)
 	table.clear(loot)
 	table.clear(parts)
 	table.clear(tints)
+	table.clear(dugByLayer)
+	table.clear(cellsByLayer)
+	dugTotal = 0
+	generatedAt = os.clock()
 
 	local rng = Random.new(seed)
 	for idx = 1, Grid.Count do
 		local _, y = Grid.FromIndex(idx)
 		local layer = Defs.LayerAtCell(y)
 		health[idx] = layer.Health
+		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 		maxHealth[idx] = layer.Health
 		tints[idx] = (rng:NextNumber() - 0.5) * 0.16
 		if rng:NextNumber() < layer.TreasureChance then
@@ -89,6 +98,20 @@ function SiteService.Generate(seed: number?)
 		end
 	end
 	return generation
+end
+
+-- Depletion figures used by the Fresh Dig refresh (docs/MINE_SHIFT.md). Fractions are of ALL cells / of a layer's cells.
+function SiteService.Depletion()
+	local byLayer = {}
+	for layerId, total in pairs(cellsByLayer) do
+		byLayer[layerId] = (dugByLayer[layerId] or 0) / math.max(total, 1)
+	end
+	return {
+		Total = dugTotal / math.max(Grid.Count, 1),
+		ByLayer = byLayer,
+		AgeMinutes = (os.clock() - generatedAt) / 60,
+		Generation = generation,
+	}
 end
 
 function SiteService.IsAlive(idx: number): boolean
@@ -113,6 +136,10 @@ function SiteService.Damage(idx: number, amount: number): (number, boolean, stri
 	hp -= amount
 	if hp <= 0 then
 		health[idx] = 0
+		dugTotal += 1
+		local _, dy = Grid.FromIndex(idx)
+		local lid = Defs.LayerAtCell(dy).Id
+		dugByLayer[lid] = (dugByLayer[lid] or 0) + 1
 		local treasure = loot[idx]
 		loot[idx] = nil
 		local part = parts[idx]
@@ -197,7 +224,7 @@ end
 
 -- The (up to) `maxCells` alive cells nearest to `pos` within `radius` cells of the cell containing it.
 -- Used by explosives; hidden interior cells count (they are exposed afterwards like any dug cell).
-function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number): { number }
+function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number, allow: ((number) -> boolean)?): { number }
 	local cx, cy, cz = Grid.WorldToCell(pos)
 	local found = {}
 	for dx = -radius, radius do
@@ -206,7 +233,7 @@ function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number): 
 				local x, y, z = cx + dx, cy + dy, cz + dz
 				if Grid.InBounds(x, y, z) then
 					local idx = Grid.ToIndex(x, y, z)
-					if (health[idx] or 0) > 0 then
+					if (health[idx] or 0) > 0 and (not allow or allow(y)) then
 						table.insert(found, { Index = idx, D = (Grid.CellCenter(x, y, z) - pos).Magnitude })
 					end
 				end

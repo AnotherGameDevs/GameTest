@@ -20,7 +20,7 @@ Config.Site = {
 	CellSize = 4, -- studs per dig cell
 	SizeX = 24, -- cells
 	SizeZ = 24,
-	Depth = 14, -- cells deep
+	Depth = 20, -- cells deep (four layers of five rows, 20 studs each)
 	Center = Vector3.new(0, 0, 0), -- world XZ centre of the site, Y of the surface
 	Seed = 1337, -- change for a different (seeded) layout
 	StudsPerMeter = 3.5, -- for the depth readout
@@ -28,11 +28,13 @@ Config.Site = {
 }
 
 -- Depth layers, ordered shallow -> deep. FromCell is the first cell-depth index (0 = top row).
+-- MinToolTier: the lowest tool tier that can break blocks of this layer (docs/MINE_SHIFT.md, 'Layer gating'). It keeps
+-- a starter shovel from diving straight to the most valuable layer, so every tier has content that is new to it.
 Config.Layers = {
-	{ Id = "Soil", Name = "SOIL", FromCell = 0, Color = Config.Palette.Dirt, Health = 24, TreasureChance = 0.20 },
-	{ Id = "Clay", Name = "CLAY", FromCell = 4, Color = Config.Palette.Clay, Health = 42, TreasureChance = 0.26 },
-	{ Id = "Stone", Name = "STONE", FromCell = 8, Color = Config.Palette.Rock, Health = 70, TreasureChance = 0.30 },
-	{ Id = "Ruins", Name = "RUINS", FromCell = 11, Color = Config.Palette.Sandstone, Health = 100, TreasureChance = 0.34 },
+	{ Id = "Soil", Name = "SOIL", FromCell = 0, Color = Config.Palette.Dirt, Health = 24, TreasureChance = 0.20, MinToolTier = 1 },
+	{ Id = "Clay", Name = "CLAY", FromCell = 5, Color = Config.Palette.Clay, Health = 42, TreasureChance = 0.26, MinToolTier = 1 },
+	{ Id = "Stone", Name = "STONE", FromCell = 10, Color = Config.Palette.Rock, Health = 72, TreasureChance = 0.30, MinToolTier = 3 },
+	{ Id = "Ruins", Name = "RUINS", FromCell = 15, Color = Config.Palette.Sandstone, Health = 110, TreasureChance = 0.30, MinToolTier = 5 },
 }
 
 Config.Dig = {
@@ -63,6 +65,7 @@ Config.Camp = {
 	SellZoneCenter = Vector3.new(-18, 0, 82), -- logic centre of the sell trigger; the appraisal stall stands 12 studs north of it
 	SellZoneRadius = 9,
 	ShopPosition = Vector3.new(20, 0, 88),
+	ShopReach = 34, -- server-side purchase range (the client closes the shop at 30)
 	ReceivingPosition = Vector3.new(24, 0, 73), -- artifact receiving table (a short walk from the elevator exit)
 	LostFoundPosition = Vector3.new(31, 0, 73), -- beside the table
 	-- Declared footprints (half-extents on X and Z) of what each builder actually builds; used by the layout test and
@@ -71,6 +74,7 @@ Config.Camp = {
 		Shop = { Center = Vector3.new(20, 0, 88), HalfX = 7.0, HalfZ = 4.8 },
 		Appraisal = { Center = Vector3.new(-18, 0, 70), HalfX = 6.5, HalfZ = 4.2 },
 		Receiving = { Center = Vector3.new(24, 0, 73), HalfX = 3.7, HalfZ = 2.6 },
+		Shelf = { Center = Vector3.new(-30, 0, 96), HalfX = 1.2, HalfZ = 4.9 }, -- personal display (client-side, Config.Collection)
 	},
 	-- Required clear spaces (checked by tests/camp_layout_test.luau)
 	ArrivalHalfSize = 8, -- 16 x 16 clear area around the spawn
@@ -98,13 +102,33 @@ Config.Exit = {
 	Run = 8, -- studs the shaft extends south from the grid edge
 }
 
+-- Collection journal + camp display (docs/COLLECTION.md).
+Config.Collection = {
+	DisplaySlots = 4, -- artifacts a player can show on their camp shelf
+	ShelfPosition = Vector3.new(-30, 0, 96), -- personal display shelf (client-side, local player's picks only)
+	ShelfReach = 12, -- the shelf is only built/visible when the player is this close
+}
+
+-- Shared-mine replenishment ("Fresh Dig", docs/MINE_SHIFT.md).
+Config.Shift = {
+	Enabled = true,
+	TriggerFraction = 0.55, -- fraction of ALL cells dug that triggers a refresh
+	DeepLayerFraction = 0.70, -- ...or this fraction of the deepest layer dug (nothing left to reach)
+	MaxAgeMinutes = 60, -- ...or the mine is this old and at least MinFractionForAge of it has been dug
+	MinFractionForAge = 0.10,
+	CheckInterval = 5, -- seconds between depletion checks
+	WarningSeconds = 45, -- countdown shown to everyone before the refresh
+	CarryDeferSeconds = 120, -- how long a refresh waits for carriers still inside the mine before dropping their artifact
+	SeedStep = 7919, -- each refresh uses Seed + count * SeedStep
+}
+
 Config.Shop = {
 	SequentialTools = true, -- a tool tier can only be bought once the previous tier is owned
 }
 
 -- Server-side balance telemetry (printed to the server Output). Used to measure blocks/min and cash/min.
 Config.Metrics = {
-	Enabled = true,
+	Enabled = false, -- development telemetry; Studio sessions force it on (see MetricsService)
 	PrintInterval = 60, -- seconds per reporting window
 }
 
@@ -123,7 +147,7 @@ Config.Data = {
 	Enabled = true, -- false = never touch DataStore (everything in memory)
 	StoreName = "DigAndRun_PlayerData_v1",
 	AutosaveInterval = 60,
-	CurrentVersion = 2, -- v2: eight-tier tool progression (see DataMigrations)
+	CurrentVersion = 3, -- v2: eight-tier tool progression; v3: collection display + onboarding progress
 }
 
 Config.RateLimits = { -- { max calls, per seconds }
@@ -135,6 +159,8 @@ Config.RateLimits = { -- { max calls, per seconds }
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
+	GuideDone = { 10, 5 },
+	SetDisplay = { 6, 3 },
 }
 
 return Config

@@ -36,29 +36,29 @@ Defs.Tools = {
 	},
 	heavy_shovel = {
 		DisplayName = "Heavy Shovel", Tier = 3, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_heavy",
-		Power = 36, Rate = 1.5, Reach = 8, Price = 1500, RequiredReputation = 0,
+		Power = 36, Rate = 1.5, Reach = 8, Price = 1100, RequiredReputation = 0,
 		Blurb = "Bigger scoop. Heavy swings break soft ground in one hit.",
 	},
 	power_shovel = {
 		DisplayName = "Power Shovel", Tier = 4, Family = "Excavation", ToolType = "Shovel", Appearance = "shovel_power",
 		Power = 36, Rate = 1.5, Reach = 8, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
-		Price = 2800, RequiredReputation = 0,
+		Price = 5500, RequiredReputation = 0,
 		Blurb = "Reinforced design. Each swing also chips 2 neighbouring blocks.",
 	},
 	jackhammer = {
 		DisplayName = "Jackhammer", Tier = 5, Family = "Excavation", ToolType = "Jackhammer", Appearance = "jackhammer",
-		Power = 22, Rate = 4.5, Reach = 8, Price = 5000, RequiredReputation = 0,
+		Power = 22, Rate = 4.5, Reach = 8, Price = 11000, RequiredReputation = 0,
 		Blurb = "Rapid digging. Chips through hard material.",
 	},
 	drill = {
 		DisplayName = "Drill", Tier = 6, Family = "Excavation", ToolType = "Drill", Appearance = "drill",
-		Power = 22, Rate = 5.5, Reach = 11, Price = 7500, RequiredReputation = 0,
+		Power = 22, Rate = 5.5, Reach = 11, Price = 30000, RequiredReputation = 0,
 		Blurb = "Cuts a tunnel. Faster, and reaches deeper from where you stand.",
 	},
 	industrial_drill = {
 		DisplayName = "Industrial Drill", Tier = 7, Family = "Industrial", ToolType = "Drill", Appearance = "drill_industrial",
 		Power = 22, Rate = 5.5, Reach = 11, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
-		Price = 11500, RequiredReputation = 0,
+		Price = 52000, RequiredReputation = 0,
 		Blurb = "Massive digging power. Clears neighbouring blocks as it goes.",
 	},
 }
@@ -68,30 +68,41 @@ Defs.Tools = {
 Defs.Consumables = {
 	dynamite = {
 		DisplayName = "Dynamite", Tier = 8, Family = "Industrial", Appearance = "dynamite",
-		Price = 400, MaxCarry = 3, Cooldown = 1.0, MaxActive = 3,
+		Price = 1200, MaxCarry = 3, Cooldown = 1.0, MaxActive = 3,
 		FuseSeconds = 2.5, ThrowSpeed = 42, ThrowLift = 14,
 		Blast = { Radius = 1, MaxCells = 14 },
 		Blurb = "Throwable. Destroys a cluster of blocks. One use, then it is gone.",
 	},
 }
 
+-- Backpacks: capacity is sized to the dig rate of the tools a player typically owns when they can afford the pack
+-- (docs/TOOL_TIERS.md): a full trip should take roughly 2-6 minutes of digging, never seconds and never half an hour.
 Defs.Backpacks = {
-	pouch = { DisplayName = "Pouch", Capacity = 12, Price = 0, RequiredReputation = 0, Order = 1 },
-	satchel = { DisplayName = "Big Satchel", Capacity = 30, Price = 120, RequiredReputation = 0, Order = 2,
+	pouch = { DisplayName = "Pouch", Capacity = 12, Price = 0, RequiredReputation = 0, Order = 1, Appearance = "pack_pouch",
+		Blurb = "Your starter pouch. Holds 12 finds." },
+	satchel = { DisplayName = "Big Satchel", Capacity = 30, Price = 120, RequiredReputation = 0, Order = 2, Appearance = "pack_satchel",
 		Blurb = "Carry 30 treasures per trip." },
+	field_pack = { DisplayName = "Field Pack", Capacity = 55, Price = 2500, RequiredReputation = 0, Order = 3, Appearance = "pack_field",
+		Blurb = "Straps and pockets for 55 finds. Suits the stone layer." },
+	mining_pack = { DisplayName = "Mining Pack", Capacity = 90, Price = 14000, RequiredReputation = 0, Order = 4, Appearance = "pack_mining",
+		Blurb = "Reinforced frame for 90 finds on deep runs." },
+	expedition_pack = { DisplayName = "Expedition Pack", Capacity = 140, Price = 40000, RequiredReputation = 0, Order = 5, Appearance = "pack_expedition",
+		Blurb = "The biggest pack there is: 140 finds per trip." },
 }
 
 -- Treasure. Layers lists which layer ids can drop it; Weight is relative inside a layer.
 Defs.Treasure = {
 	old_coin = { Name = "Old Coin", Rarity = "Common", Value = 8, Layers = { Soil = 10, Clay = 6 }, Category = "Coins", Color = P.Gold, Shape = "Coin" },
-	pottery_shard = { Name = "Pottery Shard", Rarity = "Common", Value = 12, Layers = { Soil = 8, Clay = 8 }, Category = "Pottery", Color = P.Clay, Shape = "Block" },
+	pottery_shard = { Name = "Pottery Shard", Rarity = "Common", Value = 12, Layers = { Soil = 8, Clay = 8 }, Category = "Pottery", Color = P.Clay, Shape = "Block", Model = "shard" },
 	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring" },
-	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block" },
-	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
+	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block", Model = "figurine" },
+	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "fossil" },
 	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring", Model = "necklace" },
 	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem", Model = "gem" },
-	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block", RequiresCarry = true },
-	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
+	ruin_tablet = { Name = "Ruin Tablet", Rarity = "Rare", Value = 260, Layers = { Stone = 1, Ruins = 6 }, Category = "Ruins", Color = P.Sandstone, Shape = "Block", Model = "tablet" },
+	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 2 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "claw", RequiresCarry = true },
+	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 1 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
+	sun_mask = { Name = "Sun Pharaoh Mask", Rarity = "Legendary", Value = 3500, Layers = { Ruins = 0.5 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "mask", RequiresCarry = true },
 }
 
 -- The ONE reach rule, used by server validation and the client reach indicator.
@@ -115,6 +126,30 @@ function Defs.LayerAtCell(y: number)
 		end
 	end
 	return found
+end
+
+-- Layer gating: can a tool of this tier break blocks of `layer`? (server enforces; the client uses it for feedback)
+function Defs.LayerAllows(tool, layer): boolean
+	return tool.Tier >= (layer.MinToolTier or 1)
+end
+
+-- Display name of the cheapest tool that satisfies a minimum tier.
+function Defs.ToolNameForTier(tier: number): string
+	for id, def in pairs(Defs.Tools) do
+		if def.Tier == tier then
+			return def.DisplayName
+		end
+	end
+	return "a stronger tool"
+end
+
+function Defs.LayerName(layerId: string): string
+	for _, layer in ipairs(Config.Layers) do
+		if layer.Id == layerId then
+			return layer.Name
+		end
+	end
+	return layerId
 end
 
 -- Per-layer weighted lists, built once.

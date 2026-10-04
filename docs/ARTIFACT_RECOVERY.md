@@ -1,6 +1,6 @@
 # Important artifacts: carry home to secure
 
-Definition: `Defs.Treasure[id].RequiresCarry = true` (currently the two Epic artifacts: Fossil Claw, Golden Scarab).
+Definition: `Defs.Treasure[id].RequiresCarry = true` (currently Fossil Claw and Golden Scarab (Epic) and the Sun Pharaoh Mask (Legendary)).
 Configurable per artifact. Other finds behave exactly as before.
 
 ## Flow
@@ -26,6 +26,11 @@ check-and-set, so duplicate or simultaneous requests cannot both succeed. Covere
 * **Records are server memory only.** If the server closes, an unbanked artifact is lost. There is **no cross-session
   recovery**, and nothing about artifacts is saved, so loading a saved character can never count one as deposited.
 * Dying never awards or secures an artifact.
+
+## Mine refresh ("Fresh Dig")
+Resting artifacts inside the mine are **moved to the camp Lost & Found pad** (never deleted, still owned by their
+discoverer); a carrier still inside the mine delays the refresh for up to 120 s, after which their artifact is dropped by
+the normal loss path and then relocated. See `docs/MINE_SHIFT.md`.
 
 ## Known unresolved cases
 * If the discoverer never returns, nobody else can recover that artifact during the session (claim is exclusive in v1).

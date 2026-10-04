@@ -47,8 +47,26 @@ local function toolsV2(data, defs)
 	end
 end
 
+-- v2 -> v3: adds the camp-shelf display list and the first-time-hint progress. Existing collection entries stay valid.
+-- Players who already sold things / own tools have clearly passed the early hints, so those are pre-completed.
+local function collectionV3(data, defs)
+	data.Display = type(data.Display) == "table" and data.Display or {}
+	data.Guide = type(data.Guide) == "table" and data.Guide or {}
+	data.MigrationLog = data.MigrationLog or {}
+	local stats = data.Stats or {}
+	if (stats.CashEarned or 0) > 0 or (stats.BlocksDug or 0) >= 4 then
+		data.Guide.mine = true
+	end
+	if (stats.CashEarned or 0) > 0 then
+		data.Guide.backpack = true
+		data.Guide.sell = true
+	end
+	data.MigrationLog.CollectionV3 = "display+guide"
+end
+
 DataMigrations.Steps = {
 	[1] = toolsV2,
+	[2] = collectionV3,
 }
 
 -- Runs every pending step in order, then stamps the new version.
@@ -87,6 +105,19 @@ function DataMigrations.Sanitize(data, defs, starterTool: string, starterBackpac
 	end
 	if not defs.Backpacks[data.Equipment.BackpackId or ""] or not data.OwnedBackpacks[data.Equipment.BackpackId] then
 		data.Equipment.BackpackId = starterBackpack
+	end
+end
+
+-- Drops collection entries for treasure ids that no longer exist and repairs malformed entries.
+function DataMigrations.SanitizeCollection(data, defs)
+	data.Collection = type(data.Collection) == "table" and data.Collection or {}
+	for id, entry in pairs(data.Collection) do
+		if not defs.Treasure[id] or type(entry) ~= "table" then
+			data.Collection[id] = nil
+		else
+			entry.Count = math.max(1, math.floor(tonumber(entry.Count) or 1))
+			entry.FirstFound = tonumber(entry.FirstFound) or 0
+		end
 	end
 end
 

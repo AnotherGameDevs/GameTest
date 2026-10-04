@@ -13,6 +13,8 @@ local Viewmodel = require(Controllers.ViewmodelController)
 local Dig = require(Controllers.DigController)
 local Interaction = require(Controllers.InteractionController)
 local Throw = require(Controllers.ThrowController)
+local Guide = require(Controllers.GuideController)
+local CampShelf = require(Controllers.CampShelf)
 
 State.Init()
 InputMode.Init()
@@ -26,6 +28,8 @@ Effects.Init()
 Dig.Init()
 Interaction.Init()
 Throw.Init()
+Guide.Init()
+CampShelf.Init()
 
 -- Ask for state until the server answers (data may still be loading).
 task.spawn(function()

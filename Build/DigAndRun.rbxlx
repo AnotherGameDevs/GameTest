@@ -48,6 +48,176 @@ return Appearances
       </Item>
       <Item class="ModuleScript" referent="3">
         <Properties>
+          <string name="Name">CollectionSpec</string>
+          <string name="Source"><![CDATA[-- Pure collection logic (no Roblox APIs beyond Defs/Config data), shared by the server (recording, set completion) and
+-- the client (journal). Tested in tests/collection_test.luau.
+--   * One journal entry per treasure type. Its "home layer" is the layer where it is most common (ties -> shallower).
+--   * A SET is every treasure whose home layer is the same. Completing a set is acknowledged once, at the moment the
+--     last member is registered.
+--   * `collection` is the saved table: [treasureId] = { Count, FirstFound }.
+local Config = require(script.Parent.Config)
+local Defs = require(script.Parent.Defs)
+
+local CollectionSpec = {}
+
+local layerOrder = {}
+for i, layer in ipairs(Config.Layers) do
+	layerOrder[layer.Id] = i
+end
+
+local function homeLayer(def): string
+	local best, bestWeight, bestOrder = Config.Layers[1].Id, -1, 99
+	for layerId, weight in pairs(def.Layers) do
+		local order = layerOrder[layerId] or 99
+		if weight > bestWeight or (weight == bestWeight and order < bestOrder) then
+			best, bestWeight, bestOrder = layerId, weight, order
+		end
+	end
+	return best
+end
+
+-- Ordered entries: by home layer (shallow -> deep), then rarity, then value.
+local entries = {}
+for id, def in pairs(Defs.Treasure) do
+	table.insert(entries, { Id = id, Def = def, Layer = homeLayer(def) })
+end
+table.sort(entries, function(a, b)
+	if layerOrder[a.Layer] ~= layerOrder[b.Layer] then
+		return layerOrder[a.Layer] < layerOrder[b.Layer]
+	end
+	local ra, rb = Defs.Rarity[a.Def.Rarity].Order, Defs.Rarity[b.Def.Rarity].Order
+	if ra ~= rb then
+		return ra < rb
+	end
+	if a.Def.Value ~= b.Def.Value then
+		return a.Def.Value < b.Def.Value
+	end
+	return a.Id < b.Id
+end)
+CollectionSpec.Entries = entries
+
+local byId = {}
+for _, e in ipairs(entries) do
+	byId[e.Id] = e
+end
+
+function CollectionSpec.Entry(id: string)
+	return byId[id]
+end
+
+function CollectionSpec.IsValid(id: any): boolean
+	return type(id) == "string" and byId[id] ~= nil
+end
+
+-- Per-layer set status for a saved collection.
+function CollectionSpec.Sets(collection)
+	local sets, byLayer = {}, {}
+	for _, layer in ipairs(Config.Layers) do
+		local set = { LayerId = layer.Id, Name = layer.Name, Found = 0, Total = 0, Complete = false, Members = {} }
+		byLayer[layer.Id] = set
+		table.insert(sets, set)
+	end
+	for _, e in ipairs(entries) do
+		local set = byLayer[e.Layer]
+		set.Total += 1
+		table.insert(set.Members, e.Id)
+		if collection[e.Id] then
+			set.Found += 1
+		end
+	end
+	for _, set in ipairs(sets) do
+		set.Complete = set.Total > 0 and set.Found == set.Total
+	end
+	return sets
+end
+
+function CollectionSpec.Totals(collection): (number, number)
+	local found = 0
+	for _, e in ipairs(entries) do
+		if collection[e.Id] then
+			found += 1
+		end
+	end
+	return found, #entries
+end
+
+-- The set that `treasureId` completes if it is registered NOW (nil if it does not complete anything or it is already
+-- registered). Call BEFORE writing the entry.
+function CollectionSpec.CompletesSet(collection, treasureId: string): string?
+	local e = byId[treasureId]
+	if not e or collection[treasureId] then
+		return nil
+	end
+	for _, set in ipairs(CollectionSpec.Sets(collection)) do
+		if set.LayerId == e.Layer then
+			return set.Found + 1 == set.Total and set.LayerId or nil
+		end
+	end
+	return nil
+end
+
+-- Registers one find; returns (isNew, completedLayerId?). The ONLY place a collection entry is created.
+function CollectionSpec.Register(collection, treasureId: string, now: number): (boolean, string?)
+	if not byId[treasureId] then
+		return false, nil
+	end
+	local entry = collection[treasureId]
+	if entry then
+		entry.Count += 1
+		return false, nil
+	end
+	local completed = CollectionSpec.CompletesSet(collection, treasureId)
+	collection[treasureId] = { Count = 1, FirstFound = now }
+	return true, completed
+end
+
+-- Display list hygiene: only discovered, known, unique ids; at most Config.Collection.DisplaySlots; keeps order.
+function CollectionSpec.SanitizeDisplay(list: any, collection): { string }
+	local out, seen = {}, {}
+	if type(list) ~= "table" then
+		return out
+	end
+	for _, id in ipairs(list) do
+		if #out >= Config.Collection.DisplaySlots then
+			break
+		end
+		if type(id) == "string" and byId[id] and collection[id] and not seen[id] then
+			seen[id] = true
+			table.insert(out, id)
+		end
+	end
+	return out
+end
+
+-- Toggle `id` in the display list. Returns (newList, ok, reason?). Adding to a full list is refused (never silently
+-- replaces someone's choice).
+function CollectionSpec.ToggleDisplay(list: { string }, id: any, collection): ({ string }, boolean, string?)
+	local current = CollectionSpec.SanitizeDisplay(list, collection)
+	if type(id) ~= "string" or not byId[id] then
+		return current, false, "Unknown"
+	end
+	if not collection[id] then
+		return current, false, "NotDiscovered"
+	end
+	for i, existing in ipairs(current) do
+		if existing == id then
+			table.remove(current, i)
+			return current, true
+		end
+	end
+	if #current >= Config.Collection.DisplaySlots then
+		return current, false, "Full"
+	end
+	table.insert(current, id)
+	return current, true
+end
+
+return CollectionSpec
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
           <string name="Name">Config</string>
           <string name="Source"><![CDATA[-- All tunable balance/feel values live here. Nothing in the services should hardcode these.
 local Config = {}
@@ -71,7 +241,7 @@ Config.Site = {
 	CellSize = 4, -- studs per dig cell
 	SizeX = 24, -- cells
 	SizeZ = 24,
-	Depth = 14, -- cells deep
+	Depth = 20, -- cells deep (four layers of five rows, 20 studs each)
 	Center = Vector3.new(0, 0, 0), -- world XZ centre of the site, Y of the surface
 	Seed = 1337, -- change for a different (seeded) layout
 	StudsPerMeter = 3.5, -- for the depth readout
@@ -79,11 +249,13 @@ Config.Site = {
 }
 
 -- Depth layers, ordered shallow -> deep. FromCell is the first cell-depth index (0 = top row).
+-- MinToolTier: the lowest tool tier that can break blocks of this layer (docs/MINE_SHIFT.md, 'Layer gating'). It keeps
+-- a starter shovel from diving straight to the most valuable layer, so every tier has content that is new to it.
 Config.Layers = {
-	{ Id = "Soil", Name = "SOIL", FromCell = 0, Color = Config.Palette.Dirt, Health = 24, TreasureChance = 0.20 },
-	{ Id = "Clay", Name = "CLAY", FromCell = 4, Color = Config.Palette.Clay, Health = 42, TreasureChance = 0.26 },
-	{ Id = "Stone", Name = "STONE", FromCell = 8, Color = Config.Palette.Rock, Health = 70, TreasureChance = 0.30 },
-	{ Id = "Ruins", Name = "RUINS", FromCell = 11, Color = Config.Palette.Sandstone, Health = 100, TreasureChance = 0.34 },
+	{ Id = "Soil", Name = "SOIL", FromCell = 0, Color = Config.Palette.Dirt, Health = 24, TreasureChance = 0.20, MinToolTier = 1 },
+	{ Id = "Clay", Name = "CLAY", FromCell = 5, Color = Config.Palette.Clay, Health = 42, TreasureChance = 0.26, MinToolTier = 1 },
+	{ Id = "Stone", Name = "STONE", FromCell = 10, Color = Config.Palette.Rock, Health = 72, TreasureChance = 0.30, MinToolTier = 3 },
+	{ Id = "Ruins", Name = "RUINS", FromCell = 15, Color = Config.Palette.Sandstone, Health = 110, TreasureChance = 0.30, MinToolTier = 5 },
 }
 
 Config.Dig = {
@@ -114,6 +286,7 @@ Config.Camp = {
 	SellZoneCenter = Vector3.new(-18, 0, 82), -- logic centre of the sell trigger; the appraisal stall stands 12 studs north of it
 	SellZoneRadius = 9,
 	ShopPosition = Vector3.new(20, 0, 88),
+	ShopReach = 34, -- server-side purchase range (the client closes the shop at 30)
 	ReceivingPosition = Vector3.new(24, 0, 73), -- artifact receiving table (a short walk from the elevator exit)
 	LostFoundPosition = Vector3.new(31, 0, 73), -- beside the table
 	-- Declared footprints (half-extents on X and Z) of what each builder actually builds; used by the layout test and
@@ -122,6 +295,7 @@ Config.Camp = {
 		Shop = { Center = Vector3.new(20, 0, 88), HalfX = 7.0, HalfZ = 4.8 },
 		Appraisal = { Center = Vector3.new(-18, 0, 70), HalfX = 6.5, HalfZ = 4.2 },
 		Receiving = { Center = Vector3.new(24, 0, 73), HalfX = 3.7, HalfZ = 2.6 },
+		Shelf = { Center = Vector3.new(-30, 0, 96), HalfX = 1.2, HalfZ = 4.9 }, -- personal display (client-side, Config.Collection)
 	},
 	-- Required clear spaces (checked by tests/camp_layout_test.luau)
 	ArrivalHalfSize = 8, -- 16 x 16 clear area around the spawn
@@ -149,13 +323,33 @@ Config.Exit = {
 	Run = 8, -- studs the shaft extends south from the grid edge
 }
 
+-- Collection journal + camp display (docs/COLLECTION.md).
+Config.Collection = {
+	DisplaySlots = 4, -- artifacts a player can show on their camp shelf
+	ShelfPosition = Vector3.new(-30, 0, 96), -- personal display shelf (client-side, local player's picks only)
+	ShelfReach = 12, -- the shelf is only built/visible when the player is this close
+}
+
+-- Shared-mine replenishment ("Fresh Dig", docs/MINE_SHIFT.md).
+Config.Shift = {
+	Enabled = true,
+	TriggerFraction = 0.55, -- fraction of ALL cells dug that triggers a refresh
+	DeepLayerFraction = 0.70, -- ...or this fraction of the deepest layer dug (nothing left to reach)
+	MaxAgeMinutes = 60, -- ...or the mine is this old and at least MinFractionForAge of it has been dug
+	MinFractionForAge = 0.10,
+	CheckInterval = 5, -- seconds between depletion checks
+	WarningSeconds = 45, -- countdown shown to everyone before the refresh
+	CarryDeferSeconds = 120, -- how long a refresh waits for carriers still inside the mine before dropping their artifact
+	SeedStep = 7919, -- each refresh uses Seed + count * SeedStep
+}
+
 Config.Shop = {
 	SequentialTools = true, -- a tool tier can only be bought once the previous tier is owned
 }
 
 -- Server-side balance telemetry (printed to the server Output). Used to measure blocks/min and cash/min.
 Config.Metrics = {
-	Enabled = true,
+	Enabled = false, -- development telemetry; Studio sessions force it on (see MetricsService)
 	PrintInterval = 60, -- seconds per reporting window
 }
 
@@ -174,7 +368,7 @@ Config.Data = {
 	Enabled = true, -- false = never touch DataStore (everything in memory)
 	StoreName = "DigAndRun_PlayerData_v1",
 	AutosaveInterval = 60,
-	CurrentVersion = 2, -- v2: eight-tier tool progression (see DataMigrations)
+	CurrentVersion = 3, -- v2: eight-tier tool progression; v3: collection display + onboarding progress
 }
 
 Config.RateLimits = { -- { max calls, per seconds }
@@ -186,13 +380,15 @@ Config.RateLimits = { -- { max calls, per seconds }
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
 	UpdateSettings = { 6, 3 },
+	GuideDone = { 10, 5 },
+	SetDisplay = { 6, 3 },
 }
 
 return Config
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="4">
+      <Item class="ModuleScript" referent="5">
         <Properties>
           <string name="Name">Defs</string>
           <string name="Source"><![CDATA[-- Data-driven definitions: tools, backpacks, treasure, rarity.
@@ -233,29 +429,29 @@ Defs.Tools = {
 	},
 	heavy_shovel = {
 		DisplayName = "Heavy Shovel", Tier = 3, Family = "Hand", ToolType = "Shovel", Appearance = "shovel_heavy",
-		Power = 36, Rate = 1.5, Reach = 8, Price = 1500, RequiredReputation = 0,
+		Power = 36, Rate = 1.5, Reach = 8, Price = 1100, RequiredReputation = 0,
 		Blurb = "Bigger scoop. Heavy swings break soft ground in one hit.",
 	},
 	power_shovel = {
 		DisplayName = "Power Shovel", Tier = 4, Family = "Excavation", ToolType = "Shovel", Appearance = "shovel_power",
 		Power = 36, Rate = 1.5, Reach = 8, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
-		Price = 2800, RequiredReputation = 0,
+		Price = 5500, RequiredReputation = 0,
 		Blurb = "Reinforced design. Each swing also chips 2 neighbouring blocks.",
 	},
 	jackhammer = {
 		DisplayName = "Jackhammer", Tier = 5, Family = "Excavation", ToolType = "Jackhammer", Appearance = "jackhammer",
-		Power = 22, Rate = 4.5, Reach = 8, Price = 5000, RequiredReputation = 0,
+		Power = 22, Rate = 4.5, Reach = 8, Price = 11000, RequiredReputation = 0,
 		Blurb = "Rapid digging. Chips through hard material.",
 	},
 	drill = {
 		DisplayName = "Drill", Tier = 6, Family = "Excavation", ToolType = "Drill", Appearance = "drill",
-		Power = 22, Rate = 5.5, Reach = 11, Price = 7500, RequiredReputation = 0,
+		Power = 22, Rate = 5.5, Reach = 11, Price = 30000, RequiredReputation = 0,
 		Blurb = "Cuts a tunnel. Faster, and reaches deeper from where you stand.",
 	},
 	industrial_drill = {
 		DisplayName = "Industrial Drill", Tier = 7, Family = "Industrial", ToolType = "Drill", Appearance = "drill_industrial",
 		Power = 22, Rate = 5.5, Reach = 11, Splash = { Radius = 1, MaxExtra = 2, Fraction = 0.4 },
-		Price = 11500, RequiredReputation = 0,
+		Price = 52000, RequiredReputation = 0,
 		Blurb = "Massive digging power. Clears neighbouring blocks as it goes.",
 	},
 }
@@ -265,30 +461,41 @@ Defs.Tools = {
 Defs.Consumables = {
 	dynamite = {
 		DisplayName = "Dynamite", Tier = 8, Family = "Industrial", Appearance = "dynamite",
-		Price = 400, MaxCarry = 3, Cooldown = 1.0, MaxActive = 3,
+		Price = 1200, MaxCarry = 3, Cooldown = 1.0, MaxActive = 3,
 		FuseSeconds = 2.5, ThrowSpeed = 42, ThrowLift = 14,
 		Blast = { Radius = 1, MaxCells = 14 },
 		Blurb = "Throwable. Destroys a cluster of blocks. One use, then it is gone.",
 	},
 }
 
+-- Backpacks: capacity is sized to the dig rate of the tools a player typically owns when they can afford the pack
+-- (docs/TOOL_TIERS.md): a full trip should take roughly 2-6 minutes of digging, never seconds and never half an hour.
 Defs.Backpacks = {
-	pouch = { DisplayName = "Pouch", Capacity = 12, Price = 0, RequiredReputation = 0, Order = 1 },
-	satchel = { DisplayName = "Big Satchel", Capacity = 30, Price = 120, RequiredReputation = 0, Order = 2,
+	pouch = { DisplayName = "Pouch", Capacity = 12, Price = 0, RequiredReputation = 0, Order = 1, Appearance = "pack_pouch",
+		Blurb = "Your starter pouch. Holds 12 finds." },
+	satchel = { DisplayName = "Big Satchel", Capacity = 30, Price = 120, RequiredReputation = 0, Order = 2, Appearance = "pack_satchel",
 		Blurb = "Carry 30 treasures per trip." },
+	field_pack = { DisplayName = "Field Pack", Capacity = 55, Price = 2500, RequiredReputation = 0, Order = 3, Appearance = "pack_field",
+		Blurb = "Straps and pockets for 55 finds. Suits the stone layer." },
+	mining_pack = { DisplayName = "Mining Pack", Capacity = 90, Price = 14000, RequiredReputation = 0, Order = 4, Appearance = "pack_mining",
+		Blurb = "Reinforced frame for 90 finds on deep runs." },
+	expedition_pack = { DisplayName = "Expedition Pack", Capacity = 140, Price = 40000, RequiredReputation = 0, Order = 5, Appearance = "pack_expedition",
+		Blurb = "The biggest pack there is: 140 finds per trip." },
 }
 
 -- Treasure. Layers lists which layer ids can drop it; Weight is relative inside a layer.
 Defs.Treasure = {
 	old_coin = { Name = "Old Coin", Rarity = "Common", Value = 8, Layers = { Soil = 10, Clay = 6 }, Category = "Coins", Color = P.Gold, Shape = "Coin" },
-	pottery_shard = { Name = "Pottery Shard", Rarity = "Common", Value = 12, Layers = { Soil = 8, Clay = 8 }, Category = "Pottery", Color = P.Clay, Shape = "Block" },
+	pottery_shard = { Name = "Pottery Shard", Rarity = "Common", Value = 12, Layers = { Soil = 8, Clay = 8 }, Category = "Pottery", Color = P.Clay, Shape = "Block", Model = "shard" },
 	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring" },
-	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block" },
-	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
+	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block", Model = "figurine" },
+	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "fossil" },
 	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring", Model = "necklace" },
 	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem", Model = "gem" },
-	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block", RequiresCarry = true },
-	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
+	ruin_tablet = { Name = "Ruin Tablet", Rarity = "Rare", Value = 260, Layers = { Stone = 1, Ruins = 6 }, Category = "Ruins", Color = P.Sandstone, Shape = "Block", Model = "tablet" },
+	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 2 }, Category = "Fossils", Color = P.Cream, Shape = "Block", Model = "claw", RequiresCarry = true },
+	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 1 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "scarab", RequiresCarry = true },
+	sun_mask = { Name = "Sun Pharaoh Mask", Rarity = "Legendary", Value = 3500, Layers = { Ruins = 0.5 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem", Model = "mask", RequiresCarry = true },
 }
 
 -- The ONE reach rule, used by server validation and the client reach indicator.
@@ -312,6 +519,30 @@ function Defs.LayerAtCell(y: number)
 		end
 	end
 	return found
+end
+
+-- Layer gating: can a tool of this tier break blocks of `layer`? (server enforces; the client uses it for feedback)
+function Defs.LayerAllows(tool, layer): boolean
+	return tool.Tier >= (layer.MinToolTier or 1)
+end
+
+-- Display name of the cheapest tool that satisfies a minimum tier.
+function Defs.ToolNameForTier(tier: number): string
+	for id, def in pairs(Defs.Tools) do
+		if def.Tier == tier then
+			return def.DisplayName
+		end
+	end
+	return "a stronger tool"
+end
+
+function Defs.LayerName(layerId: string): string
+	for _, layer in ipairs(Config.Layers) do
+		if layer.Id == layerId then
+			return layer.Name
+		end
+	end
+	return layerId
 end
 
 -- Per-layer weighted lists, built once.
@@ -408,7 +639,7 @@ return Defs
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="5">
+      <Item class="ModuleScript" referent="6">
         <Properties>
           <string name="Name">Grid</string>
           <string name="Source"><![CDATA[-- Pure grid math shared by server and client. Cell coordinates are 0-based integers (x, y, z);
@@ -476,7 +707,7 @@ return Grid
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="6">
+      <Item class="ModuleScript" referent="7">
         <Properties>
           <string name="Name">GroundPlan</string>
           <string name="Source"><![CDATA[-- Pure rectangle maths for building ground AROUND the mine. Given an outer rectangle and a list of "holes" (the mine
@@ -570,7 +801,119 @@ return GroundPlan
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="7">
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">GuideSpec</string>
+          <string name="Source"><![CDATA[-- First-time-player hints. Pure: given a state snapshot and the set of finished hints, returns the single hint that
+-- should be showing (or nil). Hints disappear for good when their condition is met; progress is saved server-side.
+-- Tested in tests/guide_test.luau.
+--
+-- `state` fields: Cash, Count, Capacity, Stats{BlocksDug, CashEarned, DeepestDepth}, OwnedToolCount, NextToolPrice,
+--   NextToolName, Carrying (bool), HasDeposited (bool), CollectionFound (number), Touch (bool), depthMeters (number)
+-- `names` = { Dig, Sell, Shop, Place, Journal } display strings for the CURRENT bindings.
+local GuideSpec = {}
+
+GuideSpec.Order = { "mine", "backpack", "sell", "upgrade", "elevator", "artifact", "collection" }
+GuideSpec.Ids = {}
+for _, id in ipairs(GuideSpec.Order) do
+	GuideSpec.Ids[id] = true
+end
+
+-- Seconds a hint stays up before it is marked done on its own (hints without an entry stay until satisfied).
+GuideSpec.Timeout = { backpack = 9, elevator = 12, collection = 14 }
+
+function GuideSpec.IsValid(id: any): boolean
+	return type(id) == "string" and GuideSpec.Ids[id] == true
+end
+
+-- A hint is "satisfied" (never shown again) when the player has clearly done the thing.
+function GuideSpec.Satisfied(id: string, s): boolean
+	if id == "mine" then
+		return s.Stats.BlocksDug >= 4
+	elseif id == "backpack" then
+		return s.Stats.CashEarned > 0
+	elseif id == "sell" then
+		return s.Stats.CashEarned > 0
+	elseif id == "upgrade" then
+		return s.OwnedToolCount >= 2
+	elseif id == "elevator" then
+		return false -- dismissed by timeout / the player moving on (see GuideController)
+	elseif id == "artifact" then
+		return s.HasDeposited
+	elseif id == "collection" then
+		return false -- dismissed when the journal is opened or by timeout
+	end
+	return true
+end
+
+-- Is the hint's trigger condition met right now?
+function GuideSpec.Triggered(id: string, s): boolean
+	if id == "mine" then
+		return true
+	elseif id == "backpack" then
+		return s.Count >= 1 and s.Stats.CashEarned == 0
+	elseif id == "sell" then
+		return s.Count >= 3 or (s.Count >= 1 and s.Count >= s.Capacity * 0.5)
+	elseif id == "upgrade" then
+		return s.Stats.CashEarned > 0 and s.OwnedToolCount < 2 and s.NextToolPrice ~= nil and s.Cash >= s.NextToolPrice
+	elseif id == "elevator" then
+		return s.depthMeters >= 8 and not s.Carrying
+	elseif id == "artifact" then
+		return s.Carrying
+	elseif id == "collection" then
+		return s.CollectionFound >= 1 and s.Stats.CashEarned > 0
+	end
+	return false
+end
+
+function GuideSpec.Text(id: string, s, names): (string, string)
+	if id == "mine" then
+		if s.Touch then
+			return "DIG", "Tap the ground (or hold the DIG button) to dig. Walk up to a block first - it must be close."
+		end
+		return "DIG", ("Hold %s on the ground to dig. Move closer if the block is out of reach."):format(names.Dig)
+	elseif id == "backpack" then
+		return "BACKPACK", ("Treasure goes into your backpack (%d / %d). When it is full, you must sell."):format(s.Count, s.Capacity)
+	elseif id == "sell" then
+		return "SELL", ("Walk to the gold SELL ZONE at camp to sell your finds. %s teleports you to camp."):format(names.Sell)
+	elseif id == "upgrade" then
+		return "UPGRADE", ("You can afford the %s! Open the SHOP at camp (stand near it, press the prompt) to buy and equip it."):format(s.NextToolName or "next tool")
+	elseif id == "elevator" then
+		return "ELEVATOR", "Use the camp ELEVATOR (right of the pit) to ride between layers, or climb the ladder beside it."
+	elseif id == "artifact" then
+		return "IMPORTANT ARTIFACT", ("You can't dig or teleport while carrying it. Take it to the RECEIVING TABLE at camp - or press %s to put it down."):format(names.Place)
+	elseif id == "collection" then
+		return "COLLECTION", ("Press %s to open your Collection Journal and pick artifacts for your camp shelf."):format(names.Journal)
+	end
+	return "", ""
+end
+
+-- The single hint to show: the first in order that is triggered, not yet done and not satisfied.
+function GuideSpec.Active(s, done: { [string]: boolean }): string?
+	for _, id in ipairs(GuideSpec.Order) do
+		if not done[id] and not GuideSpec.Satisfied(id, s) and GuideSpec.Triggered(id, s) then
+			return id
+		end
+	end
+	return nil
+end
+
+-- Ids that can be marked done because their condition is satisfied (so they are persisted and never reappear).
+function GuideSpec.NewlySatisfied(s, done: { [string]: boolean }): { string }
+	local out = {}
+	for _, id in ipairs(GuideSpec.Order) do
+		if not done[id] and GuideSpec.Satisfied(id, s) then
+			table.insert(out, id)
+		end
+	end
+	return out
+end
+
+return GuideSpec
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">ModelKit</string>
           <string name="Source"><![CDATA[-- Tiny parts-only modelling kit for the "chunky dig-site" look. A model is a list of part specs positioned
@@ -721,7 +1064,110 @@ return Kit
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">PackModels</string>
+          <string name="Source"><![CDATA[-- Chunky backpack models for the shop (same Kit/palette as tools and artifacts). Five packs, each visibly bigger and
+-- better equipped than the last, so the progression reads without reading the capacity number.
+local Kit = require(script.Parent.ModelKit)
+
+local PackModels = {}
+
+local V = Vector3.new
+local function hex(s: string): Color3
+	return Color3.fromHex(s)
+end
+
+local LEATHER, LEATHER_DARK, CANVAS, CANVAS_DARK = hex("A8703E"), hex("6E4527"), hex("7A8C5C"), hex("56673E")
+local STEEL, ORANGE, GOLD = hex("8E98A3"), hex("E5602B"), hex("F5B942")
+local STRAP = hex("3A2A1C")
+
+local builders = {}
+
+local function strap(name: string, x: number, h: number, z: number)
+	return Kit.block(name, V(0.3, h, 0.2), V(x, 0, z), STRAP)
+end
+
+function builders.pack_pouch()
+	return {
+		Kit.block("Body", V(2.4, 2.4, 1.4), V(0, 0, 0), LEATHER),
+		Kit.block("Flap", V(2.6, 0.9, 1.6), V(0, 1.2, 0), LEATHER_DARK),
+		Kit.block("Buckle", V(0.5, 0.5, 0.2), V(0, 0.75, 0.85), GOLD),
+		strap("StrapL", -0.7, 2.6, -0.8), strap("StrapR", 0.7, 2.6, -0.8),
+	}
+end
+
+function builders.pack_satchel()
+	return {
+		Kit.block("Body", V(3.4, 2.4, 1.3), V(0, -0.2, 0), CANVAS),
+		Kit.block("Flap", V(3.6, 1.2, 1.5), V(0, 1.2, 0), CANVAS_DARK),
+		Kit.block("Buckle", V(0.6, 0.6, 0.2), V(0, 0.8, 0.8), GOLD),
+		Kit.block("PocketL", V(1.0, 1.1, 0.4), V(-1.0, -0.8, 0.8), CANVAS_DARK),
+		Kit.block("PocketR", V(1.0, 1.1, 0.4), V(1.0, -0.8, 0.8), CANVAS_DARK),
+		Kit.block("Strap", V(4.2, 0.35, 0.2), V(0, 0.6, -0.8), STRAP, Enum.Material.SmoothPlastic, V(0, 0, 18)),
+	}
+end
+
+function builders.pack_field()
+	return {
+		Kit.block("Body", V(3.0, 3.8, 1.8), V(0, 0, 0), CANVAS),
+		Kit.block("Lid", V(3.2, 1.0, 2.0), V(0, 2.2, 0), CANVAS_DARK),
+		Kit.block("PocketL", V(0.9, 1.7, 0.7), V(-1.1, -0.9, 1.1), CANVAS_DARK),
+		Kit.block("PocketR", V(0.9, 1.7, 0.7), V(1.1, -0.9, 1.1), CANVAS_DARK),
+		Kit.block("Bedroll", V(3.2, 0.9, 0.9), V(0, -2.4, 0.1), LEATHER, Enum.Material.SmoothPlastic),
+		Kit.block("BuckleL", V(0.4, 0.4, 0.2), V(-0.7, 1.7, 1.1), GOLD),
+		Kit.block("BuckleR", V(0.4, 0.4, 0.2), V(0.7, 1.7, 1.1), GOLD),
+		strap("StrapL", -0.9, 3.8, -1.0), strap("StrapR", 0.9, 3.8, -1.0),
+	}
+end
+
+function builders.pack_mining()
+	return {
+		Kit.block("Frame", V(3.6, 4.6, 0.5), V(0, 0, -0.9), STEEL, Enum.Material.Metal),
+		Kit.block("Body", V(3.2, 3.6, 1.8), V(0, 0.2, 0.2), LEATHER_DARK),
+		Kit.block("Lid", V(3.4, 1.0, 2.0), V(0, 2.5, 0.2), LEATHER),
+		Kit.block("Panel", V(2.4, 1.4, 0.3), V(0, -0.3, 1.2), ORANGE),
+		Kit.block("PocketL", V(0.8, 1.6, 0.6), V(-1.35, -1.2, 1.1), LEATHER),
+		Kit.block("PocketR", V(0.8, 1.6, 0.6), V(1.35, -1.2, 1.1), LEATHER),
+		Kit.block("LampBody", V(0.6, 0.6, 0.6), V(0, 3.2, 0.5), STEEL, Enum.Material.Metal),
+		Kit.ball("Lamp", 0.5, V(0, 3.2, 0.9), GOLD, Enum.Material.Neon),
+		Kit.block("Pick", V(0.2, 2.6, 0.2), V(1.9, 0.4, 0.3), hex("7A5230")),
+		strap("StrapL", -1.0, 4.2, -1.3), strap("StrapR", 1.0, 4.2, -1.3),
+	}
+end
+
+function builders.pack_expedition()
+	return {
+		Kit.block("Frame", V(4.2, 5.6, 0.6), V(0, 0, -1.1), STEEL, Enum.Material.Metal),
+		Kit.block("Body", V(3.8, 4.4, 2.2), V(0, 0.3, 0.2), ORANGE),
+		Kit.block("Lid", V(4.0, 1.2, 2.4), V(0, 3.1, 0.2), hex("B84519")),
+		Kit.block("PocketL", V(1.1, 2.0, 0.8), V(-1.6, -1.2, 1.4), hex("B84519")),
+		Kit.block("PocketR", V(1.1, 2.0, 0.8), V(1.6, -1.2, 1.4), hex("B84519")),
+		Kit.block("Panel", V(2.4, 1.6, 0.3), V(0, 0.2, 1.4), STEEL, Enum.Material.Metal),
+		Kit.cyl("Bedroll", "X", 4.4, 1.3, V(0, -3.3, 0.2), CANVAS),
+		Kit.cyl("RopeCoil", "Z", 0.6, 1.4, V(0, 2.0, 1.6), hex("D8B678")),
+		Kit.block("LampBody", V(0.7, 0.7, 0.7), V(0, 4.0, 0.5), STEEL, Enum.Material.Metal),
+		Kit.ball("Lamp", 0.6, V(0, 4.0, 0.95), GOLD, Enum.Material.Neon),
+		Kit.block("Flag", V(0.2, 1.6, 0.2), V(-1.7, 3.9, -0.4), STEEL, Enum.Material.Metal),
+		Kit.block("FlagCloth", V(1.0, 0.7, 0.1), V(-1.2, 4.4, -0.4), GOLD),
+		strap("StrapL", -1.1, 5.0, -1.4), strap("StrapR", 1.1, 5.0, -1.4),
+	}
+end
+
+function PackModels.Has(id: string?): boolean
+	return id ~= nil and builders[id] ~= nil
+end
+
+-- Anchored preview/FX model (PrimaryPart "Root" at the origin).
+function PackModels.BuildPreview(id: string): Model
+	return Kit.BuildModel(builders[id](), id)
+end
+
+return PackModels
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">Remotes</string>
           <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
@@ -747,6 +1193,10 @@ local EVENTS = {
 	"ThrowDynamite", -- C->S  (dx, dy, dz) aim direction; the server decides everything else
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)
+	"GuideDone", -- C->S  (hintId) the player finished/dismissed a first-time hint
+	"SetDisplay", -- C->S  (treasureId) toggle an artifact on the camp shelf (validated against the saved collection)
+	"SetCompleted", -- S->C  (layerId, layerName) a collection set was just completed
+	"MineShift", -- S->C  (phase, secondsOrNil) mine refresh warning / deferral / done
 }
 
 local folder: Folder
@@ -773,7 +1223,7 @@ return Remotes
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">SettingsSpec</string>
           <string name="Source"><![CDATA[-- Player settings: one definition used by the client (UI + clamping) and the server (validation before saving).
@@ -836,7 +1286,28 @@ return SettingsSpec
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="13">
+        <Properties>
+          <string name="Name">ShiftSpec</string>
+          <string name="Source"><![CDATA[-- Pure decision rule for the shared-mine refresh ("Fresh Dig"). Tested in tests/shift_test.luau.
+local ShiftSpec = {}
+
+-- depletion = { Total = fraction of all cells dug, ByLayer = { [layerId] = fraction }, AgeMinutes }
+function ShiftSpec.ShouldRefresh(depletion, cfg, deepestLayerId: string): boolean
+	if depletion.Total >= cfg.TriggerFraction then
+		return true
+	end
+	if (depletion.ByLayer[deepestLayerId] or 0) >= cfg.DeepLayerFraction then
+		return true
+	end
+	return depletion.AgeMinutes >= cfg.MaxAgeMinutes and depletion.Total >= cfg.MinFractionForAge
+end
+
+return ShiftSpec
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="14">
         <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
@@ -1200,7 +1671,7 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">TreasureModels</string>
           <string name="Source"><![CDATA[-- Polished chunky models for notable artifacts. Treasures without a Model id keep the generic coin/ring/gem/block
@@ -1279,6 +1750,86 @@ function builders.necklace()
 	return parts
 end
 
+-- Epic. Fossil claw: three tapering, curving segments in bone colour with a dark tip, on a small stone base.
+function builders.claw()
+	local BONE, BONE_DARK = P.Cream, hex("B9A57E")
+	return {
+		Kit.block("Base", V(1.9, 0.4, 1.3), V(0, -1.15, 0), hex("8A8F96"), Enum.Material.Slate),
+		Kit.block("Seg1", V(0.9, 1.1, 0.8), V(-0.15, -0.45, 0), BONE, Enum.Material.SmoothPlastic, V(0, 0, 8)),
+		Kit.block("Seg2", V(0.72, 1.0, 0.64), V(0.2, 0.45, 0), BONE, Enum.Material.SmoothPlastic, V(0, 0, -14)),
+		Kit.block("Seg3", V(0.52, 0.9, 0.46), V(0.75, 1.2, 0), BONE_DARK, Enum.Material.SmoothPlastic, V(0, 0, -38)),
+		Kit.block("Tip", V(0.3, 0.55, 0.3), V(1.3, 1.6, 0), hex("5A4A33"), Enum.Material.SmoothPlastic, V(0, 0, -58)),
+	}
+end
+
+-- Rare. Ruin tablet: a slab of sandstone with carved glyph rows and a chipped corner. Faces +/-Z.
+function builders.tablet()
+	local SAND, CARVE = P.Sandstone, hex("8C6B3E")
+	local parts = {
+		Kit.block("Slab", V(2.0, 2.6, 0.5), V(0, 0, 0), SAND, Enum.Material.Sandstone),
+		Kit.block("Chip", V(0.7, 0.7, 0.52), V(0.85, 1.2, 0), hex("2B2F36"), Enum.Material.SmoothPlastic, V(0, 0, 45)),
+	}
+	for i = 1, 4 do
+		table.insert(parts, Kit.block("Glyph" .. i, V(i % 2 == 0 and 1.3 or 1.0, 0.18, 0.54), V(-0.1, 0.95 - i * 0.45, 0), CARVE))
+	end
+	return parts
+end
+
+-- Legendary. Sun pharaoh mask: a gold headdress with teal stripes, eyes, a nose bridge and a beard. Faces +Z.
+function builders.mask()
+	local STRIPE = hex("2D6FB5")
+	return {
+		Kit.block("Face", V(1.7, 2.2, 0.8), V(0, 0, 0), GOLD, Enum.Material.SmoothPlastic),
+		Kit.block("HeadCloth", V(2.5, 1.0, 1.1), V(0, 1.2, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("SideL", V(0.55, 2.4, 0.9), V(-1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("SideR", V(0.55, 2.4, 0.9), V(1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("StripeL", V(0.2, 2.0, 0.92), V(-1.4, -0.1, -0.1), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.block("StripeR", V(0.2, 2.0, 0.92), V(1.4, -0.1, -0.1), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.block("Brow", V(1.5, 0.22, 0.2), V(0, 0.45, 0.42), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.block("EyeL", V(0.45, 0.28, 0.2), V(-0.42, 0.2, 0.42), TEAL, Enum.Material.Neon),
+		Kit.block("EyeR", V(0.45, 0.28, 0.2), V(0.42, 0.2, 0.42), TEAL, Enum.Material.Neon),
+		Kit.block("Nose", V(0.3, 0.8, 0.3), V(0, -0.2, 0.5), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("Mouth", V(0.7, 0.14, 0.2), V(0, -0.78, 0.42), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("Beard", V(0.5, 0.9, 0.4), V(0, -1.5, 0.2), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.ball("CrownGem", 0.5, V(0, 1.55, 0.45), TEAL, Enum.Material.Neon),
+	}
+end
+
+-- Uncommon. Clay figurine: a squat body, round head and stubby arms on a base.
+function builders.figurine()
+	local CLAY = P.Sandstone
+	return {
+		Kit.block("Base", V(1.4, 0.3, 1.0), V(0, -1.1, 0), P.Clay),
+		Kit.block("Body", V(1.0, 1.4, 0.8), V(0, -0.2, 0), CLAY),
+		Kit.ball("Head", 0.95, V(0, 0.95, 0), CLAY),
+		Kit.block("ArmL", V(0.3, 0.9, 0.35), V(-0.7, -0.15, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, -12)),
+		Kit.block("ArmR", V(0.3, 0.9, 0.35), V(0.7, -0.15, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, 12)),
+		Kit.block("EyeL", V(0.14, 0.14, 0.1), V(-0.2, 1.0, 0.45), P.Dark),
+		Kit.block("EyeR", V(0.14, 0.14, 0.1), V(0.2, 1.0, 0.45), P.Dark),
+	}
+end
+
+-- Common. Pottery shard: two curved-looking fragments with a painted band.
+function builders.shard()
+	local CLAY = P.Clay
+	return {
+		Kit.block("PieceA", V(1.6, 1.3, 0.35), V(-0.2, 0, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, 14)),
+		Kit.block("PieceB", V(1.0, 0.9, 0.35), V(0.9, -0.5, 0.1), P.Dirt, Enum.Material.SmoothPlastic, V(0, 0, -22)),
+		Kit.block("Band", V(1.4, 0.22, 0.38), V(-0.2, 0.15, 0), P.Cream, Enum.Material.SmoothPlastic, V(0, 0, 14)),
+	}
+end
+
+-- Uncommon. Fossil fragment: a spiral shell built from stacked rings, in a rock chunk.
+function builders.fossil()
+	local BONE = P.Cream
+	return {
+		Kit.block("Rock", V(2.2, 1.9, 0.7), V(0, 0, -0.2), hex("8A8F96"), Enum.Material.Slate),
+		Kit.cyl("Whorl1", "Z", 0.35, 1.7, V(0, 0, 0.2), BONE),
+		Kit.cyl("Whorl2", "Z", 0.4, 1.15, V(0, 0, 0.25), P.Sandstone),
+		Kit.cyl("Whorl3", "Z", 0.45, 0.6, V(0, 0, 0.3), BONE),
+	}
+end
+
 -- Generic stand-ins for treasures that do not have a polished model yet.
 local function genericSpecs(def)
 	local c = def.Color
@@ -1320,7 +1871,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="16">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -1370,7 +1921,7 @@ return Util
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="13">
+      <Item class="ModuleScript" referent="17">
         <Properties>
           <string name="Name">ViewmodelMath</string>
           <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
@@ -1387,6 +1938,19 @@ ViewmodelMath.SwingPivot = Vector3.new(1.15, -1.1, -1.4) -- roughly where the ha
 -- Held artifact (carry): low and central so the view above and around it stays clear.
 ViewmodelMath.ArtifactScale = 0.5
 ViewmodelMath.ArtifactRest = CFrame.new(0, -1.05, -2.1)
+
+-- Held artifacts differ in size (a gem vs. a tall mask), so the draw scale is fitted per artifact: its highest point (in
+-- model space, conservatively centre + half the longest side) may rise at most ArtifactMaxTop above the rest origin.
+ViewmodelMath.ArtifactMaxTop = 0.62
+
+function ViewmodelMath.ArtifactScaleFor(specs): number
+	local top = 0.01
+	for _, s in ipairs(specs) do
+		local half = math.max(s.Size.X, s.Size.Y, s.Size.Z) / 2
+		top = math.max(top, s.Offset.Position.Y + half)
+	end
+	return math.min(ViewmodelMath.ArtifactScale, ViewmodelMath.ArtifactMaxTop / top)
+end
 
 -- Camera-space CFrame of the tool origin at rest.
 function ViewmodelMath.Rest(): CFrame
@@ -1434,15 +1998,15 @@ return ViewmodelMath
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="14">
+  <Item class="ServerScriptService" referent="18">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="15">
+    <Item class="Folder" referent="19">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="16">
+      <Item class="Script" referent="20">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -1466,6 +2030,8 @@ local ArtifactService = require(Services.ArtifactService)
 local DynamiteService = require(Services.DynamiteService)
 local SettingsService = require(Services.SettingsService)
 local ElevatorService = require(Services.ElevatorService)
+local CollectionService = require(Services.CollectionService)
+local MineShiftService = require(Services.MineShiftService)
 
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
@@ -1480,6 +2046,8 @@ for name, init in pairs({
 	Dynamite = DynamiteService.Init,
 	Settings = SettingsService.Init,
 	Elevator = ElevatorService.Init,
+	Collection = CollectionService.Init,
+	MineShift = MineShiftService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then
@@ -1501,11 +2069,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="17">
+      <Item class="Folder" referent="21">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="18">
+        <Item class="ModuleScript" referent="22">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -1523,7 +2091,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="19">
+        <Item class="ModuleScript" referent="23">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -1632,11 +2200,32 @@ function ArtifactRecords:Drop(id: string, position): boolean
 	return true
 end
 
+-- Moves a resting (Dropped) artifact without changing its owner or state (used when the mine is refreshed).
+function ArtifactRecords:Relocate(id: string, position): boolean
+	local rec = self.records[id]
+	if not rec or rec.State ~= "Dropped" then
+		return false
+	end
+	rec.Position = position
+	return true
+end
+
+-- Every resting artifact (state Dropped). Order is unspecified.
+function ArtifactRecords:Dropped()
+	local out = {}
+	for _, rec in pairs(self.records) do
+		if rec.State == "Dropped" then
+			table.insert(out, rec)
+		end
+	end
+	return out
+end
+
 return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="20">
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -1657,6 +2246,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local Kit = require(ReplicatedStorage.Shared.ModelKit)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
@@ -1988,17 +2578,16 @@ function ArtifactService.Deposit(player: Player)
 	data.Cash += value
 	data.Stats.CashEarned += value
 	data.Stats.TreasureFound += 1
-	local entry = data.Collection[rec.TreasureId]
-	if not entry then
-		entry = { Count = 0, FirstFound = os.time() }
-		data.Collection[rec.TreasureId] = entry
+	data.Stats.RelicsExtracted += 1
+	local isNew, completed = CollectionSpec.Register(data.Collection, rec.TreasureId, os.time())
+	if completed then
+		Remotes.Get("SetCompleted"):FireClient(player, completed, Defs.LayerName(completed))
 	end
-	entry.Count += 1
 	DataService.MarkDirty(player)
 	MetricsService.Sold(player, value, 1)
 
 	finishCarry(player, rec.Id)
-	depositedRemote:FireClient(player, def.Name, value)
+	depositedRemote:FireClient(player, def.Name, value, isNew)
 	ArtifactService.ShowOnTable(rec.TreasureId)
 	AnalyticsService.Log(player, "ArtifactDeposited", { id = rec.Id, value = value })
 end
@@ -2017,6 +2606,51 @@ function ArtifactService.ShowOnTable(treasureId: string)
 	task.delay(Config.Artifacts.DisplaySeconds, function()
 		model:Destroy()
 	end)
+end
+
+-- Mine refresh support --------------------------------------------------------------------------------------------
+-- Inside the mine volume (grid footprint plus the exit shaft beside it), below the rim.
+local function inMine(pos: Vector3): boolean
+	local b = Grid.Bounds()
+	local ex = Config.Exit
+	local maxZ = b.MaxZ + (ex.Enabled and ex.Run or 0)
+	return pos.X >= b.MinX - 1 and pos.X <= b.MaxX + 1 and pos.Z >= b.MinZ - 1 and pos.Z <= maxZ + 1 and pos.Y < b.TopY + 3
+end
+ArtifactService.InMine = inMine
+
+-- Players currently carrying an artifact while standing inside the mine.
+function ArtifactService.CarriersInMine(): { Player }
+	local out = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if CarryRegistry.IsCarrying(player) then
+			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and inMine(hrp.Position) then
+				table.insert(out, player)
+			end
+		end
+	end
+	return out
+end
+
+-- Moves every resting artifact that lies inside the mine onto the camp Lost & Found pad (they are never deleted; the
+-- owner can still pick them up there). Returns how many were moved.
+function ArtifactService.RelocateFromMine(): number
+	local moved = 0
+	for _, rec in ipairs(store:Dropped()) do
+		if inMine(rec.Position) then
+			local spot = WorldBuilder.LostFoundPosition + Vector3.new((moved % 3 - 1) * 2.2, 0, (moved // 3) * 2.2)
+			if store:Relocate(rec.Id, spot) then
+				destroyWorldModel(rec.Id)
+				spawnWorldModel(rec.Id)
+				moved += 1
+				local owner = Players:GetPlayerByUserId(rec.OwnerId)
+				if owner then
+					say(owner, ("The mine was refreshed. Your %s is waiting at Lost & Found."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
+				end
+			end
+		end
+	end
+	return moved
 end
 
 -- Loss handling (death / respawn / disconnect) --------------------------------------------------------------------
@@ -2045,6 +2679,11 @@ local function onLoss(player: Player, reason: string)
 		say(player, "You dropped your artifact. It is waiting where you lost it.", "Danger")
 	end
 	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
+end
+
+-- Forces a carried artifact to be dropped (used by the mine refresh when a carrier will not leave the mine).
+function ArtifactService.ForceDrop(player: Player)
+	onLoss(player, "mine_refresh")
 end
 
 function ArtifactService.Init()
@@ -2115,7 +2754,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="21">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -2142,7 +2781,69 @@ return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="22">
+        <Item class="ModuleScript" referent="26">
+          <Properties>
+            <string name="Name">CollectionService</string>
+            <string name="Source"><![CDATA[-- Player-facing progress that is just saved flags: the camp-shelf selection and first-time hint progress. The server
+-- validates every request against the saved collection / the hint list; the client only ever sends ids.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
+local GuideSpec = require(ReplicatedStorage.Shared.GuideSpec)
+
+local DataService = require(script.Parent.DataService)
+local StateService = require(script.Parent.StateService)
+local RateLimiter = require(script.Parent.RateLimiter)
+
+local CollectionService = {}
+
+local notifyRemote = Remotes.Get("Notify")
+
+local function setDisplay(player: Player, id: any)
+	if not RateLimiter.Check(player, "SetDisplay") then
+		return
+	end
+	local data = DataService.Get(player)
+	if not data then
+		return
+	end
+	local list, ok, reason = CollectionSpec.ToggleDisplay(data.Display, id, data.Collection)
+	if not ok then
+		if reason == "Full" then
+			notifyRemote:FireClient(player, "Your shelf is full - remove one first.", "Danger")
+		elseif reason == "NotDiscovered" then
+			notifyRemote:FireClient(player, "You have not discovered that yet.", "Danger")
+		end
+		return
+	end
+	data.Display = list
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+end
+
+local function guideDone(player: Player, id: any)
+	if not RateLimiter.Check(player, "GuideDone") or not GuideSpec.IsValid(id) then
+		return
+	end
+	local data = DataService.Get(player)
+	if not data or data.Guide[id] then
+		return
+	end
+	data.Guide[id] = true
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+end
+
+function CollectionService.Init()
+	Remotes.Get("SetDisplay").OnServerEvent:Connect(setDisplay)
+	Remotes.Get("GuideDone").OnServerEvent:Connect(guideDone)
+end
+
+return CollectionService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -2194,8 +2895,26 @@ local function toolsV2(data, defs)
 	end
 end
 
+-- v2 -> v3: adds the camp-shelf display list and the first-time-hint progress. Existing collection entries stay valid.
+-- Players who already sold things / own tools have clearly passed the early hints, so those are pre-completed.
+local function collectionV3(data, defs)
+	data.Display = type(data.Display) == "table" and data.Display or {}
+	data.Guide = type(data.Guide) == "table" and data.Guide or {}
+	data.MigrationLog = data.MigrationLog or {}
+	local stats = data.Stats or {}
+	if (stats.CashEarned or 0) > 0 or (stats.BlocksDug or 0) >= 4 then
+		data.Guide.mine = true
+	end
+	if (stats.CashEarned or 0) > 0 then
+		data.Guide.backpack = true
+		data.Guide.sell = true
+	end
+	data.MigrationLog.CollectionV3 = "display+guide"
+end
+
 DataMigrations.Steps = {
 	[1] = toolsV2,
+	[2] = collectionV3,
 }
 
 -- Runs every pending step in order, then stamps the new version.
@@ -2237,11 +2956,24 @@ function DataMigrations.Sanitize(data, defs, starterTool: string, starterBackpac
 	end
 end
 
+-- Drops collection entries for treasure ids that no longer exist and repairs malformed entries.
+function DataMigrations.SanitizeCollection(data, defs)
+	data.Collection = type(data.Collection) == "table" and data.Collection or {}
+	for id, entry in pairs(data.Collection) do
+		if not defs.Treasure[id] or type(entry) ~= "table" then
+			data.Collection[id] = nil
+		else
+			entry.Count = math.max(1, math.floor(tonumber(entry.Count) or 1))
+			entry.FirstFound = tonumber(entry.FirstFound) or 0
+		end
+	end
+end
+
 return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="23">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -2256,6 +2988,7 @@ local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
 local DataService = {}
 
@@ -2272,6 +3005,8 @@ local function defaultData()
 		Research = {},
 		UnlockedSites = {},
 		Collection = {}, -- [treasureId] = { Count, FirstFound }
+		Display = {}, -- treasure ids shown on the player's camp shelf (subset of Collection)
+		Guide = {}, -- [hintId] = true once a first-time hint is finished
 		Stats = {
 			BlocksDug = 0, TreasureFound = 0, CashEarned = 0,
 			RelicsDiscovered = 0, RelicsExtracted = 0, RelicsStolen = 0, DeepestDepth = 0,
@@ -2287,6 +3022,8 @@ local function migrate(data)
 	Util.Reconcile(data, defaultData())
 	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
 	data.Settings = SettingsSpec.Sanitize(data.Settings) -- clamp whatever was saved
+	DataMigrations.SanitizeCollection(data, Defs)
+	data.Display = CollectionSpec.SanitizeDisplay(data.Display, data.Collection)
 end
 
 -- GetDataStore throws in an unpublished place, so it must never run unprotected.
@@ -2302,17 +3039,23 @@ if Config.Data.Enabled then
 	end
 end
 
-local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean } } = {}
+local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
+local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, LastWrite: number, Saving: boolean } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
-local warnedUnavailable = false
+local lastSaveWarn: { [Player]: number } = {}
 
 local function key(player: Player)
 	return "Player_" .. player.UserId
 end
 
+local function isStudio()
+	return RunService:IsStudio()
+end
+
 local function attempt(fn: () -> any, tries: number)
 	local ok, result
-	if RunService:IsStudio() then
+	if isStudio() then
 		tries = 1 -- fail fast in Studio so a missing API permission doesn't delay loading
 	end
 	for i = 1, tries do
@@ -2321,10 +3064,17 @@ local function attempt(fn: () -> any, tries: number)
 			return true, result
 		end
 		if i < tries then
-			task.wait(i)
+			task.wait(i * 2)
 		end
 	end
 	return false, result
+end
+
+-- Session lock: a profile records which server (JobId) owns it. A second server refuses to load a profile that is
+-- locked by a live session, so two servers can never both write one player's progress. Stale locks expire.
+local function lockedByOther(old): boolean
+	local lock = old and old.SessionLock
+	return type(lock) == "table" and lock.JobId ~= game.JobId and (os.time() - (tonumber(lock.At) or 0)) < LOCK_TIMEOUT
 end
 
 function DataService.OnLoaded(cb: (Player, any) -> ())
@@ -2343,55 +3093,122 @@ function DataService.MarkDirty(player: Player)
 	end
 end
 
-function DataService.Save(player: Player, force: boolean?)
+-- Writes the profile. `release` also drops the session lock (player leaving / server closing).
+-- Returns true when nothing needed writing or the write succeeded.
+function DataService.Save(player: Player, force: boolean?, release: boolean?): boolean
 	local p = profiles[player]
 	if not p or not store or p.NoSave then
-		return
+		return true
 	end
-	if not p.Dirty and not force then
-		return
+	local stale = os.clock() - p.LastWrite >= LOCK_REFRESH
+	if not p.Dirty and not force and not stale then
+		return true
 	end
-	p.Dirty = false
-	local ok, err = attempt(function()
-		store:SetAsync(key(player), p.Data)
-	end, 3)
-	if not ok then
-		p.Dirty = true
-		if not warnedUnavailable then
-			warnedUnavailable = true
-			warn("[DataService] Save failed (is Studio API access enabled for this place?): " .. tostring(err))
+	if p.Saving then
+		if not (force or release) then
+			return true -- an autosave is already in flight; the next one picks up newer changes
+		end
+		while p.Saving do -- a final save must not be skipped: wait for the in-flight write, then write again
+			task.wait(0.1)
 		end
 	end
+	p.Saving = true
+	p.Dirty = false
+	local snapshot = Util.DeepCopy(p.Data)
+	local lostLock = false
+	local ok, err = attempt(function()
+		store:UpdateAsync(key(player), function(old)
+			lostLock = false
+			if lockedByOther(old) then
+				lostLock = true
+				return nil -- another live server owns this profile: do NOT overwrite it
+			end
+			snapshot.SessionLock = (not release) and { JobId = game.JobId, At = os.time() } or nil
+			return snapshot
+		end)
+	end, 3)
+	p.Saving = false
+	if ok and not lostLock then
+		p.LastWrite = os.clock()
+		return true
+	end
+	p.Dirty = true
+	if lostLock then
+		p.NoSave = true -- never write again from this server
+		warn(("[DataService] %s's profile is now owned by another server; saving from this one is disabled."):format(player.Name))
+	elseif os.clock() - (lastSaveWarn[player] or 0) > 30 then
+		lastSaveWarn[player] = os.clock()
+		warn(("[DataService] Save failed for %s (will retry): %s"):format(player.Name, tostring(err)))
+	end
+	return false
 end
 
 local function load(player: Player)
 	local data
 	local noSave = false
+	local failReason: string? = nil
 	if store then
+		local locked = false
 		local ok, result = attempt(function()
-			return store:GetAsync(key(player))
-		end, 3)
-		if ok then
+			local read
+			store:UpdateAsync(key(player), function(old)
+				locked = false
+				if lockedByOther(old) then
+					locked = true
+					return nil
+				end
+				read = old
+				local new = old or {}
+				new.SessionLock = { JobId = game.JobId, At = os.time() }
+				return new
+			end)
+			return read
+		end, 4)
+		if locked then
+			failReason = "Your saved progress is still open on another server. Please rejoin in about a minute."
+			warn("[DataService] Profile locked by another server for " .. player.Name)
+		elseif ok then
 			data = result
 		else
-			-- Could not read. Do NOT risk overwriting real data with defaults later.
-			noSave = true
-			if RunService:IsStudio() then
-				warn("[DataService] DataStore unavailable in Studio - progress this session will not persist. (" .. tostring(result) .. ")")
-			else
-				warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
-			end
+			failReason = "Your saved progress could not be loaded. Please rejoin in a moment - nothing was overwritten."
+			warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
 		end
+		if failReason then
+			noSave = true
+		end
+	end
+	if failReason and not isStudio() then
+		-- Production: never let someone play (and lose progress) on a stand-in profile.
+		if player.Parent then
+			player:Kick(failReason)
+		end
+		return
 	end
 	if type(data) ~= "table" then
 		data = defaultData()
 	else
+		data.SessionLock = nil
 		migrate(data)
 	end
 	if not player.Parent then
+		if store and not noSave then
+			-- joined and left before the profile was kept: release the lock we just took
+			pcall(function()
+				store:UpdateAsync(key(player), function(old)
+					if old and old.SessionLock and old.SessionLock.JobId == game.JobId then
+						old.SessionLock = nil
+						return old
+					end
+					return nil
+				end)
+			end)
+		end
 		return
 	end
-	profiles[player] = { Data = data, Dirty = noSave == false and false, NoSave = noSave }
+	if noSave and isStudio() then
+		warn("[DataService] DataStore unavailable in Studio - progress this session will not persist.")
+	end
+	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, LastWrite = os.clock(), Saving = false }
 	for _, cb in ipairs(loadedCallbacks) do
 		task.spawn(cb, player, data)
 	end
@@ -2409,8 +3226,9 @@ function DataService.Init()
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
-		DataService.Save(player, true)
+		DataService.Save(player, true, true)
 		profiles[player] = nil
+		lastSaveWarn[player] = nil
 	end)
 
 	task.spawn(function()
@@ -2422,12 +3240,25 @@ function DataService.Init()
 		end
 	end)
 
+	-- Shutdown: save every profile in parallel and wait for them (Roblox allows ~30 s), instead of a fixed sleep.
 	game:BindToClose(function()
-		for player in pairs(profiles) do
-			task.spawn(DataService.Save, player, true)
+		if isStudio() then
+			return
 		end
-		if not RunService:IsStudio() then
-			task.wait(3)
+		local pending = 0
+		for player in pairs(profiles) do
+			pending += 1
+			task.spawn(function()
+				DataService.Save(player, true, true)
+				pending -= 1
+			end)
+		end
+		local deadline = os.clock() + 25
+		while pending > 0 and os.clock() < deadline do
+			task.wait(0.2)
+		end
+		if pending > 0 then
+			warn(("[DataService] Shutdown: %d profile(s) did not finish saving."):format(pending))
 		end
 	end)
 end
@@ -2436,7 +3267,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -2460,6 +3291,8 @@ local CarryRegistry = require(script.Parent.CarryRegistry)
 local DigService = {}
 
 local lastHit: { [Player]: number } = {}
+local lastGateNote: { [Player]: number } = {}
+local notifyRemote = Remotes.Get("Notify")
 local digResult = Remotes.Get("DigResult")
 
 local function isInt(n: any): boolean
@@ -2501,13 +3334,26 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 	if not Defs.CellInReach(tool, hrp.Position, x, y, z, Config.Dig.ReachTolerance) then
 		return
 	end
+	-- Layer gating: a tool too weak for this layer does nothing (and does not use up the swing).
+	local targetLayer = Defs.LayerAtCell(y)
+	if not Defs.LayerAllows(tool, targetLayer) then
+		if now - (lastGateNote[player] or 0) > 1.5 then
+			lastGateNote[player] = now
+			notifyRemote:FireClient(player, ("Too hard! %s blocks need a %s or better."):format(
+				targetLayer.Name:sub(1, 1) .. targetLayer.Name:sub(2):lower(), Defs.ToolNameForTier(targetLayer.MinToolTier)), "Danger")
+		end
+		return
+	end
 	lastHit[player] = now
 
-	-- Resolve target + splash
+	-- Resolve target + splash (splash never damages a layer this tool cannot break)
 	local targets = { { idx, tool.Power } }
 	if tool.Splash then
 		for _, ni in ipairs(SiteService.PickSplash(idx, tool.Splash.Radius, tool.Splash.MaxExtra, hrp.Position)) do
-			table.insert(targets, { ni, tool.Power * tool.Splash.Fraction })
+			local _, ny = Grid.FromIndex(ni)
+			if Defs.LayerAllows(tool, Defs.LayerAtCell(ny)) then
+				table.insert(targets, { ni, tool.Power * tool.Splash.Fraction })
+			end
 		end
 	end
 
@@ -2552,6 +3398,7 @@ function DigService.Init()
 	Remotes.Get("DigHit").OnServerEvent:Connect(handleHit)
 	Players.PlayerRemoving:Connect(function(player)
 		lastHit[player] = nil
+		lastGateNote[player] = nil
 		RateLimiter.Forget(player)
 		LootService.Forget(player)
 	end)
@@ -2561,7 +3408,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -2607,7 +3454,12 @@ local function explode(thrower: Player, stick: Model)
 
 	local thrownBy = thrower.Parent and DataService.Get(thrower)
 	local destroyed, hits = {}, {}
-	for _, idx in ipairs(SiteService.CellsNear(pos, def.Blast.Radius, def.Blast.MaxCells)) do
+	-- The blast respects layer gating by the thrower's equipped tool tier (dynamite is not a way to skip the ladder).
+	local tool = thrownBy and Defs.Tools[thrownBy.Equipment.ToolId] or Defs.Tools[Config.Starting.ToolId]
+	local function allow(row: number): boolean
+		return Defs.LayerAllows(tool, Defs.LayerAtCell(row))
+	end
+	for _, idx in ipairs(SiteService.CellsNear(pos, def.Blast.Radius, def.Blast.MaxCells, allow)) do
 		local _, dead, treasureId = SiteService.Damage(idx, 1e9)
 		if dead then
 			table.insert(destroyed, idx)
@@ -2714,7 +3566,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -2779,7 +3631,12 @@ local function purchase(player: Player, kind: any, id: any)
 		return
 	end
 	local data = DataService.Get(player)
-	if not data then
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not data or not hrp then
+		return
+	end
+	if (hrp.Position - Config.Camp.ShopPosition).Magnitude > Config.Camp.ShopReach then
+		notifyRemote:FireClient(player, "Walk back to the shop to buy things.", "Danger")
 		return
 	end
 	if kind == "Consumable" then
@@ -2838,7 +3695,11 @@ local function purchase(player: Player, kind: any, id: any)
 	if kind == "Tool" then
 		data.Equipment.ToolId = id
 	else
-		data.Equipment.BackpackId = id
+		-- a smaller pack bought later never replaces a bigger one that is already in use
+		local current = Defs.Backpacks[data.Equipment.BackpackId]
+		if not current or def.Capacity > current.Capacity then
+			data.Equipment.BackpackId = id
+		end
 	end
 	DataService.MarkDirty(player)
 	StateService.Push(player)
@@ -2937,7 +3798,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">ElevatorService</string>
             <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
@@ -3096,7 +3957,7 @@ return ElevatorService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -3199,7 +4060,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -3266,7 +4127,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -3275,6 +4136,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
@@ -3284,6 +4146,7 @@ local ArtifactService = require(script.Parent.ArtifactService)
 local LootService = {}
 local treasureRemote = Remotes.Get("TreasureFound")
 local notifyRemote = Remotes.Get("Notify")
+local setRemote = Remotes.Get("SetCompleted")
 local lastFullWarn: { [Player]: number } = {}
 
 -- Returns true if the treasure ended up in the backpack.
@@ -3312,16 +4175,14 @@ function LootService.Award(player: Player, treasureId: string, cellIndex: number
 
 	local stored = InventoryService.Add(player, treasureId)
 
-	local entry = data.Collection[treasureId]
 	local isNew = false
 	if stored then
-		if not entry then
-			entry = { Count = 0, FirstFound = os.time() }
-			data.Collection[treasureId] = entry
-			isNew = true
-		end
-		entry.Count += 1
+		local completed
+		isNew, completed = CollectionSpec.Register(data.Collection, treasureId, os.time())
 		data.Stats.TreasureFound += 1
+		if completed then
+			setRemote:FireClient(player, completed, Defs.LayerName(completed))
+		end
 	end
 
 	treasureRemote:FireClient(player, {
@@ -3350,7 +4211,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="36">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -3361,9 +4222,15 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 
+local RunService = game:GetService("RunService")
 local DataService = require(script.Parent.DataService)
 
 local MetricsService = {}
+
+-- Telemetry is a development tool: always on in Studio playtests, off in published servers unless Config enables it.
+local function enabled(): boolean
+	return Config.Metrics.Enabled or RunService:IsStudio()
+end
 
 type Window = { Blocks: number, Cash: number, Items: number, ActiveSeconds: { [number]: boolean }, Start: number }
 local windows: { [Player]: Window } = {}
@@ -3384,7 +4251,7 @@ local function get(player: Player): Window
 end
 
 function MetricsService.Hit(player: Player, blocksCleared: number)
-	if not Config.Metrics.Enabled then
+	if not enabled() then
 		return
 	end
 	local w = get(player)
@@ -3394,7 +4261,7 @@ function MetricsService.Hit(player: Player, blocksCleared: number)
 end
 
 function MetricsService.Sold(player: Player, cash: number, items: number)
-	if not Config.Metrics.Enabled then
+	if not enabled() then
 		return
 	end
 	local w = get(player)
@@ -3422,7 +4289,7 @@ local function report()
 end
 
 function MetricsService.Init()
-	if not Config.Metrics.Enabled then
+	if not enabled() then
 		return
 	end
 	Players.PlayerRemoving:Connect(function(p)
@@ -3441,7 +4308,108 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="37">
+          <Properties>
+            <string name="Name">MineShiftService</string>
+            <string name="Source"><![CDATA[-- "Fresh Dig": replenishes the shared mine when it is exhausted (docs/MINE_SHIFT.md).
+--   1. Watch depletion (Config.Shift). When the mine is mostly dug out, or its deepest layer is, or it is old and
+--      substantially dug, start a countdown and tell every player.
+--   2. At zero: wait (up to Config.Shift.CarryDeferSeconds) for anyone still CARRYING an artifact inside the mine; after
+--      that their artifact is dropped like any other loss. Resting artifacts inside the mine are moved to Lost & Found
+--      (never deleted). Players inside the mine volume are moved to the camp spawn.
+--   3. Regenerate the grid with a new seed. The exit shaft/elevator are outside the grid and untouched.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local ShiftSpec = require(ReplicatedStorage.Shared.ShiftSpec)
+
+local SiteService = require(script.Parent.SiteService)
+local ArtifactService = require(script.Parent.ArtifactService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+local StateService = require(script.Parent.StateService)
+
+local MineShiftService = {}
+
+local shiftRemote = Remotes.Get("MineShift")
+local shifts = 0
+local running = false
+
+function MineShiftService.ShouldRefresh(depletion, cfg): boolean
+	return ShiftSpec.ShouldRefresh(depletion, cfg, Config.Layers[#Config.Layers].Id)
+end
+
+local function broadcast(phase: string, seconds: number?)
+	shiftRemote:FireAllClients(phase, seconds)
+end
+
+local function moveOutOfMine()
+	for _, player in ipairs(Players:GetPlayers()) do
+		local char = player.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp and ArtifactService.InMine(hrp.Position) then
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.CFrame = WorldBuilder.SpawnCFrame
+		end
+	end
+end
+
+function MineShiftService.RefreshNow()
+	shifts += 1
+	-- 1. carriers who have not left the mine by now drop their artifact (it is relocated, never deleted)
+	for _, player in ipairs(ArtifactService.CarriersInMine()) do
+		ArtifactService.ForceDrop(player)
+	end
+	ArtifactService.RelocateFromMine()
+	-- 2. everyone inside goes to camp, 3. new terrain
+	moveOutOfMine()
+	SiteService.Generate(Config.Site.Seed + shifts * Config.Shift.SeedStep)
+	for _, player in ipairs(Players:GetPlayers()) do
+		StateService.Push(player)
+	end
+	broadcast("Done")
+end
+
+local function runShift()
+	running = true
+	local cfg = Config.Shift
+	for left = cfg.WarningSeconds, 1, -1 do
+		broadcast("Warning", left)
+		task.wait(1)
+	end
+	-- wait for carriers to bring their artifact out (bounded)
+	local waited = 0
+	while #ArtifactService.CarriersInMine() > 0 and waited < cfg.CarryDeferSeconds do
+		if waited % 10 == 0 then
+			broadcast("Deferred", cfg.CarryDeferSeconds - waited)
+		end
+		task.wait(1)
+		waited += 1
+	end
+	MineShiftService.RefreshNow()
+	running = false
+end
+
+function MineShiftService.Init()
+	if not Config.Shift.Enabled then
+		return
+	end
+	task.spawn(function()
+		while true do
+			task.wait(Config.Shift.CheckInterval)
+			if not running and MineShiftService.ShouldRefresh(SiteService.Depletion(), Config.Shift) then
+				runShift()
+			end
+		end
+	end)
+end
+
+return MineShiftService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="38">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -3490,7 +4458,7 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="39">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -3526,7 +4494,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="40">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -3548,6 +4516,10 @@ local parts: { [number]: Part } = {}
 local tints: { number } = {}
 local folder: Folder
 local generation = 0
+local dugTotal = 0
+local dugByLayer: { [string]: number } = {}
+local cellsByLayer: { [string]: number } = {}
+local generatedAt = os.clock()
 
 local function spawnPart(idx: number)
 	if parts[idx] then
@@ -3595,12 +4567,17 @@ function SiteService.Generate(seed: number?)
 	table.clear(loot)
 	table.clear(parts)
 	table.clear(tints)
+	table.clear(dugByLayer)
+	table.clear(cellsByLayer)
+	dugTotal = 0
+	generatedAt = os.clock()
 
 	local rng = Random.new(seed)
 	for idx = 1, Grid.Count do
 		local _, y = Grid.FromIndex(idx)
 		local layer = Defs.LayerAtCell(y)
 		health[idx] = layer.Health
+		cellsByLayer[layer.Id] = (cellsByLayer[layer.Id] or 0) + 1
 		maxHealth[idx] = layer.Health
 		tints[idx] = (rng:NextNumber() - 0.5) * 0.16
 		if rng:NextNumber() < layer.TreasureChance then
@@ -3620,6 +4597,20 @@ function SiteService.Generate(seed: number?)
 		end
 	end
 	return generation
+end
+
+-- Depletion figures used by the Fresh Dig refresh (docs/MINE_SHIFT.md). Fractions are of ALL cells / of a layer's cells.
+function SiteService.Depletion()
+	local byLayer = {}
+	for layerId, total in pairs(cellsByLayer) do
+		byLayer[layerId] = (dugByLayer[layerId] or 0) / math.max(total, 1)
+	end
+	return {
+		Total = dugTotal / math.max(Grid.Count, 1),
+		ByLayer = byLayer,
+		AgeMinutes = (os.clock() - generatedAt) / 60,
+		Generation = generation,
+	}
 end
 
 function SiteService.IsAlive(idx: number): boolean
@@ -3644,6 +4635,10 @@ function SiteService.Damage(idx: number, amount: number): (number, boolean, stri
 	hp -= amount
 	if hp <= 0 then
 		health[idx] = 0
+		dugTotal += 1
+		local _, dy = Grid.FromIndex(idx)
+		local lid = Defs.LayerAtCell(dy).Id
+		dugByLayer[lid] = (dugByLayer[lid] or 0) + 1
 		local treasure = loot[idx]
 		loot[idx] = nil
 		local part = parts[idx]
@@ -3728,7 +4723,7 @@ end
 
 -- The (up to) `maxCells` alive cells nearest to `pos` within `radius` cells of the cell containing it.
 -- Used by explosives; hidden interior cells count (they are exposed afterwards like any dug cell).
-function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number): { number }
+function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number, allow: ((number) -> boolean)?): { number }
 	local cx, cy, cz = Grid.WorldToCell(pos)
 	local found = {}
 	for dx = -radius, radius do
@@ -3737,7 +4732,7 @@ function SiteService.CellsNear(pos: Vector3, radius: number, maxCells: number): 
 				local x, y, z = cx + dx, cy + dy, cz + dz
 				if Grid.InBounds(x, y, z) then
 					local idx = Grid.ToIndex(x, y, z)
-					if (health[idx] or 0) > 0 then
+					if (health[idx] or 0) > 0 and (not allow or allow(y)) then
 						table.insert(found, { Index = idx, D = (Grid.CellCenter(x, y, z) - pos).Magnitude })
 					end
 				end
@@ -3761,7 +4756,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="35">
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -3798,6 +4793,9 @@ function StateService.Snapshot(player: Player)
 		OwnedTools = data.OwnedTools,
 		OwnedBackpacks = data.OwnedBackpacks,
 		Stats = data.Stats,
+		Collection = data.Collection,
+		Display = data.Display,
+		Guide = data.Guide,
 	}
 end
 
@@ -3821,7 +4819,7 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">WorldAudit</string>
             <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
@@ -3883,7 +4881,7 @@ return WorldAudit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="43">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -3986,7 +4984,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="44">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -4287,7 +5285,8 @@ local function buildReceiving(camp: Folder)
 		box(folder, "ArchPost", V(0.6, 7, 0.6), base + V(sx, 3.5, -2.3), C.Timber, Enum.Material.Wood)
 	end
 	box(folder, "ArchBeam", V(7.6, 0.6, 0.6), base + V(0, 7, -2.3), C.TimberDark, Enum.Material.Wood)
-	local board = box(folder, "ArtifactsSign", V(4.6, 1.3, 0.25), base + V(0, 6.0, -2.3), C.TimberDark, Enum.Material.Wood)
+	-- the sign spans post to post (embedded in both) and hangs directly under the beam: nothing floats
+	local board = box(folder, "ArtifactsSign", V(6.5, 1.5, 0.25), base + V(0, 6.45, -2.3), C.TimberDark, Enum.Material.Wood)
 	sign(board, Enum.NormalId.Back, "ARTIFACTS", C.TimberDark, C.Trim)
 
 	local anchor = box(folder, "DepositAnchor", V(2, 1, 2), base + V(0, 4.0, 0), C.CanvasTeal)
@@ -4323,6 +5322,8 @@ function WorldCamp.Build(world: Folder, ex)
 	spawn.Neutral = true
 	spawn.Duration = 0
 	spawn.Transparency = 1
+	spawn.CanCollide = false -- a marker only: the camp floor is what players stand on, so the pad can never snag a step
+	spawn.CanQuery = false
 	spawn.TopSurface = Enum.SurfaceType.Smooth
 	spawn.Parent = camp
 
@@ -4337,7 +5338,7 @@ return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -4361,8 +5362,13 @@ local box, part, deco, sign, weld = Kit.box, Kit.part, Kit.deco, Kit.sign, Kit.w
 local WorldElevator = {}
 
 -- Platform TOP heights, surface first. Landing tops are cell-row boundaries so the grid row above each is diggable.
-WorldElevator.StopTops = { 0.5, -8, -24, -36, -48 }
-WorldElevator.StopNames = { "SURFACE", "SOIL", "CLAY", "STONE", "RUINS" }
+-- Derived from Config.Layers: each landing sits two rows below the top of its layer, so the row above is diggable.
+WorldElevator.StopTops = { 0.5 }
+WorldElevator.StopNames = { "SURFACE" }
+for _, layer in ipairs(Config.Layers) do
+	table.insert(WorldElevator.StopTops, -(layer.FromCell + 2) * Config.Site.CellSize)
+	table.insert(WorldElevator.StopNames, layer.Name)
+end
 WorldElevator.CarThickness = 0.8
 
 local function prompt(parent: Instance, name: string, action: string, object: string, attrs: { [string]: any }, distance: number?)
@@ -4413,8 +5419,12 @@ function WorldElevator.Build(world: Folder, minX: number, maxX: number, minZ: nu
 	truss.Material = Enum.Material.Wood
 	truss.Parent = folder
 
-	local landingTops = { -8, -24, -36, -48 }
-	local lowerTops = { -8, -24, -36, -48, floorY }
+	local landingTops, lowerTops = {}, {}
+	for i = 2, #WorldElevator.StopTops do
+		landingTops[i - 1] = WorldElevator.StopTops[i]
+		lowerTops[i - 1] = WorldElevator.StopTops[i]
+	end
+	table.insert(lowerTops, floorY)
 	local landingW = midX - minX
 	for i, y in ipairs(landingTops) do
 		box(folder, "Landing" .. i, V(landingW, 1, run - 2), V(ladderX, y - 0.5, minZ + (run - 2) / 2), C.TimberLight, Enum.Material.WoodPlanks)
@@ -4548,10 +5558,15 @@ function WorldElevator.Build(world: Folder, minX: number, maxX: number, minZ: nu
 	-- entrance: lintel across the front row, with a clear sign
 	box(folder, "EntranceLintel", V(gx1 - gx0 + 1.2, 0.9, 0.9), V((gx0 + gx1) / 2, 10.2, gz0), C.TimberDark, Enum.Material.Wood)
 	box(folder, "EntranceBand", V(gx1 - gx0 + 1.4, 0.4, 1.1), V((gx0 + gx1) / 2, 9.7, gz0), C.Iron, Enum.Material.Metal)
-	local board = box(folder, "ElevatorSign", V(8, 2.2, 0.3), V((gx0 + gx1) / 2, 13.4, gz0 + 0.55), C.TimberDark, Enum.Material.Wood)
-	sign(board, Enum.NormalId.Back, "ELEVATOR", C.TimberDark, C.Trim)
-	local sub = box(folder, "ElevatorSubSign", V(6, 1.2, 0.3), V((gx0 + gx1) / 2, 11.5, gz0 + 0.55), C.Iron, Enum.Material.Metal)
+	-- Signs sit flush on the front of the two posts (their width spans the post centres, they are embedded in the posts and
+	-- stacked directly on the lintel), so nothing hangs in mid-air.
+	local span = gx1 - gx0
+	local lintelTop = 10.2 + 0.45
+	local subH, mainH = 1.2, 2.2
+	local sub = box(folder, "ElevatorSubSign", V(math.min(6, span), subH, 0.3), V((gx0 + gx1) / 2, lintelTop + subH / 2, gz0 + 0.55), C.Iron, Enum.Material.Metal)
 	sign(sub, Enum.NormalId.Back, "TO THE MINE", C.Iron, C.Gold)
+	local board = box(folder, "ElevatorSign", V(span, mainH, 0.3), V((gx0 + gx1) / 2, lintelTop + subH + mainH / 2, gz0 + 0.55), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "ELEVATOR", C.TimberDark, C.Trim)
 
 	return folder
 end
@@ -4560,7 +5575,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="46">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -4663,7 +5678,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="47">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -4794,63 +5809,131 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="42">
+  <Item class="StarterPlayer" referent="48">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="43">
+    <Item class="StarterPlayerScripts" referent="49">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="44">
+      <Item class="Folder" referent="50">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="45">
+        <Item class="Folder" referent="51">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="46">
+          <Item class="ModuleScript" referent="52">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
--- The defaults are Roblox's built-in client sounds (placeholders). Set Id = "" to silence one.
+-- The defaults are Roblox's built-in client sounds (PLACEHOLDERS - see docs/RELEASE_CANDIDATE.md "Audio"): events are told
+-- apart by pitch and by short note sequences until proper assets are supplied. Set Id = "" to silence one.
+-- Voice limiting: a per-sound minimum gap and a global cap on simultaneous voices stop long digging sessions from
+-- stacking dozens of overlapping sounds.
 local SoundService = game:GetService("SoundService")
 local Debris = game:GetService("Debris")
 local Settings = require(script.Parent.Settings)
 
 local Audio = {}
 
+local PING = "rbxasset://sounds/electronicpingshort.wav"
+
+-- Notes = { pitch, ... } played as a quick sequence (NoteGap seconds apart). MinGap = seconds before the same sound may replay.
 Audio.Sounds = {
-	Impact = { Id = "rbxasset://sounds/action_jump_land.mp3", Volume = 0.8, Pitch = 0.8 },
-	Break = { Id = "rbxasset://sounds/snap.mp3", Volume = 0.9, Pitch = 0.7 },
-	Coin = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.5, Pitch = 1.3 },
-	Reveal = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.8, Pitch = 1.0 },
-	Sell = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.9, Pitch = 0.8 },
-	Buy = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.9, Pitch = 1.5 },
-	Error = { Id = "rbxasset://sounds/uuhhh.mp3", Volume = 0.4, Pitch = 1.2 },
-	UI = { Id = "rbxasset://sounds/switch.wav", Volume = 0.5, Pitch = 1.0 },
+	Impact = { Id = "rbxasset://sounds/action_jump_land.mp3", Volume = 0.8, Pitch = 0.8, MinGap = 0.05 },
+	Break = { Id = "rbxasset://sounds/snap.mp3", Volume = 0.9, Pitch = 0.7, MinGap = 0.04 },
+	Coin = { Id = PING, Volume = 0.5, Pitch = 1.3, MinGap = 0.08 },
+	Reveal = { Id = PING, Volume = 0.8, Pitch = 1.0, MinGap = 0.15 },
+	Sell = { Id = PING, Volume = 0.9, Pitch = 1.0, Notes = { 0.8, 1.0, 1.25 }, NoteGap = 0.07, MinGap = 0.2 },
+	Buy = { Id = PING, Volume = 0.9, Pitch = 1.0, Notes = { 1.2, 1.6 }, NoteGap = 0.08, MinGap = 0.2 },
+	Deposit = { Id = PING, Volume = 1.0, Pitch = 1.0, Notes = { 0.7, 0.9, 1.1, 1.4 }, NoteGap = 0.09, MinGap = 0.3 },
+	SetComplete = { Id = PING, Volume = 1.0, Pitch = 1.0, Notes = { 1.0, 1.25, 1.5, 2.0 }, NoteGap = 0.11, MinGap = 0.5 },
+	Error = { Id = "rbxasset://sounds/uuhhh.mp3", Volume = 0.4, Pitch = 1.2, MinGap = 0.25 },
+	UI = { Id = "rbxasset://sounds/switch.wav", Volume = 0.5, Pitch = 1.0, MinGap = 0.05 },
 }
+
+local MAX_VOICES = 10
+local active = 0
+local lastPlayed: { [string]: number } = {}
+
+local function voice(def, pitch: number, volume: number, delay: number)
+	task.delay(delay, function()
+		if active >= MAX_VOICES then
+			return
+		end
+		active += 1
+		local s = Instance.new("Sound")
+		s.SoundId = def.Id
+		s.Volume = volume
+		s.PlaybackSpeed = pitch
+		s.Parent = SoundService
+		local released = false
+		local function release()
+			if not released then
+				released = true
+				active -= 1
+			end
+		end
+		s.Ended:Once(release)
+		s:Play()
+		Debris:AddItem(s, 4) -- frees the instance even if Ended never fires
+		task.delay(4, release)
+	end)
+end
 
 function Audio.Play(name: string, pitchMul: number?, volumeMul: number?)
 	local def = Audio.Sounds[name]
 	if not def or def.Id == "" then
 		return
 	end
-	local s = Instance.new("Sound")
-	s.SoundId = def.Id
-	s.Volume = def.Volume * (volumeMul or 1) * Settings.Get("MasterVolume")
-	s.PlaybackSpeed = def.Pitch * (pitchMul or 1)
-	s.Parent = SoundService
-	s:Play()
-	Debris:AddItem(s, 4)
+	local now = os.clock()
+	if now - (lastPlayed[name] or -1) < (def.MinGap or 0) then
+		return
+	end
+	lastPlayed[name] = now
+	local volume = def.Volume * (volumeMul or 1) * Settings.Get("MasterVolume")
+	if volume <= 0 then
+		return
+	end
+	if def.Notes then
+		for i, note in ipairs(def.Notes) do
+			voice(def, note * (pitchMul or 1), volume, (i - 1) * (def.NoteGap or 0.08))
+		end
+	else
+		voice(def, def.Pitch * (pitchMul or 1), volume, 0)
+	end
+end
+
+-- Rarity ladder for discoveries: Common stays quiet; each step up is higher and adds notes (order 1..6).
+function Audio.PlayReveal(rarityOrder: number)
+	if rarityOrder <= 1 then
+		Audio.Play("Coin")
+		return
+	end
+	local notes = math.clamp(rarityOrder - 1, 1, 4)
+	local def = Audio.Sounds.Reveal
+	local now = os.clock()
+	if now - (lastPlayed.Reveal or -1) < (def.MinGap or 0) then
+		return
+	end
+	lastPlayed.Reveal = now
+	local volume = def.Volume * Settings.Get("MasterVolume") * (0.7 + 0.1 * rarityOrder)
+	if volume <= 0 or def.Id == "" then
+		return
+	end
+	for i = 1, notes do
+		voice(def, 0.9 + 0.22 * i + 0.06 * rarityOrder, volume, (i - 1) * 0.09)
+	end
 end
 
 return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="47">
+          <Item class="ModuleScript" referent="53">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -4865,6 +5948,7 @@ Bindings.ReturnToCamp = Enum.KeyCode.R
 Bindings.PlaceArtifact = Enum.KeyCode.X
 Bindings.ThrowDynamite = Enum.KeyCode.G
 Bindings.Menu = Enum.KeyCode.P
+Bindings.Journal = Enum.KeyCode.J
 
 function Bindings.Name(keyCode: Enum.KeyCode): string
 	local ok, name = pcall(function()
@@ -4880,7 +5964,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="48">
+          <Item class="ModuleScript" referent="54">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -5188,7 +6272,352 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="49">
+          <Item class="ModuleScript" referent="55">
+            <Properties>
+              <string name="Name">CampShelf</string>
+              <string name="Source"><![CDATA[-- Personal camp display. Built ENTIRELY on this client from the local player's saved Display list, so other players never
+-- see it and it never shows anyone else's finds (the sign says "<name>'s shelf"). It is plain parts in a local folder -
+-- nothing replicates, nothing is shared geometry, and it cannot collide with the server's world.
+-- Models are the same ones used by the journal (TreasureModels), scaled to fit the plinths.
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+
+local State = require(script.Parent.State)
+
+local CampShelf = {}
+
+local V = Vector3.new
+local player = Players.LocalPlayer
+local folder: Folder?
+local lastKey = ""
+
+local WOOD, WOOD_DARK, SIGN = Color3.fromHex("A8703E"), Color3.fromHex("6E4527"), Color3.fromHex("2A3037")
+local PLINTH = 2.4 -- spacing between plinths along Z
+
+local function part(parent: Instance, name: string, size: Vector3, pos: Vector3, color: Color3, material: Enum.Material?): Part
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Anchored = true
+	p.Size = size
+	p.Position = pos
+	p.Color = color
+	p.Material = material or Enum.Material.Wood
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.CanCollide = false -- decorative: never blocks or traps anyone
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Parent = parent
+	return p
+end
+
+local function build(display: { string })
+	if folder then
+		folder:Destroy()
+	end
+	local f = Instance.new("Folder")
+	f.Name = "PersonalShelf"
+	f.Parent = Workspace
+	folder = f
+
+	local c = Config.Collection.ShelfPosition
+	local slots = Config.Collection.DisplaySlots
+	local span = (slots - 1) * PLINTH
+	local ground = c.Y + 0.5 -- camp floor top (WorldCamp)
+	-- frame: back board (west), base, top rail, two posts. The shelf FACES east, toward the arrival area.
+	part(f, "Back", V(0.4, 3.6, span + 3.2), V(c.X - 0.8, ground + 1.8, c.Z), WOOD_DARK)
+	part(f, "Base", V(2.0, 0.5, span + 3.2), V(c.X, ground + 0.25, c.Z), WOOD)
+	part(f, "Roof", V(2.2, 0.35, span + 3.4), V(c.X, ground + 4.0, c.Z), WOOD_DARK)
+	for _, dz in ipairs({ -(span / 2 + 1.5), span / 2 + 1.5 }) do
+		part(f, "Post", V(0.4, 3.8, 0.4), V(c.X + 0.8, ground + 1.9, c.Z + dz), WOOD_DARK)
+	end
+
+	-- sign on the roof's front edge (SurfaceGui, so it never shows through the wood)
+	local board = part(f, "Sign", V(0.25, 0.9, span + 1.2), V(c.X + 1.15, ground + 4.6, c.Z), SIGN, Enum.Material.SmoothPlastic)
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = Enum.NormalId.Right
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = 40
+	gui.Parent = board
+	local l = Instance.new("TextLabel")
+	l.Size = UDim2.fromScale(1, 1)
+	l.BackgroundTransparency = 1
+	l.Font = Enum.Font.FredokaOne
+	l.TextScaled = true
+	l.TextColor3 = Config.Palette.Gold
+	l.Text = ("%s's SHELF  -  only you see this"):format(player.DisplayName)
+	l.Parent = gui
+
+	for i = 1, slots do
+		local z = c.Z - span / 2 + (i - 1) * PLINTH
+		part(f, "Plinth" .. i, V(1.4, 1.0, 1.6), V(c.X + 0.2, ground + 1.0, z), Color3.fromHex("8A8F96"), Enum.Material.Slate)
+		local id = display[i]
+		if id then
+			local def = Defs.Treasure[id]
+			local model = TreasureModels.BuildAny(id, def)
+			local _, size = model:GetBoundingBox()
+			model:ScaleTo(math.min(1, 2.0 / math.max(size.X, size.Y, size.Z)))
+			model.Parent = f
+			local _, scaled = model:GetBoundingBox()
+			-- face east (+X), standing on the plinth top (plinth top = ground + 1.5)
+			model:PivotTo(CFrame.new(c.X + 0.2, ground + 1.55 + scaled.Y / 2, z) * CFrame.Angles(0, math.rad(90), 0))
+			local tag = Instance.new("SurfaceGui")
+			tag.Face = Enum.NormalId.Right
+			tag.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+			tag.PixelsPerStud = 40
+			tag.Parent = f:FindFirstChild("Plinth" .. i)
+			local t = Instance.new("TextLabel")
+			t.Size = UDim2.fromScale(1, 1)
+			t.BackgroundTransparency = 1
+			t.Font = Enum.Font.FredokaOne
+			t.TextScaled = true
+			t.TextColor3 = Defs.Rarity[def.Rarity].Color
+			t.Text = def.Name
+			t.Parent = tag
+		end
+	end
+end
+
+function CampShelf.Init()
+	State.Connect(function(d)
+		local display = CollectionSpec.SanitizeDisplay(d.Display, d.Collection or {})
+		local key = table.concat(display, ",")
+		if key ~= lastKey or not folder then
+			lastKey = key
+			build(display)
+		end
+	end)
+end
+
+return CampShelf
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="56">
+            <Properties>
+              <string name="Name">CollectionUI</string>
+              <string name="Source"><![CDATA[-- Collection Journal (J / the JOURNAL button): one card per artifact type with a real 3D model, rarity, home layer,
+-- discovery count and a per-layer set tracker. Discovered entries can be put on the personal camp shelf.
+-- Reads the saved collection from the server snapshot; writes nothing itself (the shelf choice goes through SetDisplay).
+-- Important artifacts only appear as discovered after a successful DEPOSIT (server rule), so nothing here can be earned
+-- by merely finding or carrying one.
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Util = require(ReplicatedStorage.Shared.Util)
+
+local State = require(script.Parent.State)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
+local Audio = require(script.Parent.AudioController)
+local K = require(script.Parent.UIKit)
+
+local P = Config.Palette
+local T = K.Tokens
+local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
+
+local CollectionUI = {}
+
+local W, H = 720, 470
+local root: Frame
+local grid: ScrollingFrame
+local header: TextLabel
+local setRow: Frame
+local open = false
+local lastKey = ""
+local onOpened: (() -> ())?
+
+local function renderKey(d): string
+	local parts = {}
+	for _, e in ipairs(CollectionSpec.Entries) do
+		local c = d.Collection and d.Collection[e.Id]
+		table.insert(parts, c and c.Count or 0)
+	end
+	return table.concat(parts, ",") .. "|" .. table.concat(d.Display or {}, ",")
+end
+
+local function icon(parent: Instance, id: string, def, discovered: boolean)
+	local vp = mk("ViewportFrame", { Size = UDim2.fromOffset(120, 96), Position = UDim2.fromOffset(15, 8), BackgroundTransparency = 1,
+		Ambient = Color3.fromRGB(150, 138, 124), LightColor = Color3.fromRGB(255, 244, 224), LightDirection = Vector3.new(-0.5, -1, -0.7) }, parent)
+	local model = TreasureModels.BuildAny(id, def)
+	local _, size = model:GetBoundingBox()
+	local radius = math.max(size.Magnitude / 2, 1.2)
+	model.Parent = vp
+	model:PivotTo(CFrame.Angles(0, math.rad(-28), 0) * CFrame.Angles(math.rad(14), 0, 0))
+	local cam = mk("Camera", { FieldOfView = 32 }, vp)
+	cam.CFrame = CFrame.lookAt(Vector3.new(0, 0, radius / math.sin(math.rad(16)) * 1.1), Vector3.zero)
+	vp.CurrentCamera = cam
+	if not discovered then
+		vp.ImageColor3 = Color3.new(0, 0, 0) -- silhouette only: no spoilers beyond the shape
+		vp.ImageTransparency = 0.35
+	end
+end
+
+local function render()
+	local d = State.Data
+	local collection = d.Collection or {}
+	local display = CollectionSpec.SanitizeDisplay(d.Display, collection)
+	local shown = {}
+	for _, id in ipairs(display) do
+		shown[id] = true
+	end
+	local found, total = CollectionSpec.Totals(collection)
+	header.Text = ("COLLECTION   %d / %d   -   shelf %d / %d"):format(found, total, #display, Config.Collection.DisplaySlots)
+
+	for _, c in ipairs(setRow:GetChildren()) do
+		if c:IsA("Frame") then
+			c:Destroy()
+		end
+	end
+	for i, set in ipairs(CollectionSpec.Sets(collection)) do
+		local chip = mk("Frame", { Size = UDim2.new(0.25, -6, 1, 0), LayoutOrder = i,
+			BackgroundColor3 = set.Complete and Color3.fromHex("2F4A3A") or T.PanelLight }, setRow)
+		corner(chip, 8)
+		stroke(chip, set.Complete and K.Good or T.Line, 2)
+		label(chip, ("%s SET"):format(set.Name), 14, set.Complete and K.Good or P.Cream, { Size = UDim2.new(1, 0, 0, 20),
+			Position = UDim2.fromOffset(0, 3), TextStrokeTransparency = 1 })
+		label(chip, set.Complete and ("COMPLETE  %d/%d"):format(set.Found, set.Total) or ("%d / %d"):format(set.Found, set.Total), 14,
+			set.Complete and K.Good or K.Muted, { Size = UDim2.new(1, 0, 0, 20), Position = UDim2.fromOffset(0, 24), TextStrokeTransparency = 1 })
+	end
+
+	for _, c in ipairs(grid:GetChildren()) do
+		if c:IsA("Frame") then
+			c:Destroy()
+		end
+	end
+	for i, e in ipairs(CollectionSpec.Entries) do
+		local entry = collection[e.Id]
+		local rar = Defs.Rarity[e.Def.Rarity]
+		local card = mk("Frame", { LayoutOrder = i, BackgroundColor3 = T.PanelLight }, grid)
+		corner(card, T.Corner)
+		stroke(card, entry and rar.Color or T.Line, entry and 3 or 2)
+		icon(card, e.Id, e.Def, entry ~= nil)
+		label(card, entry and e.Def.Name:upper() or "UNDISCOVERED", 15, entry and P.Cream or K.Muted,
+			{ Size = UDim2.new(1, -8, 0, 22), Position = UDim2.fromOffset(4, 106), TextStrokeTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd })
+		label(card, ("%s  -  %s"):format(e.Def.Rarity:upper(), Defs.LayerName(e.Layer)), 12, entry and rar.Color or K.Muted,
+			{ Size = UDim2.new(1, -8, 0, 16), Position = UDim2.fromOffset(4, 128), TextStrokeTransparency = 1 })
+		local sub
+		if entry then
+			sub = ("Found x%d  -  worth %s"):format(entry.Count, Util.FormatCash(e.Def.Value))
+		elseif e.Def.RequiresCarry then
+			sub = "Carry one home to unlock"
+		else
+			sub = ("Found in the %s"):format(Defs.LayerName(e.Layer):lower())
+		end
+		label(card, sub, 12, K.Muted, { Size = UDim2.new(1, -8, 0, 16), Position = UDim2.fromOffset(4, 144), TextStrokeTransparency = 1 })
+		if entry then
+			local on = shown[e.Id]
+			local b = K.flatButton(card, on and "ON SHELF" or "PUT ON SHELF", UDim2.new(1, -20, 0, 24), UDim2.fromOffset(10, 164),
+				on and T.Accent or nil)
+			b.TextSize = 13
+			b.TextColor3 = on and T.Accent or P.Cream
+			b.Activated:Connect(function()
+				Audio.Play("UI")
+				Remotes.Get("SetDisplay"):FireServer(e.Id)
+			end)
+		end
+	end
+end
+
+function CollectionUI.IsOpen(): boolean
+	return open
+end
+
+function CollectionUI.Open()
+	if open or InputMode.IsMenuOpen() then
+		return
+	end
+	open = true
+	root.Visible = true
+	lastKey = renderKey(State.Data)
+	render()
+	InputMode.OpenMenu("Journal")
+	Audio.Play("UI")
+	if onOpened then
+		onOpened()
+	end
+end
+
+function CollectionUI.Close()
+	if not open then
+		return
+	end
+	open = false
+	root.Visible = false
+	InputMode.CloseMenu("Journal")
+end
+
+function CollectionUI.Toggle()
+	if open then
+		CollectionUI.Close()
+	else
+		CollectionUI.Open()
+	end
+end
+
+-- Called whenever the journal is first opened (the guide uses it to retire the "collection" hint).
+function CollectionUI.OnOpened(cb: () -> ())
+	onOpened = cb
+end
+
+function CollectionUI.Build(gui: ScreenGui)
+	-- toolbar button next to the settings gear (top right, under the depth readout)
+	local btn = K.flatButton(gui, "JOURNAL [" .. Bindings.Name(Bindings.Journal) .. "]", UDim2.fromOffset(124, 44), UDim2.new(1, -186, 0, 70), nil)
+	btn.Name = "JournalButton"
+	btn.BackgroundTransparency = 0.1
+	btn.TextSize = 15
+	btn.Activated:Connect(CollectionUI.Toggle)
+
+	root = mk("Frame", { Name = "Journal", Size = UDim2.fromOffset(W, H), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = T.Panel, BackgroundTransparency = 0.03, Visible = false, Active = true }, gui)
+	corner(root, 14)
+	stroke(root, T.Line, 3)
+	K.fit(root, W, H)
+	header = label(root, "", 20, P.Cream, { Size = UDim2.new(1, -90, 0, 32), Position = UDim2.fromOffset(16, 8),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local close = K.flatButton(root, "X", UDim2.fromOffset(40, 32), UDim2.new(1, -52, 0, 8), P.Danger)
+	close.Activated:Connect(CollectionUI.Close)
+
+	setRow = mk("Frame", { Size = UDim2.new(1, -32, 0, 48), Position = UDim2.fromOffset(16, 48), BackgroundTransparency = 1 }, root)
+	mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8) }, setRow)
+
+	grid = mk("ScrollingFrame", { Size = UDim2.new(1, -32, 1, -112), Position = UDim2.fromOffset(16, 102), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, root)
+	mk("UIGridLayout", { CellSize = UDim2.fromOffset(150, 196), CellPadding = UDim2.fromOffset(10, 10), SortOrder = Enum.SortOrder.LayoutOrder }, grid)
+
+	State.Connect(function(d)
+		if open then
+			local key = renderKey(d)
+			if key ~= lastKey then
+				lastKey = key
+				render()
+			end
+		end
+	end)
+
+	UserInputService.InputBegan:Connect(function(input)
+		if input.KeyCode == Bindings.Journal and not UserInputService:GetFocusedTextBox() then
+			CollectionUI.Toggle()
+		end
+	end)
+end
+
+return CollectionUI
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="57">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -5260,6 +6689,8 @@ type Target = {
 	Y: number,
 	Z: number,
 	InReach: boolean,
+	Allowed: boolean, -- the equipped tool can break this layer (Defs.LayerAllows)
+	NeedTool: string?, -- display name of the tool tier that unlocks it
 }
 
 local function viewportPos(input: InputObject): Vector2
@@ -5288,7 +6719,10 @@ local function castDig(origin: Vector3, dir: Vector3): Target?
 		-- the server's rule (Defs.CellInReach), without the server's latency tolerance
 		inReach = Defs.CellInReach(State.Tool(), (hrp :: BasePart).Position, x, y, z, 0)
 	end
-	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach }
+	local layer = Defs.LayerAtCell(y)
+	local allowed = Defs.LayerAllows(State.Tool(), layer)
+	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach,
+		Allowed = allowed, NeedTool = (not allowed) and Defs.ToolNameForTier(layer.MinToolTier or 1) or nil }
 end
 
 local function aimScreen(vp: Vector2, length: number): Target?
@@ -5402,6 +6836,40 @@ local function isBlocked(): boolean
 	return InputMode.IsCursorFree() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
 end
 
+-- The reason-label under the crosshair.
+local hintLabel: TextLabel? = nil
+local function setHint(text: string?)
+	if not hintLabel then
+		return
+	end
+	if text then
+		hintLabel.Text = text
+	end
+	hintLabel.Visible = text ~= nil
+end
+
+local function buildHint()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "DigHint"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 3
+	gui.Parent = player:WaitForChild("PlayerGui")
+	local l = Instance.new("TextLabel")
+	l.AnchorPoint = Vector2.new(0.5, 0)
+	l.Position = UDim2.new(0.5, 0, 0.5, 34) -- below the crosshair, never on it
+	l.Size = UDim2.fromOffset(320, 26)
+	l.BackgroundTransparency = 1
+	l.Font = Enum.Font.FredokaOne
+	l.TextSize = 20
+	l.TextColor3 = P.Danger
+	l.TextStrokeTransparency = 0.3
+	l.TextStrokeColor3 = P.Dark
+	l.Visible = false
+	l.Parent = gui
+	hintLabel = l
+end
+
 local function onStep()
 	local blocked = isBlocked()
 	if blocked then
@@ -5424,14 +6892,24 @@ local function onStep()
 	-- Highlight + crosshair come from the very same result the hit request uses below.
 	if target then
 		targetBox.Adornee = target.Part
-		targetBox.Color3 = target.InReach and P.Gold or P.Danger
-		CameraController.SetCrosshairState(target.InReach and "hit" or "far")
+		local good = target.InReach and target.Allowed
+		targetBox.Color3 = good and P.Gold or P.Danger
+		CameraController.SetCrosshairState(good and "hit" or "far")
+		-- one short reason under the crosshair (never over it) whenever the block can not be dug
+		if not target.InReach then
+			setHint("TOO FAR - step closer")
+		elseif not target.Allowed then
+			setHint(("TOO HARD - needs the %s"):format(target.NeedTool or "a stronger tool"))
+		else
+			setHint(nil)
+		end
 	else
 		targetBox.Adornee = nil
 		CameraController.SetCrosshairState("none")
+		setHint(nil)
 	end
 
-	if blocked or not target or not (pointerHeld or buttonHeld) or not target.InReach then
+	if blocked or not target or not (pointerHeld or buttonHeld) or not target.InReach or not target.Allowed then
 		return
 	end
 
@@ -5461,6 +6939,7 @@ function DigController.Init()
 	targetBox.Parent = Workspace
 
 	refreshFilter()
+	buildHint()
 
 	local function onCharacter(char: Model)
 		refreshFilter()
@@ -5474,6 +6953,15 @@ function DigController.Init()
 	if player.Character then
 		task.spawn(onCharacter, player.Character)
 	end
+
+	-- Switching tools (shop purchase / equip) never leaves a held click behind.
+	local lastToolId: string? = nil
+	State.Connect(function(d)
+		if lastToolId and d.ToolId ~= lastToolId then
+			DigController.ClearInput()
+		end
+		lastToolId = d.ToolId
+	end)
 
 	-- Anything that steals the cursor/keyboard drops held mining.
 	InputMode.OnChanged(DigController.ClearInput)
@@ -5558,13 +7046,14 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="50">
+          <Item class="ModuleScript" referent="58">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
 -- camera kick, and the treasure reveal. The server decides outcomes; this only makes them feel good.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -5859,7 +7348,7 @@ function Effects.RevealTreasure(info)
 
 	UI.ShowTreasure(info.Id, info.Stored, info.IsNew, info.Carry)
 	local order = rar.Order
-	Audio.Play(order >= 2 and "Reveal" or "Coin", 0.9 + order * 0.12 + math.random() * 0.1)
+	Audio.PlayReveal(order)
 
 	-- Polished artifact model if there is one, else the generic stand-in. Always a Model so the same
 	-- pivot/scale animation drives both.
@@ -5870,6 +7359,7 @@ function Effects.RevealTreasure(info)
 	model:ScaleTo(0.2)
 	model:PivotTo(CFrame.new(start))
 	model.Parent = fxFolder
+	Debris:AddItem(model, 6) -- failsafe: a reveal can never outlive its longest animation (about 3.5 s)
 
 	if rar.Reveal then
 		local hl = Instance.new("Highlight")
@@ -5987,7 +7477,194 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="51">
+          <Item class="ModuleScript" referent="59">
+            <Properties>
+              <string name="Name">GuideController</string>
+              <string name="Source"><![CDATA[-- First-time hints. One short card at a time, bottom-centre (clear of the crosshair and the HUD), chosen by the pure
+-- GuideSpec from the server snapshot. A hint ends when the player has done the thing, after its timeout, or when
+-- they open the thing it points at; ended hints are saved by the server (GuideDone) and never return.
+-- Text always uses the CURRENT bindings. No tutorial world, no forced steps, nothing blocks play.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local GuideSpec = require(ReplicatedStorage.Shared.GuideSpec)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
+
+local State = require(script.Parent.State)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
+local K = require(script.Parent.UIKit)
+
+local P = Config.Palette
+local T = K.Tokens
+local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
+local player = Players.LocalPlayer
+local TOUCH = UserInputService.TouchEnabled
+
+local GuideController = {}
+
+local card: Frame
+local titleLabel: TextLabel
+local bodyLabel: TextLabel
+local current: string? = nil
+local shownAt = 0
+local sent: { [string]: boolean } = {} -- ids already reported to the server this session
+local depthMeters = 0
+local acc = 0
+
+local function names()
+	return {
+		Dig = "LEFT CLICK",
+		Sell = Bindings.Name(Bindings.ReturnToCamp),
+		Place = Bindings.Name(Bindings.PlaceArtifact),
+		Journal = Bindings.Name(Bindings.Journal),
+	}
+end
+
+local function snapshot()
+	local d = State.Data
+	local owned = 0
+	for _ in pairs(d.OwnedTools or {}) do
+		owned += 1
+	end
+	local nextTool
+	for _, id in ipairs(Defs.ToolsByTier) do
+		if not (d.OwnedTools or {})[id] then
+			nextTool = Defs.Tools[id]
+			break
+		end
+	end
+	local found = CollectionSpec.Totals(d.Collection or {})
+	local stats = d.Stats or {}
+	return {
+		Cash = d.Cash or 0, Count = d.Count or 0, Capacity = math.max(d.Capacity or 1, 1),
+		Stats = { BlocksDug = stats.BlocksDug or 0, CashEarned = stats.CashEarned or 0, DeepestDepth = stats.DeepestDepth or 0 },
+		OwnedToolCount = owned,
+		NextToolPrice = nextTool and nextTool.Price or nil,
+		NextToolName = nextTool and nextTool.DisplayName or nil,
+		Carrying = d.Carrying ~= nil,
+		HasDeposited = (stats.RelicsExtracted or 0) > 0,
+		CollectionFound = found,
+		Touch = TOUCH,
+		depthMeters = depthMeters,
+	}
+end
+
+local function markDone(id: string)
+	if sent[id] then
+		return
+	end
+	sent[id] = true
+	Remotes.Get("GuideDone"):FireServer(id)
+end
+
+local function show(id: string?)
+	if id == current then
+		return
+	end
+	current = id
+	shownAt = os.clock()
+	if not id then
+		TweenService:Create(card, TweenInfo.new(0.25), { GroupTransparency = 1 }):Play()
+		return
+	end
+	card.Visible = true
+	TweenService:Create(card, TweenInfo.new(0.25), { GroupTransparency = 0 }):Play()
+end
+
+local function refresh()
+	if not State.Loaded then
+		return
+	end
+	local d = State.Data
+	local guide = d.Guide or {}
+	local s = snapshot()
+	-- retire anything the player has already accomplished (saved, so it never comes back)
+	for _, id in ipairs(GuideSpec.NewlySatisfied(s, guide)) do
+		markDone(id)
+		guide[id] = true
+	end
+	local done = setmetatable({}, { __index = function(_, id)
+		return guide[id] or sent[id]
+	end })
+	local id = GuideSpec.Active(s, done)
+	-- a timed hint that has been up long enough is finished
+	if id and GuideSpec.Timeout[id] and current == id and os.clock() - shownAt >= GuideSpec.Timeout[id] then
+		markDone(id)
+		id = GuideSpec.Active(s, done)
+	end
+	-- never on top of a menu
+	if id and InputMode.IsMenuOpen() then
+		id = nil
+	end
+	if id then
+		local title, body = GuideSpec.Text(id, s, names())
+		titleLabel.Text = title
+		bodyLabel.Text = body
+	end
+	show(id)
+end
+
+-- Called by other UI when the player uses the feature a hint points at.
+function GuideController.Dismiss(id: string)
+	if GuideSpec.IsValid(id) then
+		markDone(id)
+		refresh()
+	end
+end
+
+function GuideController.Build(gui: ScreenGui)
+	card = mk("CanvasGroup", { Name = "GuideCard", Size = UDim2.fromOffset(430, 76), AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, TOUCH and -150 or -84), BackgroundColor3 = T.Panel, BackgroundTransparency = 0.08,
+		GroupTransparency = 1, Visible = false, Active = false }, gui)
+	corner(card, T.Corner)
+	stroke(card, T.Accent, 2)
+	mk("UISizeConstraint", { MaxSize = Vector2.new(430, 90) }, card)
+	titleLabel = label(card, "", 15, T.Accent, { Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(12, 6),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	bodyLabel = label(card, "", 16, P.Cream, { Size = UDim2.new(1, -24, 1, -30), Position = UDim2.fromOffset(12, 28),
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextStrokeTransparency = 1 })
+	-- the card only informs: it must never swallow clicks meant for mining
+	for _, o in ipairs(card:GetDescendants()) do
+		if o:IsA("GuiObject") then
+			o.Active = false
+		end
+	end
+end
+
+function GuideController.Init()
+	State.Connect(function()
+		refresh()
+	end)
+	InputMode.OnChanged(refresh)
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.5 then
+			return
+		end
+		acc = 0
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local cx, _, cz = Grid.WorldToCell(hrp.Position)
+			local inSite = cx >= 0 and cx < Grid.SizeX and cz >= 0 and cz < Grid.SizeZ
+			depthMeters = inSite and Grid.DepthMeters(hrp.Position.Y) or 0
+		end
+		refresh()
+	end)
+end
+
+return GuideController
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="60">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -6063,7 +7740,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="52">
+          <Item class="ModuleScript" referent="61">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -6145,7 +7822,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="53">
+          <Item class="ModuleScript" referent="62">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -6188,13 +7865,7 @@ local function showPage(name: string)
 end
 
 -- Buttons ------------------------------------------------------------------------------------------------------
-local function flatButton(parent: Instance, text: string, size: UDim2, pos: UDim2, accent: Color3?): TextButton
-	local b = mk("TextButton", { Size = size, Position = pos, BackgroundColor3 = PANEL_LIGHT, Text = text, TextSize = 20,
-		Font = K.Font, TextColor3 = P.Cream, AutoButtonColor = true }, parent)
-	corner(b, 8)
-	stroke(b, accent or LINE, 2)
-	return b
-end
+local flatButton = K.flatButton
 
 -- Slider with a numeric field. The field takes exact values (fine adjustment); the slider snaps to the spec's step.
 local function makeSlider(parent: Instance, y: number, key: string, title: string, fmt: string, hint: string?)
@@ -6337,6 +8008,7 @@ local function buildControls(parent: Instance)
 		{ "Place artifact", Bindings.Name(Bindings.PlaceArtifact) },
 		{ "Throw dynamite", Bindings.Name(Bindings.ThrowDynamite) },
 		{ "Interact", "E" },
+		{ "Collection journal", Bindings.Name(Bindings.Journal) },
 		{ "This menu", Bindings.Name(Bindings.Menu) },
 		{ "Roblox menu", "Esc" },
 	}
@@ -6386,7 +8058,7 @@ end
 
 -- A gear icon built from plain frames (no font glyph dependency).
 function PauseMenu.BuildGearButton(gui: ScreenGui): TextButton
-	local b = mk("TextButton", { Name = "GearButton", Text = "", Size = UDim2.fromOffset(44, 44), Position = UDim2.new(1, -232, 0, 12),
+	local b = mk("TextButton", { Name = "GearButton", Text = "", Size = UDim2.fromOffset(44, 44), Position = UDim2.new(1, -54, 0, 70),
 		BackgroundColor3 = PANEL, BackgroundTransparency = 0.1, AutoButtonColor = true }, gui)
 	corner(b, 10)
 	stroke(b, LINE, 2)
@@ -6411,10 +8083,11 @@ function PauseMenu.BuildGearButton(gui: ScreenGui): TextButton
 end
 
 function PauseMenu.Build(gui: ScreenGui)
-	root = mk("Frame", { Name = "PauseMenu", Size = UDim2.fromOffset(380, 340), AnchorPoint = Vector2.new(0.5, 0.5),
+	root = mk("Frame", { Name = "PauseMenu", Size = UDim2.fromOffset(380, 400), AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = PANEL, BackgroundTransparency = 0.04, Visible = false, Active = true }, gui)
 	corner(root, 12)
 	stroke(root, LINE, 2)
+	K.fit(root, 380, 400)
 	label(root, "MENU", 20, MUTED, { Size = UDim2.fromOffset(200, 24), Position = UDim2.fromOffset(20, 8),
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
 	local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -44), Position = UDim2.fromOffset(0, 40), BackgroundTransparency = 1 }, root)
@@ -6441,7 +8114,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="54">
+          <Item class="ModuleScript" referent="63">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -6514,7 +8187,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="55">
+          <Item class="ModuleScript" referent="64">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -6525,6 +8198,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
 local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local PackModels = require(ReplicatedStorage.Shared.PackModels)
 
 local ShopPreview = {}
 
@@ -6601,7 +8275,7 @@ function ShopPreview.Show(p: Preview, appearanceId: string?)
 	if not appearanceId then
 		return
 	end
-	local model = ToolModels.BuildPreview(appearanceId)
+	local model = PackModels.Has(appearanceId) and PackModels.BuildPreview(appearanceId) or ToolModels.BuildPreview(appearanceId)
 	local cf, _ = model:GetBoundingBox()
 	p.Center = cf.Position
 	model.Parent = p.Viewport
@@ -6630,12 +8304,12 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="56">
+          <Item class="ModuleScript" referent="65">
             <Properties>
               <string name="Name">ShopUI</string>
-              <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks / Utility / Cosmetics), a rotating 3D preview of the ACTUAL
--- tool model with an Inspect view, stat bars with an equipped-vs-selected comparison, price + purchase, and a
--- thumbnail strip of every item. Utility and Cosmetics are visible "coming soon" tabs.
+              <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks), a rotating 3D preview of the ACTUAL model (tool or pack) with an
+-- Inspect view, stat bars with an equipped-vs-selected comparison, price + purchase, and a thumbnail strip of every item.
+-- Only tabs that work exist: there are no placeholder tabs.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
@@ -6655,13 +8329,9 @@ local mk, corner, stroke, label, button = K.mk, K.corner, K.stroke, K.label, K.b
 
 local ShopUI = {}
 
-local TABS = { "Tools", "Backpacks", "Utility", "Cosmetics" }
+local TABS = { "Tools", "Backpacks" }
 local FAMILY_NAMES = { Hand = "HAND TOOL", Excavation = "EXCAVATION TOOL", Industrial = "INDUSTRIAL" }
 local FAMILY_COLORS = { Hand = Color3.fromHex("D9A066"), Excavation = P.Gold, Industrial = P.Danger }
-local COMING_SOON = {
-	Utility = { "Lantern", "Treasure scanner", "Rope", "Beacon" },
-	Cosmetics = { "Tool skins", "Helmets", "Backpack styles", "Titles" },
-}
 
 local root: Frame
 local refs: { [string]: any } = {}
@@ -6672,7 +8342,10 @@ local sel = { Kind = "Tool", Id = "rusty_shovel" }
 local onClose: (() -> ())?
 
 -- Maximums used to normalise the stat bars across every tier.
-local MAX = { Power = 1, Rate = 1, Extra = 3, ReachMin = 8, ReachMax = 12 }
+local MAX = { Power = 1, Rate = 1, Extra = 3, ReachMin = 8, ReachMax = 12, Capacity = 1 }
+for _, def in pairs(Defs.Backpacks) do
+	MAX.Capacity = math.max(MAX.Capacity, def.Capacity)
+end
 for _, def in pairs(Defs.Tools) do
 	MAX.Power = math.max(MAX.Power, def.Power)
 	MAX.Rate = math.max(MAX.Rate, def.Rate)
@@ -6727,7 +8400,7 @@ local function appearanceOf(it): string?
 	if it.Kind == "Tool" then
 		local skin = State.Data.Skins and State.Data.Skins.ToolSkin
 		return Appearances.Resolve(it.Def, skin)
-	elseif it.Kind == "Consumable" then
+	elseif it.Kind == "Consumable" or it.Kind == "Backpack" then
 		return it.Def.Appearance
 	end
 	return nil
@@ -6782,21 +8455,6 @@ local function renderDetail()
 	local actionBox = refs.action
 	clearChildren(actionBox)
 
-	if tab == "Utility" or tab == "Cosmetics" then
-		refs.pvName.Text = tab:upper()
-		refs.pvTier.Text = "COMING SOON"
-		refs.pvTier.TextColor3 = K.Muted
-		refs.inspectBtn.Visible = false
-		ShopPreview.Show(previews.main, nil)
-		label(box, "Planned for this shop:", 18, P.Cream, { Size = UDim2.fromOffset(280, 24), Position = UDim2.fromOffset(0, 0),
-			TextXAlignment = Enum.TextXAlignment.Left })
-		for i, name in ipairs(COMING_SOON[tab]) do
-			label(box, "-  " .. name, 17, K.Muted, { Size = UDim2.fromOffset(280, 22), Position = UDim2.fromOffset(8, 22 + i * 24),
-				TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
-		end
-		return
-	end
-
 	local it = itemOf(sel.Kind, sel.Id)
 	if not it then
 		return
@@ -6807,13 +8465,13 @@ local function renderDetail()
 	if it.Kind == "Backpack" then
 		refs.pvTier.Text = "BACKPACK"
 		refs.pvTier.TextColor3 = P.Teal
-		refs.inspectBtn.Visible = false
-		ShopPreview.Show(previews.main, nil)
+		refs.inspectBtn.Visible = true
+		ShopPreview.Show(previews.main, appearanceOf(it))
 		label(box, def.Blurb or "", 16, P.Cream, { Size = UDim2.fromOffset(290, 54), Position = UDim2.fromOffset(0, 0),
 			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
 			TextStrokeTransparency = 1 })
 		local cur = Defs.Backpacks[d.BackpackId]
-		statBar(box, 70, "Capacity", def.Capacity / 40, (not st.Equipped) and (cur.Capacity / 40) or nil,
+		statBar(box, 70, "Capacity", def.Capacity / MAX.Capacity, (not st.Equipped) and (cur.Capacity / MAX.Capacity) or nil,
 			st.Equipped and tostring(def.Capacity) or delta(def.Capacity, cur.Capacity, "%d", false),
 			colorFor(def.Capacity - cur.Capacity))
 	else
@@ -6844,12 +8502,23 @@ local function renderDetail()
 			-- swings to break one block, per layer (lower is better)
 			local parts = {}
 			for _, layer in ipairs(Config.Layers) do
-				local n, c = Defs.HitsToBreak(def, layer), Defs.HitsToBreak(cur, layer)
-				local text = same and tostring(n) or (n == c and tostring(n) or ("%d>%d"):format(c, n))
-				parts[#parts + 1] = ('<font color="#%s">%s %s</font>'):format(
-					colorFor(c - n, false):ToHex(), layer.Name:sub(1, 1) .. layer.Name:sub(2):lower(), text)
+				local nice = layer.Name:sub(1, 1) .. layer.Name:sub(2):lower()
+				if not Defs.LayerAllows(def, layer) then
+					parts[#parts + 1] = ('<font color="#%s">%s locked</font>'):format(K.Muted:ToHex(), nice)
+				else
+					local n = Defs.HitsToBreak(def, layer)
+					local text, color = tostring(n), P.Cream
+					if Defs.LayerAllows(cur, layer) then
+						local c = Defs.HitsToBreak(cur, layer)
+						text = (same or n == c) and tostring(n) or ("%d>%d"):format(c, n)
+						color = colorFor(c - n, false)
+					else
+						text, color = tostring(n) .. " (new!)", K.Good
+					end
+					parts[#parts + 1] = ('<font color="#%s">%s %s</font>'):format(color:ToHex(), nice, text)
+				end
 			end
-			label(box, "Swings to break:  " .. table.concat(parts, "   "), 14, P.Cream, { Size = UDim2.fromOffset(290, 36),
+			label(box, "Swings to break:  " .. table.concat(parts, "  "), 14, P.Cream, { Size = UDim2.fromOffset(290, 36),
 				Position = UDim2.fromOffset(0, 156), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
 				TextWrapped = true, TextStrokeTransparency = 1, RichText = true })
 		else
@@ -6924,10 +8593,6 @@ end
 local function renderList()
 	local list = refs.list
 	clearChildren(list)
-	if tab == "Utility" or tab == "Cosmetics" then
-		label(list, "Nothing here yet.", 16, K.Muted, { Size = UDim2.new(1, 0, 0, 30), TextStrokeTransparency = 1 })
-		return
-	end
 	local d = State.Data
 	for i, it in ipairs(tabItems()) do
 		local st = itemState(it, d)
@@ -6950,7 +8615,6 @@ local function renderList()
 			ShopPreview.Update(pv, 0)
 		else
 			vp:Destroy()
-			label(card, "PACK", 15, P.Teal, { Size = UDim2.fromOffset(62, 66), Position = UDim2.fromOffset(6, 6) })
 		end
 		label(card, (it.Def.Tier and (it.Def.Tier .. ". ") or "") .. it.Def.DisplayName, 15, P.Cream, {
 			Size = UDim2.new(1, -78, 0, 36), Position = UDim2.fromOffset(72, 4), TextXAlignment = Enum.TextXAlignment.Left,
@@ -7058,6 +8722,7 @@ function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
 		Visible = false }, gui)
 	corner(root, 16)
 	stroke(root, Color3.fromHex("C9A46B"), 4)
+	K.fit(root, 880, 486)
 
 	label(root, "EQUIPMENT SHOP", 30, P.Cream, { Size = UDim2.fromOffset(300, 40), Position = UDim2.fromOffset(16, 8),
 		TextXAlignment = Enum.TextXAlignment.Left })
@@ -7074,7 +8739,7 @@ function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
 		corner(b, 10)
 		stroke(b, P.Dark, 2)
 		local glyph = mk("Frame", { Size = UDim2.fromOffset(30, 30), Position = UDim2.fromOffset(8, 16),
-			BackgroundColor3 = ({ Tools = P.Gold, Backpacks = P.Clay, Utility = P.Teal, Cosmetics = P.Danger })[name] }, b)
+			BackgroundColor3 = ({ Tools = P.Gold, Backpacks = P.Clay })[name] }, b)
 		corner(glyph, 8)
 		label(glyph, name:sub(1, 1), 18, P.Dark, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
 		label(b, name, 17, P.Cream, { Size = UDim2.fromOffset(78, 62), Position = UDim2.fromOffset(44, 0),
@@ -7156,7 +8821,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="57">
+          <Item class="ModuleScript" referent="66">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -7201,7 +8866,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="58">
+          <Item class="ModuleScript" referent="67">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -7277,7 +8942,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="59">
+          <Item class="ModuleScript" referent="68">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -7300,6 +8965,8 @@ local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
 local ShopUI = require(script.Parent.ShopUI)
 local PauseMenu = require(script.Parent.PauseMenu)
+local CollectionUI = require(script.Parent.CollectionUI)
+local Guide = require(script.Parent.GuideController)
 local InputMode = require(script.Parent.InputMode)
 local Bindings = require(script.Parent.Bindings)
 local K = require(script.Parent.UIKit)
@@ -7342,10 +9009,17 @@ local function nextPurchase(d)
 			break
 		end
 	end
+	-- the cheapest pack that is both unowned and bigger than the one in use (so the goal never goes backwards)
+	local current = Defs.Backpacks[d.BackpackId]
+	local nextPack
 	for id, def in pairs(Defs.Backpacks) do
-		if def.Price > 0 and not d.OwnedBackpacks[id] then
-			table.insert(candidates, def)
+		if def.Price > 0 and not d.OwnedBackpacks[id] and (not current or def.Capacity > current.Capacity)
+			and (not nextPack or def.Price < nextPack.Price) then
+			nextPack = def
 		end
+	end
+	if nextPack then
+		table.insert(candidates, nextPack)
 	end
 	for _, def in ipairs(candidates) do
 		if d.Cash >= def.Price then
@@ -7532,10 +9206,18 @@ local function build()
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
 
 	-- Top-center: objective + notify
-	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(0.5, 0, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0 })
-	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.62, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 48), Visible = false })
+	-- The centre column leaves room for the stats panel (left, 260) and the depth/buttons column (right, 190), so these
+	-- can never overlap them on a narrow window: the text shrinks (TextScaled) instead.
+	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(1, -540, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0, TextScaled = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 12 }, refs.objective)
+	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(1, -540, 0, 40), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 46), Visible = false, TextScaled = true, TextWrapped = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 12 }, refs.notify)
+	-- Fresh Dig (mine refresh) banner, under the notification line
+	refs.shift = label(gui, "", 22, P.Danger, { Size = UDim2.new(1, -540, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 90), Visible = false, TextScaled = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 12 }, refs.shift)
 
 	-- Top-right: depth
 	local depth = panel(gui, UDim2.fromOffset(170, 56), UDim2.new(1, -180, 0, 8))
@@ -7580,6 +9262,11 @@ local function build()
 	end)
 	PauseMenu.Build(gui)
 	PauseMenu.BuildGearButton(gui)
+	CollectionUI.Build(gui)
+	CollectionUI.OnOpened(function()
+		Guide.Dismiss("collection")
+	end)
+	Guide.Build(gui)
 end
 
 function UI.GetGui(): ScreenGui
@@ -7618,8 +9305,37 @@ function UI.Init()
 	end)
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
-	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number)
-		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper(), "Reveal")
+	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number, isNew: boolean?)
+		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper() .. (isNew and "  -  NEW ENTRY!" or ""), "Deposit")
+	end)
+	Remotes.Get("SetCompleted").OnClientEvent:Connect(function(layerId: string, layerName: string)
+		task.delay(2.2, function() -- after the deposit/find popup has had its moment
+			showPopup("SET COMPLETE!", layerName .. " COLLECTION", "SetComplete")
+		end)
+	end)
+	Remotes.Get("MineShift").OnClientEvent:Connect(function(phase: string, seconds: number?)
+		local l = refs.shift
+		refs.shiftToken = (refs.shiftToken or 0) + 1
+		local token = refs.shiftToken
+		if phase == "Warning" then
+			l.Text = ("FRESH DIG IN %ds - leave the mine!"):format(seconds or 0)
+			l.TextColor3 = (seconds or 0) <= 10 and P.Danger or P.Gold
+			l.Visible = true
+		elseif phase == "Deferred" then
+			l.Text = "FRESH DIG waiting for artifact carriers..."
+			l.TextColor3 = P.Gold
+			l.Visible = true
+		else
+			l.Text = "THE MINE HAS BEEN REFRESHED!"
+			l.TextColor3 = P.Teal
+			l.Visible = true
+			Audio.Play("Buy")
+			task.delay(5, function()
+				if refs.shiftToken == token then
+					l.Visible = false
+				end
+			end)
+		end
 	end)
 	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
 		if reason == "CARRYING" then
@@ -7631,7 +9347,7 @@ function UI.Init()
 		returnReadyAt = os.clock() + math.max(seconds, 0)
 		if ok then
 			toast("Back at Base Camp", P.Teal)
-			Audio.Play("Buy")
+			Audio.Play("UI")
 		else
 			toast(("Return to Camp ready in %ds"):format(math.max(1, math.ceil(seconds))), P.Danger)
 			Audio.Play("Error")
@@ -7712,15 +9428,31 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="60">
+          <Item class="ModuleScript" referent="69">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 
+local Workspace = game:GetService("Workspace")
+
 local P = Config.Palette
 local UIKit = {}
+
+-- Shared interface tokens. Every window (shop, menu, journal, hint cards) takes its look from these so the game reads as
+-- one interface: Fredoka for everything, one dark panel family, one gold accent, one muted text colour.
+UIKit.Tokens = {
+	Panel = Color3.fromHex("1F2328"), -- window body
+	PanelLight = Color3.fromHex("2A3037"), -- buttons, cards, fields
+	PanelSelected = Color3.fromHex("4A4130"), -- selected card
+	Line = Color3.fromHex("3A414A"), -- thin borders
+	Accent = P.Gold, -- primary actions, selected borders
+	Info = Color3.fromHex("5BA7E8"), -- secondary actions (equip, inspect, place)
+	Disabled = Color3.fromHex("5A5F66"),
+	TextSize = { Title = 28, Heading = 20, Body = 16, Small = 13 },
+	Corner = 10,
+}
 
 UIKit.Font = Enum.Font.FredokaOne
 UIKit.Muted = Color3.fromHex("B9B2A0")
@@ -7775,11 +9507,42 @@ function UIKit.button(parent: Instance, text: string, size: UDim2, pos: UDim2, c
 	return b
 end
 
+-- Keeps a fixed-size window (designed at `w` x `h` pixels) fully on screen: scales it down on small viewports, never up.
+-- Accounts for the HUD's own UIScale (clamp(height/720, 0.75, 1.4)) that the window is nested under.
+function UIKit.fit(window: GuiObject, w: number, h: number, margin: number?)
+	local scale = UIKit.mk("UIScale", {}, window)
+	local function refit()
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return
+		end
+		local vp = cam.ViewportSize
+		local hud = math.clamp(vp.Y / 720, 0.75, 1.4)
+		local m = margin or 0.94
+		scale.Scale = math.min(1, (vp.X / hud * m) / w, (vp.Y / hud * m) / h)
+	end
+	refit()
+	if Workspace.CurrentCamera then
+		Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(refit)
+	end
+	return scale
+end
+
+-- A flat, consistent button (state colours come from the tokens): accent = border colour, enabled = false greys it out.
+function UIKit.flatButton(parent: Instance, text: string, size: UDim2, pos: UDim2, accent: Color3?): TextButton
+	local T = UIKit.Tokens
+	local b = UIKit.mk("TextButton", { Size = size, Position = pos, BackgroundColor3 = T.PanelLight, Text = text, TextSize = T.TextSize.Heading,
+		Font = UIKit.Font, TextColor3 = P.Cream, AutoButtonColor = true }, parent)
+	UIKit.corner(b, 8)
+	UIKit.stroke(b, accent or T.Line, 2)
+	return b
+end
+
 return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="61">
+          <Item class="ModuleScript" referent="70">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -7844,7 +9607,8 @@ local function build(key: string)
 		if not def then
 			return
 		end
-		model = Kit.BuildWelded(Kit.Transform(TreasureModels.Specs(id, def), ViewmodelMath.ArtifactScale), "ArtifactViewmodel")
+		local specs = TreasureModels.Specs(id, def)
+		model = Kit.BuildWelded(Kit.Transform(specs, ViewmodelMath.ArtifactScaleFor(specs)), "ArtifactViewmodel")
 		isArtifact = true
 	end
 	modelKey = key
@@ -7923,7 +9687,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="62">
+        <Item class="LocalScript" referent="71">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
@@ -7941,6 +9705,8 @@ local Viewmodel = require(Controllers.ViewmodelController)
 local Dig = require(Controllers.DigController)
 local Interaction = require(Controllers.InteractionController)
 local Throw = require(Controllers.ThrowController)
+local Guide = require(Controllers.GuideController)
+local CampShelf = require(Controllers.CampShelf)
 
 State.Init()
 InputMode.Init()
@@ -7954,6 +9720,8 @@ Effects.Init()
 Dig.Init()
 Interaction.Init()
 Throw.Init()
+Guide.Init()
+CampShelf.Init()
 
 -- Ask for state until the server answers (data may still be loading).
 task.spawn(function()

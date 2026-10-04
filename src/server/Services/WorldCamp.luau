@@ -296,7 +296,8 @@ local function buildReceiving(camp: Folder)
 		box(folder, "ArchPost", V(0.6, 7, 0.6), base + V(sx, 3.5, -2.3), C.Timber, Enum.Material.Wood)
 	end
 	box(folder, "ArchBeam", V(7.6, 0.6, 0.6), base + V(0, 7, -2.3), C.TimberDark, Enum.Material.Wood)
-	local board = box(folder, "ArtifactsSign", V(4.6, 1.3, 0.25), base + V(0, 6.0, -2.3), C.TimberDark, Enum.Material.Wood)
+	-- the sign spans post to post (embedded in both) and hangs directly under the beam: nothing floats
+	local board = box(folder, "ArtifactsSign", V(6.5, 1.5, 0.25), base + V(0, 6.45, -2.3), C.TimberDark, Enum.Material.Wood)
 	sign(board, Enum.NormalId.Back, "ARTIFACTS", C.TimberDark, C.Trim)
 
 	local anchor = box(folder, "DepositAnchor", V(2, 1, 2), base + V(0, 4.0, 0), C.CanvasTeal)
@@ -332,6 +333,8 @@ function WorldCamp.Build(world: Folder, ex)
 	spawn.Neutral = true
 	spawn.Duration = 0
 	spawn.Transparency = 1
+	spawn.CanCollide = false -- a marker only: the camp floor is what players stand on, so the pad can never snag a step
+	spawn.CanQuery = false
 	spawn.TopSurface = Enum.SurfaceType.Smooth
 	spawn.Parent = camp
 

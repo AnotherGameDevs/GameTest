@@ -32,6 +32,9 @@ function StateService.Snapshot(player: Player)
 		OwnedTools = data.OwnedTools,
 		OwnedBackpacks = data.OwnedBackpacks,
 		Stats = data.Stats,
+		Collection = data.Collection,
+		Display = data.Display,
+		Guide = data.Guide,
 	}
 end
 

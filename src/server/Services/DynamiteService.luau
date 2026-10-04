@@ -41,7 +41,12 @@ local function explode(thrower: Player, stick: Model)
 
 	local thrownBy = thrower.Parent and DataService.Get(thrower)
 	local destroyed, hits = {}, {}
-	for _, idx in ipairs(SiteService.CellsNear(pos, def.Blast.Radius, def.Blast.MaxCells)) do
+	-- The blast respects layer gating by the thrower's equipped tool tier (dynamite is not a way to skip the ladder).
+	local tool = thrownBy and Defs.Tools[thrownBy.Equipment.ToolId] or Defs.Tools[Config.Starting.ToolId]
+	local function allow(row: number): boolean
+		return Defs.LayerAllows(tool, Defs.LayerAtCell(row))
+	end
+	for _, idx in ipairs(SiteService.CellsNear(pos, def.Blast.Radius, def.Blast.MaxCells, allow)) do
 		local _, dead, treasureId = SiteService.Damage(idx, 1e9)
 		if dead then
 			table.insert(destroyed, idx)

@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
 local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
@@ -13,6 +14,7 @@ local ArtifactService = require(script.Parent.ArtifactService)
 local LootService = {}
 local treasureRemote = Remotes.Get("TreasureFound")
 local notifyRemote = Remotes.Get("Notify")
+local setRemote = Remotes.Get("SetCompleted")
 local lastFullWarn: { [Player]: number } = {}
 
 -- Returns true if the treasure ended up in the backpack.
@@ -41,16 +43,14 @@ function LootService.Award(player: Player, treasureId: string, cellIndex: number
 
 	local stored = InventoryService.Add(player, treasureId)
 
-	local entry = data.Collection[treasureId]
 	local isNew = false
 	if stored then
-		if not entry then
-			entry = { Count = 0, FirstFound = os.time() }
-			data.Collection[treasureId] = entry
-			isNew = true
-		end
-		entry.Count += 1
+		local completed
+		isNew, completed = CollectionSpec.Register(data.Collection, treasureId, os.time())
 		data.Stats.TreasureFound += 1
+		if completed then
+			setRemote:FireClient(player, completed, Defs.LayerName(completed))
+		end
 	end
 
 	treasureRemote:FireClient(player, {

@@ -2,6 +2,7 @@
 -- camera kick, and the treasure reveal. The server decides outcomes; this only makes them feel good.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -296,7 +297,7 @@ function Effects.RevealTreasure(info)
 
 	UI.ShowTreasure(info.Id, info.Stored, info.IsNew, info.Carry)
 	local order = rar.Order
-	Audio.Play(order >= 2 and "Reveal" or "Coin", 0.9 + order * 0.12 + math.random() * 0.1)
+	Audio.PlayReveal(order)
 
 	-- Polished artifact model if there is one, else the generic stand-in. Always a Model so the same
 	-- pivot/scale animation drives both.
@@ -307,6 +308,7 @@ function Effects.RevealTreasure(info)
 	model:ScaleTo(0.2)
 	model:PivotTo(CFrame.new(start))
 	model.Parent = fxFolder
+	Debris:AddItem(model, 6) -- failsafe: a reveal can never outlive its longest animation (about 3.5 s)
 
 	if rar.Reveal then
 		local hl = Instance.new("Highlight")

@@ -19,8 +19,13 @@ local box, part, deco, sign, weld = Kit.box, Kit.part, Kit.deco, Kit.sign, Kit.w
 local WorldElevator = {}
 
 -- Platform TOP heights, surface first. Landing tops are cell-row boundaries so the grid row above each is diggable.
-WorldElevator.StopTops = { 0.5, -8, -24, -36, -48 }
-WorldElevator.StopNames = { "SURFACE", "SOIL", "CLAY", "STONE", "RUINS" }
+-- Derived from Config.Layers: each landing sits two rows below the top of its layer, so the row above is diggable.
+WorldElevator.StopTops = { 0.5 }
+WorldElevator.StopNames = { "SURFACE" }
+for _, layer in ipairs(Config.Layers) do
+	table.insert(WorldElevator.StopTops, -(layer.FromCell + 2) * Config.Site.CellSize)
+	table.insert(WorldElevator.StopNames, layer.Name)
+end
 WorldElevator.CarThickness = 0.8
 
 local function prompt(parent: Instance, name: string, action: string, object: string, attrs: { [string]: any }, distance: number?)
@@ -71,8 +76,12 @@ function WorldElevator.Build(world: Folder, minX: number, maxX: number, minZ: nu
 	truss.Material = Enum.Material.Wood
 	truss.Parent = folder
 
-	local landingTops = { -8, -24, -36, -48 }
-	local lowerTops = { -8, -24, -36, -48, floorY }
+	local landingTops, lowerTops = {}, {}
+	for i = 2, #WorldElevator.StopTops do
+		landingTops[i - 1] = WorldElevator.StopTops[i]
+		lowerTops[i - 1] = WorldElevator.StopTops[i]
+	end
+	table.insert(lowerTops, floorY)
 	local landingW = midX - minX
 	for i, y in ipairs(landingTops) do
 		box(folder, "Landing" .. i, V(landingW, 1, run - 2), V(ladderX, y - 0.5, minZ + (run - 2) / 2), C.TimberLight, Enum.Material.WoodPlanks)
@@ -206,10 +215,15 @@ function WorldElevator.Build(world: Folder, minX: number, maxX: number, minZ: nu
 	-- entrance: lintel across the front row, with a clear sign
 	box(folder, "EntranceLintel", V(gx1 - gx0 + 1.2, 0.9, 0.9), V((gx0 + gx1) / 2, 10.2, gz0), C.TimberDark, Enum.Material.Wood)
 	box(folder, "EntranceBand", V(gx1 - gx0 + 1.4, 0.4, 1.1), V((gx0 + gx1) / 2, 9.7, gz0), C.Iron, Enum.Material.Metal)
-	local board = box(folder, "ElevatorSign", V(8, 2.2, 0.3), V((gx0 + gx1) / 2, 13.4, gz0 + 0.55), C.TimberDark, Enum.Material.Wood)
-	sign(board, Enum.NormalId.Back, "ELEVATOR", C.TimberDark, C.Trim)
-	local sub = box(folder, "ElevatorSubSign", V(6, 1.2, 0.3), V((gx0 + gx1) / 2, 11.5, gz0 + 0.55), C.Iron, Enum.Material.Metal)
+	-- Signs sit flush on the front of the two posts (their width spans the post centres, they are embedded in the posts and
+	-- stacked directly on the lintel), so nothing hangs in mid-air.
+	local span = gx1 - gx0
+	local lintelTop = 10.2 + 0.45
+	local subH, mainH = 1.2, 2.2
+	local sub = box(folder, "ElevatorSubSign", V(math.min(6, span), subH, 0.3), V((gx0 + gx1) / 2, lintelTop + subH / 2, gz0 + 0.55), C.Iron, Enum.Material.Metal)
 	sign(sub, Enum.NormalId.Back, "TO THE MINE", C.Iron, C.Gold)
+	local board = box(folder, "ElevatorSign", V(span, mainH, 0.3), V((gx0 + gx1) / 2, lintelTop + subH + mainH / 2, gz0 + 0.55), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "ELEVATOR", C.TimberDark, C.Trim)
 
 	return folder
 end

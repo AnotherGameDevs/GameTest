@@ -18,6 +18,8 @@ local ArtifactService = require(Services.ArtifactService)
 local DynamiteService = require(Services.DynamiteService)
 local SettingsService = require(Services.SettingsService)
 local ElevatorService = require(Services.ElevatorService)
+local CollectionService = require(Services.CollectionService)
+local MineShiftService = require(Services.MineShiftService)
 
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
@@ -32,6 +34,8 @@ for name, init in pairs({
 	Dynamite = DynamiteService.Init,
 	Settings = SettingsService.Init,
 	Elevator = ElevatorService.Init,
+	Collection = CollectionService.Init,
+	MineShift = MineShiftService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then

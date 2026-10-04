@@ -60,7 +60,8 @@ local function build(key: string)
 		if not def then
 			return
 		end
-		model = Kit.BuildWelded(Kit.Transform(TreasureModels.Specs(id, def), ViewmodelMath.ArtifactScale), "ArtifactViewmodel")
+		local specs = TreasureModels.Specs(id, def)
+		model = Kit.BuildWelded(Kit.Transform(specs, ViewmodelMath.ArtifactScaleFor(specs)), "ArtifactViewmodel")
 		isArtifact = true
 	end
 	modelKey = key

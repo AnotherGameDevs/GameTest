@@ -2,8 +2,24 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 
+local Workspace = game:GetService("Workspace")
+
 local P = Config.Palette
 local UIKit = {}
+
+-- Shared interface tokens. Every window (shop, menu, journal, hint cards) takes its look from these so the game reads as
+-- one interface: Fredoka for everything, one dark panel family, one gold accent, one muted text colour.
+UIKit.Tokens = {
+	Panel = Color3.fromHex("1F2328"), -- window body
+	PanelLight = Color3.fromHex("2A3037"), -- buttons, cards, fields
+	PanelSelected = Color3.fromHex("4A4130"), -- selected card
+	Line = Color3.fromHex("3A414A"), -- thin borders
+	Accent = P.Gold, -- primary actions, selected borders
+	Info = Color3.fromHex("5BA7E8"), -- secondary actions (equip, inspect, place)
+	Disabled = Color3.fromHex("5A5F66"),
+	TextSize = { Title = 28, Heading = 20, Body = 16, Small = 13 },
+	Corner = 10,
+}
 
 UIKit.Font = Enum.Font.FredokaOne
 UIKit.Muted = Color3.fromHex("B9B2A0")
@@ -55,6 +71,37 @@ function UIKit.button(parent: Instance, text: string, size: UDim2, pos: UDim2, c
 	}, parent)
 	UIKit.corner(b, 12)
 	UIKit.stroke(b, P.Dark, 3)
+	return b
+end
+
+-- Keeps a fixed-size window (designed at `w` x `h` pixels) fully on screen: scales it down on small viewports, never up.
+-- Accounts for the HUD's own UIScale (clamp(height/720, 0.75, 1.4)) that the window is nested under.
+function UIKit.fit(window: GuiObject, w: number, h: number, margin: number?)
+	local scale = UIKit.mk("UIScale", {}, window)
+	local function refit()
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return
+		end
+		local vp = cam.ViewportSize
+		local hud = math.clamp(vp.Y / 720, 0.75, 1.4)
+		local m = margin or 0.94
+		scale.Scale = math.min(1, (vp.X / hud * m) / w, (vp.Y / hud * m) / h)
+	end
+	refit()
+	if Workspace.CurrentCamera then
+		Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(refit)
+	end
+	return scale
+end
+
+-- A flat, consistent button (state colours come from the tokens): accent = border colour, enabled = false greys it out.
+function UIKit.flatButton(parent: Instance, text: string, size: UDim2, pos: UDim2, accent: Color3?): TextButton
+	local T = UIKit.Tokens
+	local b = UIKit.mk("TextButton", { Size = size, Position = pos, BackgroundColor3 = T.PanelLight, Text = text, TextSize = T.TextSize.Heading,
+		Font = UIKit.Font, TextColor3 = P.Cream, AutoButtonColor = true }, parent)
+	UIKit.corner(b, 8)
+	UIKit.stroke(b, accent or T.Line, 2)
 	return b
 end
 

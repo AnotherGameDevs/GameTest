@@ -74,6 +74,86 @@ function builders.necklace()
 	return parts
 end
 
+-- Epic. Fossil claw: three tapering, curving segments in bone colour with a dark tip, on a small stone base.
+function builders.claw()
+	local BONE, BONE_DARK = P.Cream, hex("B9A57E")
+	return {
+		Kit.block("Base", V(1.9, 0.4, 1.3), V(0, -1.15, 0), hex("8A8F96"), Enum.Material.Slate),
+		Kit.block("Seg1", V(0.9, 1.1, 0.8), V(-0.15, -0.45, 0), BONE, Enum.Material.SmoothPlastic, V(0, 0, 8)),
+		Kit.block("Seg2", V(0.72, 1.0, 0.64), V(0.2, 0.45, 0), BONE, Enum.Material.SmoothPlastic, V(0, 0, -14)),
+		Kit.block("Seg3", V(0.52, 0.9, 0.46), V(0.75, 1.2, 0), BONE_DARK, Enum.Material.SmoothPlastic, V(0, 0, -38)),
+		Kit.block("Tip", V(0.3, 0.55, 0.3), V(1.3, 1.6, 0), hex("5A4A33"), Enum.Material.SmoothPlastic, V(0, 0, -58)),
+	}
+end
+
+-- Rare. Ruin tablet: a slab of sandstone with carved glyph rows and a chipped corner. Faces +/-Z.
+function builders.tablet()
+	local SAND, CARVE = P.Sandstone, hex("8C6B3E")
+	local parts = {
+		Kit.block("Slab", V(2.0, 2.6, 0.5), V(0, 0, 0), SAND, Enum.Material.Sandstone),
+		Kit.block("Chip", V(0.7, 0.7, 0.52), V(0.85, 1.2, 0), hex("2B2F36"), Enum.Material.SmoothPlastic, V(0, 0, 45)),
+	}
+	for i = 1, 4 do
+		table.insert(parts, Kit.block("Glyph" .. i, V(i % 2 == 0 and 1.3 or 1.0, 0.18, 0.54), V(-0.1, 0.95 - i * 0.45, 0), CARVE))
+	end
+	return parts
+end
+
+-- Legendary. Sun pharaoh mask: a gold headdress with teal stripes, eyes, a nose bridge and a beard. Faces +Z.
+function builders.mask()
+	local STRIPE = hex("2D6FB5")
+	return {
+		Kit.block("Face", V(1.7, 2.2, 0.8), V(0, 0, 0), GOLD, Enum.Material.SmoothPlastic),
+		Kit.block("HeadCloth", V(2.5, 1.0, 1.1), V(0, 1.2, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("SideL", V(0.55, 2.4, 0.9), V(-1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("SideR", V(0.55, 2.4, 0.9), V(1.4, -0.1, -0.1), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("StripeL", V(0.2, 2.0, 0.92), V(-1.4, -0.1, -0.1), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.block("StripeR", V(0.2, 2.0, 0.92), V(1.4, -0.1, -0.1), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.block("Brow", V(1.5, 0.22, 0.2), V(0, 0.45, 0.42), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.block("EyeL", V(0.45, 0.28, 0.2), V(-0.42, 0.2, 0.42), TEAL, Enum.Material.Neon),
+		Kit.block("EyeR", V(0.45, 0.28, 0.2), V(0.42, 0.2, 0.42), TEAL, Enum.Material.Neon),
+		Kit.block("Nose", V(0.3, 0.8, 0.3), V(0, -0.2, 0.5), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("Mouth", V(0.7, 0.14, 0.2), V(0, -0.78, 0.42), GOLD_DARK, Enum.Material.SmoothPlastic),
+		Kit.block("Beard", V(0.5, 0.9, 0.4), V(0, -1.5, 0.2), STRIPE, Enum.Material.SmoothPlastic),
+		Kit.ball("CrownGem", 0.5, V(0, 1.55, 0.45), TEAL, Enum.Material.Neon),
+	}
+end
+
+-- Uncommon. Clay figurine: a squat body, round head and stubby arms on a base.
+function builders.figurine()
+	local CLAY = P.Sandstone
+	return {
+		Kit.block("Base", V(1.4, 0.3, 1.0), V(0, -1.1, 0), P.Clay),
+		Kit.block("Body", V(1.0, 1.4, 0.8), V(0, -0.2, 0), CLAY),
+		Kit.ball("Head", 0.95, V(0, 0.95, 0), CLAY),
+		Kit.block("ArmL", V(0.3, 0.9, 0.35), V(-0.7, -0.15, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, -12)),
+		Kit.block("ArmR", V(0.3, 0.9, 0.35), V(0.7, -0.15, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, 12)),
+		Kit.block("EyeL", V(0.14, 0.14, 0.1), V(-0.2, 1.0, 0.45), P.Dark),
+		Kit.block("EyeR", V(0.14, 0.14, 0.1), V(0.2, 1.0, 0.45), P.Dark),
+	}
+end
+
+-- Common. Pottery shard: two curved-looking fragments with a painted band.
+function builders.shard()
+	local CLAY = P.Clay
+	return {
+		Kit.block("PieceA", V(1.6, 1.3, 0.35), V(-0.2, 0, 0), CLAY, Enum.Material.SmoothPlastic, V(0, 0, 14)),
+		Kit.block("PieceB", V(1.0, 0.9, 0.35), V(0.9, -0.5, 0.1), P.Dirt, Enum.Material.SmoothPlastic, V(0, 0, -22)),
+		Kit.block("Band", V(1.4, 0.22, 0.38), V(-0.2, 0.15, 0), P.Cream, Enum.Material.SmoothPlastic, V(0, 0, 14)),
+	}
+end
+
+-- Uncommon. Fossil fragment: a spiral shell built from stacked rings, in a rock chunk.
+function builders.fossil()
+	local BONE = P.Cream
+	return {
+		Kit.block("Rock", V(2.2, 1.9, 0.7), V(0, 0, -0.2), hex("8A8F96"), Enum.Material.Slate),
+		Kit.cyl("Whorl1", "Z", 0.35, 1.7, V(0, 0, 0.2), BONE),
+		Kit.cyl("Whorl2", "Z", 0.4, 1.15, V(0, 0, 0.25), P.Sandstone),
+		Kit.cyl("Whorl3", "Z", 0.45, 0.6, V(0, 0, 0.3), BONE),
+	}
+end
+
 -- Generic stand-ins for treasures that do not have a polished model yet.
 local function genericSpecs(def)
 	local c = def.Color

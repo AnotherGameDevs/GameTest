@@ -60,7 +60,12 @@ local function purchase(player: Player, kind: any, id: any)
 		return
 	end
 	local data = DataService.Get(player)
-	if not data then
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not data or not hrp then
+		return
+	end
+	if (hrp.Position - Config.Camp.ShopPosition).Magnitude > Config.Camp.ShopReach then
+		notifyRemote:FireClient(player, "Walk back to the shop to buy things.", "Danger")
 		return
 	end
 	if kind == "Consumable" then
@@ -119,7 +124,11 @@ local function purchase(player: Player, kind: any, id: any)
 	if kind == "Tool" then
 		data.Equipment.ToolId = id
 	else
-		data.Equipment.BackpackId = id
+		-- a smaller pack bought later never replaces a bigger one that is already in use
+		local current = Defs.Backpacks[data.Equipment.BackpackId]
+		if not current or def.Capacity > current.Capacity then
+			data.Equipment.BackpackId = id
+		end
 	end
 	DataService.MarkDirty(player)
 	StateService.Push(player)

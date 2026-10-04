@@ -7,7 +7,9 @@ import math
 
 # --- mirrors of game data -------------------------------------------------------------------------------
 LAYERS = {  # id: (HP per block, treasure chance)
-    "Soil": (24, 0.20), "Clay": (42, 0.26), "Stone": (70, 0.30), "Ruins": (100, 0.34)}
+    "Soil": (24, 0.20), "Clay": (42, 0.26), "Stone": (72, 0.30), "Ruins": (110, 0.30)}
+MIN_TIER = {"Soil": 1, "Clay": 1, "Stone": 3, "Ruins": 5}   # Config.Layers[].MinToolTier: weaker tools cannot break it
+CELLS_PER_LAYER = 24 * 24 * 5                                 # 24x24 footprint, five rows per layer
 TREASURE = {  # value, {layer: weight}
     "old_coin": (8, {"Soil": 10, "Clay": 6}),
     "pottery_shard": (12, {"Soil": 8, "Clay": 8}),
@@ -16,8 +18,10 @@ TREASURE = {  # value, {layer: weight}
     "fossil_fragment": (85, {"Clay": 3, "Stone": 8}),
     "ancient_necklace": (240, {"Clay": 1, "Stone": 5, "Ruins": 4}),
     "cut_gemstone": (320, {"Stone": 4, "Ruins": 5}),
-    "fossil_claw": (900, {"Stone": 1, "Ruins": 4}),
-    "golden_scarab": (1400, {"Ruins": 3}),
+    "ruin_tablet": (260, {"Stone": 1, "Ruins": 6}),
+    "fossil_claw": (900, {"Stone": 1, "Ruins": 2}),
+    "golden_scarab": (1400, {"Ruins": 1}),
+    "sun_mask": (3500, {"Ruins": 0.5}),
 }
 # tool: (name, power, rate, reach, splash(extra, fraction))   -- mirrors Defs.Tools (tier 8 Dynamite is a consumable)
 TOOLS = [
@@ -85,7 +89,50 @@ def price_report():
         print(f"  {t[0]:20s} {b:6.1f} blocks/min  -> {8064 / b:5.0f} min of continuous digging")
 
 
+def unlocked(tool_idx):
+    tier = tool_idx + 1
+    return [l for l in LAYERS if MIN_TIER[l] <= tier]
+
+def gated_policy(tool_idx):
+    """What a sensible player digs with this tool: the two deepest layers it can break, 40/60."""
+    u = unlocked(tool_idx)
+    if len(u) == 1:
+        return {u[0]: 1.0}
+    return {u[-2]: 0.4, u[-1]: 0.6}
+
+def gated_report(capacities):
+    """Cash/min per tool under layer gating, and minutes to afford the next tool/pack at that rate."""
+    print("\nLayer-gated progression (policy = deepest two unlocked layers, 40/60):")
+    print(f"{'tool':20s} {'layers':>22s} {'blk/min':>8s} {'items/min':>9s} {'$/min':>7s}  cap")
+    rows = []
+    for i, t in enumerate(TOOLS):
+        pol = gated_policy(i)
+        POLICIES["_g"] = pol
+        cap = capacities[i]
+        b, c, f = stats(t, "_g", cap)
+        ipm = b * sum(sh * LAYERS[l][1] for l, sh in pol.items())
+        rows.append((t[0], pol, b, ipm, c, cap))
+        print(f"{t[0]:20s} {'/'.join(pol):>22s} {b:8.1f} {ipm:9.1f} {c:7.0f}  {cap}")
+    return rows
+
+PRICES = [0, 300, 1100, 5500, 11000, 30000, 52000]   # mirrors Defs.Tools[...].Price
+PACKS = [(12, 0), (30, 120), (55, 2500), (90, 14000), (140, 40000)]   # mirrors Defs.Backpacks
+PACK_FOR_TOOL = [12, 30, 30, 55, 55, 90, 140]  # capacity a typical player owns when holding tool i
+
 if __name__ == "__main__":
+    rows = gated_report(PACK_FOR_TOOL)
+    print("\nMinutes of mining with tool i to afford tool i+1:")
+    for i in range(len(rows) - 1):
+        print(f"  {rows[i][0]:20s} -> {TOOLS[i+1][0]:20s} ${PRICES[i+1]:6d}: {PRICES[i+1] / rows[i][4]:5.1f} min")
+    print("\nWhole 11520-cell mine, clearing each layer with the first tool that can break it:")
+    for i, t in enumerate(TOOLS):
+        pol = gated_policy(i)
+        POLICIES["_g"] = pol
+        b, _, _ = stats(t, "_g", PACK_FOR_TOOL[i])
+        print(f"  {t[0]:20s} {b:6.1f} blocks/min -> a 2880-cell layer takes {2880 / b:5.0f} min")
+    raise SystemExit(0)
+
+if __name__ == "__legacy__":
     print("Item EV by layer:", {l: round(item_ev(l), 1) for l in LAYERS})
     print("Cash per block   :", {l: round(LAYERS[l][1] * item_ev(l), 2) for l in LAYERS})
     for cap in (12, 30):

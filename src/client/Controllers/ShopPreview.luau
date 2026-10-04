@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
 local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local PackModels = require(ReplicatedStorage.Shared.PackModels)
 
 local ShopPreview = {}
 
@@ -82,7 +83,7 @@ function ShopPreview.Show(p: Preview, appearanceId: string?)
 	if not appearanceId then
 		return
 	end
-	local model = ToolModels.BuildPreview(appearanceId)
+	local model = PackModels.Has(appearanceId) and PackModels.BuildPreview(appearanceId) or ToolModels.BuildPreview(appearanceId)
 	local cf, _ = model:GetBoundingBox()
 	p.Center = cf.Position
 	model.Parent = p.Viewport

@@ -13,6 +13,19 @@ ViewmodelMath.SwingPivot = Vector3.new(1.15, -1.1, -1.4) -- roughly where the ha
 ViewmodelMath.ArtifactScale = 0.5
 ViewmodelMath.ArtifactRest = CFrame.new(0, -1.05, -2.1)
 
+-- Held artifacts differ in size (a gem vs. a tall mask), so the draw scale is fitted per artifact: its highest point (in
+-- model space, conservatively centre + half the longest side) may rise at most ArtifactMaxTop above the rest origin.
+ViewmodelMath.ArtifactMaxTop = 0.62
+
+function ViewmodelMath.ArtifactScaleFor(specs): number
+	local top = 0.01
+	for _, s in ipairs(specs) do
+		local half = math.max(s.Size.X, s.Size.Y, s.Size.Z) / 2
+		top = math.max(top, s.Offset.Position.Y + half)
+	end
+	return math.min(ViewmodelMath.ArtifactScale, ViewmodelMath.ArtifactMaxTop / top)
+end
+
 -- Camera-space CFrame of the tool origin at rest.
 function ViewmodelMath.Rest(): CFrame
 	local u = ViewmodelMath.AxisDirection.Unit

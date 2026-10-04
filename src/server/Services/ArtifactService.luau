@@ -16,6 +16,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 local Kit = require(ReplicatedStorage.Shared.ModelKit)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
@@ -347,17 +348,16 @@ function ArtifactService.Deposit(player: Player)
 	data.Cash += value
 	data.Stats.CashEarned += value
 	data.Stats.TreasureFound += 1
-	local entry = data.Collection[rec.TreasureId]
-	if not entry then
-		entry = { Count = 0, FirstFound = os.time() }
-		data.Collection[rec.TreasureId] = entry
+	data.Stats.RelicsExtracted += 1
+	local isNew, completed = CollectionSpec.Register(data.Collection, rec.TreasureId, os.time())
+	if completed then
+		Remotes.Get("SetCompleted"):FireClient(player, completed, Defs.LayerName(completed))
 	end
-	entry.Count += 1
 	DataService.MarkDirty(player)
 	MetricsService.Sold(player, value, 1)
 
 	finishCarry(player, rec.Id)
-	depositedRemote:FireClient(player, def.Name, value)
+	depositedRemote:FireClient(player, def.Name, value, isNew)
 	ArtifactService.ShowOnTable(rec.TreasureId)
 	AnalyticsService.Log(player, "ArtifactDeposited", { id = rec.Id, value = value })
 end
@@ -376,6 +376,51 @@ function ArtifactService.ShowOnTable(treasureId: string)
 	task.delay(Config.Artifacts.DisplaySeconds, function()
 		model:Destroy()
 	end)
+end
+
+-- Mine refresh support --------------------------------------------------------------------------------------------
+-- Inside the mine volume (grid footprint plus the exit shaft beside it), below the rim.
+local function inMine(pos: Vector3): boolean
+	local b = Grid.Bounds()
+	local ex = Config.Exit
+	local maxZ = b.MaxZ + (ex.Enabled and ex.Run or 0)
+	return pos.X >= b.MinX - 1 and pos.X <= b.MaxX + 1 and pos.Z >= b.MinZ - 1 and pos.Z <= maxZ + 1 and pos.Y < b.TopY + 3
+end
+ArtifactService.InMine = inMine
+
+-- Players currently carrying an artifact while standing inside the mine.
+function ArtifactService.CarriersInMine(): { Player }
+	local out = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if CarryRegistry.IsCarrying(player) then
+			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and inMine(hrp.Position) then
+				table.insert(out, player)
+			end
+		end
+	end
+	return out
+end
+
+-- Moves every resting artifact that lies inside the mine onto the camp Lost & Found pad (they are never deleted; the
+-- owner can still pick them up there). Returns how many were moved.
+function ArtifactService.RelocateFromMine(): number
+	local moved = 0
+	for _, rec in ipairs(store:Dropped()) do
+		if inMine(rec.Position) then
+			local spot = WorldBuilder.LostFoundPosition + Vector3.new((moved % 3 - 1) * 2.2, 0, (moved // 3) * 2.2)
+			if store:Relocate(rec.Id, spot) then
+				destroyWorldModel(rec.Id)
+				spawnWorldModel(rec.Id)
+				moved += 1
+				local owner = Players:GetPlayerByUserId(rec.OwnerId)
+				if owner then
+					say(owner, ("The mine was refreshed. Your %s is waiting at Lost & Found."):format(Defs.Treasure[rec.TreasureId].Name), "Good")
+				end
+			end
+		end
+	end
+	return moved
 end
 
 -- Loss handling (death / respawn / disconnect) --------------------------------------------------------------------
@@ -404,6 +449,11 @@ local function onLoss(player: Player, reason: string)
 		say(player, "You dropped your artifact. It is waiting where you lost it.", "Danger")
 	end
 	AnalyticsService.Log(player, "ArtifactDropped", { id = rec.Id, reason = reason })
+end
+
+-- Forces a carried artifact to be dropped (used by the mine refresh when a carrier will not leave the mine).
+function ArtifactService.ForceDrop(player: Player)
+	onLoss(player, "mine_refresh")
 end
 
 function ArtifactService.Init()

@@ -101,5 +101,20 @@ do
 	check("drop after deposit is a no-op", not s:Drop(r.Id, P) and r.State == "Deposited")
 end
 
+-- Mine refresh: resting artifacts can be relocated; carried / deposited ones cannot
+do
+	local s = newStore()
+	local r = s:Create("fossil_claw", 900, 1, P)
+	local to = { X = 99 }
+	check("relocate a resting artifact", s:Relocate(r.Id, to) and r.Position == to and r.State == "Dropped" and r.OwnerId == 1)
+	check("Dropped() lists it", #s:Dropped() == 1)
+	s:Pickup(r.Id, 1)
+	check("cannot relocate a carried artifact", not s:Relocate(r.Id, P))
+	check("carried artifacts are not in Dropped()", #s:Dropped() == 0)
+	s:Deposit(r.Id, 1)
+	check("cannot relocate a deposited artifact", not s:Relocate(r.Id, P))
+	check("relocate of a missing id fails", not s:Relocate("nope", P))
+end
+
 print(("artifact tests: %d passed, %d failed"):format(passed, failed))
 if failed > 0 then error("tests failed") end

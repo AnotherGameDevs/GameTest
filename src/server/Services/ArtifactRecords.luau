@@ -104,4 +104,25 @@ function ArtifactRecords:Drop(id: string, position): boolean
 	return true
 end
 
+-- Moves a resting (Dropped) artifact without changing its owner or state (used when the mine is refreshed).
+function ArtifactRecords:Relocate(id: string, position): boolean
+	local rec = self.records[id]
+	if not rec or rec.State ~= "Dropped" then
+		return false
+	end
+	rec.Position = position
+	return true
+end
+
+-- Every resting artifact (state Dropped). Order is unspecified.
+function ArtifactRecords:Dropped()
+	local out = {}
+	for _, rec in pairs(self.records) do
+		if rec.State == "Dropped" then
+			table.insert(out, rec)
+		end
+	end
+	return out
+end
+
 return ArtifactRecords

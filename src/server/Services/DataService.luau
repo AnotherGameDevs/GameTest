@@ -10,6 +10,7 @@ local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
+local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
 local DataService = {}
 
@@ -26,6 +27,8 @@ local function defaultData()
 		Research = {},
 		UnlockedSites = {},
 		Collection = {}, -- [treasureId] = { Count, FirstFound }
+		Display = {}, -- treasure ids shown on the player's camp shelf (subset of Collection)
+		Guide = {}, -- [hintId] = true once a first-time hint is finished
 		Stats = {
 			BlocksDug = 0, TreasureFound = 0, CashEarned = 0,
 			RelicsDiscovered = 0, RelicsExtracted = 0, RelicsStolen = 0, DeepestDepth = 0,
@@ -41,6 +44,8 @@ local function migrate(data)
 	Util.Reconcile(data, defaultData())
 	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
 	data.Settings = SettingsSpec.Sanitize(data.Settings) -- clamp whatever was saved
+	DataMigrations.SanitizeCollection(data, Defs)
+	data.Display = CollectionSpec.SanitizeDisplay(data.Display, data.Collection)
 end
 
 -- GetDataStore throws in an unpublished place, so it must never run unprotected.
@@ -56,17 +61,23 @@ if Config.Data.Enabled then
 	end
 end
 
-local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean } } = {}
+local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
+local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, LastWrite: number, Saving: boolean } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
-local warnedUnavailable = false
+local lastSaveWarn: { [Player]: number } = {}
 
 local function key(player: Player)
 	return "Player_" .. player.UserId
 end
 
+local function isStudio()
+	return RunService:IsStudio()
+end
+
 local function attempt(fn: () -> any, tries: number)
 	local ok, result
-	if RunService:IsStudio() then
+	if isStudio() then
 		tries = 1 -- fail fast in Studio so a missing API permission doesn't delay loading
 	end
 	for i = 1, tries do
@@ -75,10 +86,17 @@ local function attempt(fn: () -> any, tries: number)
 			return true, result
 		end
 		if i < tries then
-			task.wait(i)
+			task.wait(i * 2)
 		end
 	end
 	return false, result
+end
+
+-- Session lock: a profile records which server (JobId) owns it. A second server refuses to load a profile that is
+-- locked by a live session, so two servers can never both write one player's progress. Stale locks expire.
+local function lockedByOther(old): boolean
+	local lock = old and old.SessionLock
+	return type(lock) == "table" and lock.JobId ~= game.JobId and (os.time() - (tonumber(lock.At) or 0)) < LOCK_TIMEOUT
 end
 
 function DataService.OnLoaded(cb: (Player, any) -> ())
@@ -97,55 +115,122 @@ function DataService.MarkDirty(player: Player)
 	end
 end
 
-function DataService.Save(player: Player, force: boolean?)
+-- Writes the profile. `release` also drops the session lock (player leaving / server closing).
+-- Returns true when nothing needed writing or the write succeeded.
+function DataService.Save(player: Player, force: boolean?, release: boolean?): boolean
 	local p = profiles[player]
 	if not p or not store or p.NoSave then
-		return
+		return true
 	end
-	if not p.Dirty and not force then
-		return
+	local stale = os.clock() - p.LastWrite >= LOCK_REFRESH
+	if not p.Dirty and not force and not stale then
+		return true
 	end
-	p.Dirty = false
-	local ok, err = attempt(function()
-		store:SetAsync(key(player), p.Data)
-	end, 3)
-	if not ok then
-		p.Dirty = true
-		if not warnedUnavailable then
-			warnedUnavailable = true
-			warn("[DataService] Save failed (is Studio API access enabled for this place?): " .. tostring(err))
+	if p.Saving then
+		if not (force or release) then
+			return true -- an autosave is already in flight; the next one picks up newer changes
+		end
+		while p.Saving do -- a final save must not be skipped: wait for the in-flight write, then write again
+			task.wait(0.1)
 		end
 	end
+	p.Saving = true
+	p.Dirty = false
+	local snapshot = Util.DeepCopy(p.Data)
+	local lostLock = false
+	local ok, err = attempt(function()
+		store:UpdateAsync(key(player), function(old)
+			lostLock = false
+			if lockedByOther(old) then
+				lostLock = true
+				return nil -- another live server owns this profile: do NOT overwrite it
+			end
+			snapshot.SessionLock = (not release) and { JobId = game.JobId, At = os.time() } or nil
+			return snapshot
+		end)
+	end, 3)
+	p.Saving = false
+	if ok and not lostLock then
+		p.LastWrite = os.clock()
+		return true
+	end
+	p.Dirty = true
+	if lostLock then
+		p.NoSave = true -- never write again from this server
+		warn(("[DataService] %s's profile is now owned by another server; saving from this one is disabled."):format(player.Name))
+	elseif os.clock() - (lastSaveWarn[player] or 0) > 30 then
+		lastSaveWarn[player] = os.clock()
+		warn(("[DataService] Save failed for %s (will retry): %s"):format(player.Name, tostring(err)))
+	end
+	return false
 end
 
 local function load(player: Player)
 	local data
 	local noSave = false
+	local failReason: string? = nil
 	if store then
+		local locked = false
 		local ok, result = attempt(function()
-			return store:GetAsync(key(player))
-		end, 3)
-		if ok then
+			local read
+			store:UpdateAsync(key(player), function(old)
+				locked = false
+				if lockedByOther(old) then
+					locked = true
+					return nil
+				end
+				read = old
+				local new = old or {}
+				new.SessionLock = { JobId = game.JobId, At = os.time() }
+				return new
+			end)
+			return read
+		end, 4)
+		if locked then
+			failReason = "Your saved progress is still open on another server. Please rejoin in about a minute."
+			warn("[DataService] Profile locked by another server for " .. player.Name)
+		elseif ok then
 			data = result
 		else
-			-- Could not read. Do NOT risk overwriting real data with defaults later.
-			noSave = true
-			if RunService:IsStudio() then
-				warn("[DataService] DataStore unavailable in Studio - progress this session will not persist. (" .. tostring(result) .. ")")
-			else
-				warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
-			end
+			failReason = "Your saved progress could not be loaded. Please rejoin in a moment - nothing was overwritten."
+			warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
 		end
+		if failReason then
+			noSave = true
+		end
+	end
+	if failReason and not isStudio() then
+		-- Production: never let someone play (and lose progress) on a stand-in profile.
+		if player.Parent then
+			player:Kick(failReason)
+		end
+		return
 	end
 	if type(data) ~= "table" then
 		data = defaultData()
 	else
+		data.SessionLock = nil
 		migrate(data)
 	end
 	if not player.Parent then
+		if store and not noSave then
+			-- joined and left before the profile was kept: release the lock we just took
+			pcall(function()
+				store:UpdateAsync(key(player), function(old)
+					if old and old.SessionLock and old.SessionLock.JobId == game.JobId then
+						old.SessionLock = nil
+						return old
+					end
+					return nil
+				end)
+			end)
+		end
 		return
 	end
-	profiles[player] = { Data = data, Dirty = noSave == false and false, NoSave = noSave }
+	if noSave and isStudio() then
+		warn("[DataService] DataStore unavailable in Studio - progress this session will not persist.")
+	end
+	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, LastWrite = os.clock(), Saving = false }
 	for _, cb in ipairs(loadedCallbacks) do
 		task.spawn(cb, player, data)
 	end
@@ -163,8 +248,9 @@ function DataService.Init()
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
-		DataService.Save(player, true)
+		DataService.Save(player, true, true)
 		profiles[player] = nil
+		lastSaveWarn[player] = nil
 	end)
 
 	task.spawn(function()
@@ -176,12 +262,25 @@ function DataService.Init()
 		end
 	end)
 
+	-- Shutdown: save every profile in parallel and wait for them (Roblox allows ~30 s), instead of a fixed sleep.
 	game:BindToClose(function()
-		for player in pairs(profiles) do
-			task.spawn(DataService.Save, player, true)
+		if isStudio() then
+			return
 		end
-		if not RunService:IsStudio() then
-			task.wait(3)
+		local pending = 0
+		for player in pairs(profiles) do
+			pending += 1
+			task.spawn(function()
+				DataService.Save(player, true, true)
+				pending -= 1
+			end)
+		end
+		local deadline = os.clock() + 25
+		while pending > 0 and os.clock() < deadline do
+			task.wait(0.2)
+		end
+		if pending > 0 then
+			warn(("[DataService] Shutdown: %d profile(s) did not finish saving."):format(pending))
 		end
 	end)
 end

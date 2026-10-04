@@ -19,6 +19,8 @@ local CarryRegistry = require(script.Parent.CarryRegistry)
 local DigService = {}
 
 local lastHit: { [Player]: number } = {}
+local lastGateNote: { [Player]: number } = {}
+local notifyRemote = Remotes.Get("Notify")
 local digResult = Remotes.Get("DigResult")
 
 local function isInt(n: any): boolean
@@ -60,13 +62,26 @@ local function handleHit(player: Player, x: any, y: any, z: any)
 	if not Defs.CellInReach(tool, hrp.Position, x, y, z, Config.Dig.ReachTolerance) then
 		return
 	end
+	-- Layer gating: a tool too weak for this layer does nothing (and does not use up the swing).
+	local targetLayer = Defs.LayerAtCell(y)
+	if not Defs.LayerAllows(tool, targetLayer) then
+		if now - (lastGateNote[player] or 0) > 1.5 then
+			lastGateNote[player] = now
+			notifyRemote:FireClient(player, ("Too hard! %s blocks need a %s or better."):format(
+				targetLayer.Name:sub(1, 1) .. targetLayer.Name:sub(2):lower(), Defs.ToolNameForTier(targetLayer.MinToolTier)), "Danger")
+		end
+		return
+	end
 	lastHit[player] = now
 
-	-- Resolve target + splash
+	-- Resolve target + splash (splash never damages a layer this tool cannot break)
 	local targets = { { idx, tool.Power } }
 	if tool.Splash then
 		for _, ni in ipairs(SiteService.PickSplash(idx, tool.Splash.Radius, tool.Splash.MaxExtra, hrp.Position)) do
-			table.insert(targets, { ni, tool.Power * tool.Splash.Fraction })
+			local _, ny = Grid.FromIndex(ni)
+			if Defs.LayerAllows(tool, Defs.LayerAtCell(ny)) then
+				table.insert(targets, { ni, tool.Power * tool.Splash.Fraction })
+			end
 		end
 	end
 
@@ -111,6 +126,7 @@ function DigService.Init()
 	Remotes.Get("DigHit").OnServerEvent:Connect(handleHit)
 	Players.PlayerRemoving:Connect(function(player)
 		lastHit[player] = nil
+		lastGateNote[player] = nil
 		RateLimiter.Forget(player)
 		LootService.Forget(player)
 	end)

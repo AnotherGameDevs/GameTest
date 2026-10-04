@@ -10,6 +10,7 @@ Bindings.ReturnToCamp = Enum.KeyCode.R
 Bindings.PlaceArtifact = Enum.KeyCode.X
 Bindings.ThrowDynamite = Enum.KeyCode.G
 Bindings.Menu = Enum.KeyCode.P
+Bindings.Journal = Enum.KeyCode.J
 
 function Bindings.Name(keyCode: Enum.KeyCode): string
 	local ok, name = pcall(function()

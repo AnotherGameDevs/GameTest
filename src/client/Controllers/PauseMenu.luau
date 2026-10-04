@@ -38,13 +38,7 @@ local function showPage(name: string)
 end
 
 -- Buttons ------------------------------------------------------------------------------------------------------
-local function flatButton(parent: Instance, text: string, size: UDim2, pos: UDim2, accent: Color3?): TextButton
-	local b = mk("TextButton", { Size = size, Position = pos, BackgroundColor3 = PANEL_LIGHT, Text = text, TextSize = 20,
-		Font = K.Font, TextColor3 = P.Cream, AutoButtonColor = true }, parent)
-	corner(b, 8)
-	stroke(b, accent or LINE, 2)
-	return b
-end
+local flatButton = K.flatButton
 
 -- Slider with a numeric field. The field takes exact values (fine adjustment); the slider snaps to the spec's step.
 local function makeSlider(parent: Instance, y: number, key: string, title: string, fmt: string, hint: string?)
@@ -187,6 +181,7 @@ local function buildControls(parent: Instance)
 		{ "Place artifact", Bindings.Name(Bindings.PlaceArtifact) },
 		{ "Throw dynamite", Bindings.Name(Bindings.ThrowDynamite) },
 		{ "Interact", "E" },
+		{ "Collection journal", Bindings.Name(Bindings.Journal) },
 		{ "This menu", Bindings.Name(Bindings.Menu) },
 		{ "Roblox menu", "Esc" },
 	}
@@ -236,7 +231,7 @@ end
 
 -- A gear icon built from plain frames (no font glyph dependency).
 function PauseMenu.BuildGearButton(gui: ScreenGui): TextButton
-	local b = mk("TextButton", { Name = "GearButton", Text = "", Size = UDim2.fromOffset(44, 44), Position = UDim2.new(1, -232, 0, 12),
+	local b = mk("TextButton", { Name = "GearButton", Text = "", Size = UDim2.fromOffset(44, 44), Position = UDim2.new(1, -54, 0, 70),
 		BackgroundColor3 = PANEL, BackgroundTransparency = 0.1, AutoButtonColor = true }, gui)
 	corner(b, 10)
 	stroke(b, LINE, 2)
@@ -261,10 +256,11 @@ function PauseMenu.BuildGearButton(gui: ScreenGui): TextButton
 end
 
 function PauseMenu.Build(gui: ScreenGui)
-	root = mk("Frame", { Name = "PauseMenu", Size = UDim2.fromOffset(380, 340), AnchorPoint = Vector2.new(0.5, 0.5),
+	root = mk("Frame", { Name = "PauseMenu", Size = UDim2.fromOffset(380, 400), AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = PANEL, BackgroundTransparency = 0.04, Visible = false, Active = true }, gui)
 	corner(root, 12)
 	stroke(root, LINE, 2)
+	K.fit(root, 380, 400)
 	label(root, "MENU", 20, MUTED, { Size = UDim2.fromOffset(200, 24), Position = UDim2.fromOffset(20, 8),
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
 	local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -44), Position = UDim2.fromOffset(0, 40), BackgroundTransparency = 1 }, root)

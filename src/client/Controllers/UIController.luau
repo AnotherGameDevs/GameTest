@@ -18,6 +18,8 @@ local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
 local ShopUI = require(script.Parent.ShopUI)
 local PauseMenu = require(script.Parent.PauseMenu)
+local CollectionUI = require(script.Parent.CollectionUI)
+local Guide = require(script.Parent.GuideController)
 local InputMode = require(script.Parent.InputMode)
 local Bindings = require(script.Parent.Bindings)
 local K = require(script.Parent.UIKit)
@@ -60,10 +62,17 @@ local function nextPurchase(d)
 			break
 		end
 	end
+	-- the cheapest pack that is both unowned and bigger than the one in use (so the goal never goes backwards)
+	local current = Defs.Backpacks[d.BackpackId]
+	local nextPack
 	for id, def in pairs(Defs.Backpacks) do
-		if def.Price > 0 and not d.OwnedBackpacks[id] then
-			table.insert(candidates, def)
+		if def.Price > 0 and not d.OwnedBackpacks[id] and (not current or def.Capacity > current.Capacity)
+			and (not nextPack or def.Price < nextPack.Price) then
+			nextPack = def
 		end
+	end
+	if nextPack then
+		table.insert(candidates, nextPack)
 	end
 	for _, def in ipairs(candidates) do
 		if d.Cash >= def.Price then
@@ -250,10 +259,18 @@ local function build()
 		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
 
 	-- Top-center: objective + notify
-	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(0.5, 0, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0 })
-	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.62, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 48), Visible = false })
+	-- The centre column leaves room for the stats panel (left, 260) and the depth/buttons column (right, 190), so these
+	-- can never overlap them on a narrow window: the text shrinks (TextScaled) instead.
+	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(1, -540, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0, TextScaled = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 12 }, refs.objective)
+	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(1, -540, 0, 40), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 46), Visible = false, TextScaled = true, TextWrapped = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 12 }, refs.notify)
+	-- Fresh Dig (mine refresh) banner, under the notification line
+	refs.shift = label(gui, "", 22, P.Danger, { Size = UDim2.new(1, -540, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 90), Visible = false, TextScaled = true })
+	mk("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 12 }, refs.shift)
 
 	-- Top-right: depth
 	local depth = panel(gui, UDim2.fromOffset(170, 56), UDim2.new(1, -180, 0, 8))
@@ -298,6 +315,11 @@ local function build()
 	end)
 	PauseMenu.Build(gui)
 	PauseMenu.BuildGearButton(gui)
+	CollectionUI.Build(gui)
+	CollectionUI.OnOpened(function()
+		Guide.Dismiss("collection")
+	end)
+	Guide.Build(gui)
 end
 
 function UI.GetGui(): ScreenGui
@@ -336,8 +358,37 @@ function UI.Init()
 	end)
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
-	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number)
-		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper(), "Reveal")
+	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number, isNew: boolean?)
+		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper() .. (isNew and "  -  NEW ENTRY!" or ""), "Deposit")
+	end)
+	Remotes.Get("SetCompleted").OnClientEvent:Connect(function(layerId: string, layerName: string)
+		task.delay(2.2, function() -- after the deposit/find popup has had its moment
+			showPopup("SET COMPLETE!", layerName .. " COLLECTION", "SetComplete")
+		end)
+	end)
+	Remotes.Get("MineShift").OnClientEvent:Connect(function(phase: string, seconds: number?)
+		local l = refs.shift
+		refs.shiftToken = (refs.shiftToken or 0) + 1
+		local token = refs.shiftToken
+		if phase == "Warning" then
+			l.Text = ("FRESH DIG IN %ds - leave the mine!"):format(seconds or 0)
+			l.TextColor3 = (seconds or 0) <= 10 and P.Danger or P.Gold
+			l.Visible = true
+		elseif phase == "Deferred" then
+			l.Text = "FRESH DIG waiting for artifact carriers..."
+			l.TextColor3 = P.Gold
+			l.Visible = true
+		else
+			l.Text = "THE MINE HAS BEEN REFRESHED!"
+			l.TextColor3 = P.Teal
+			l.Visible = true
+			Audio.Play("Buy")
+			task.delay(5, function()
+				if refs.shiftToken == token then
+					l.Visible = false
+				end
+			end)
+		end
 	end)
 	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
 		if reason == "CARRYING" then
@@ -349,7 +400,7 @@ function UI.Init()
 		returnReadyAt = os.clock() + math.max(seconds, 0)
 		if ok then
 			toast("Back at Base Camp", P.Teal)
-			Audio.Play("Buy")
+			Audio.Play("UI")
 		else
 			toast(("Return to Camp ready in %ds"):format(math.max(1, math.ceil(seconds))), P.Danger)
 			Audio.Play("Error")

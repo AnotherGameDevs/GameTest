@@ -67,6 +67,8 @@ type Target = {
 	Y: number,
 	Z: number,
 	InReach: boolean,
+	Allowed: boolean, -- the equipped tool can break this layer (Defs.LayerAllows)
+	NeedTool: string?, -- display name of the tool tier that unlocks it
 }
 
 local function viewportPos(input: InputObject): Vector2
@@ -95,7 +97,10 @@ local function castDig(origin: Vector3, dir: Vector3): Target?
 		-- the server's rule (Defs.CellInReach), without the server's latency tolerance
 		inReach = Defs.CellInReach(State.Tool(), (hrp :: BasePart).Position, x, y, z, 0)
 	end
-	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach }
+	local layer = Defs.LayerAtCell(y)
+	local allowed = Defs.LayerAllows(State.Tool(), layer)
+	return { Part = inst, Position = result.Position, Normal = result.Normal, X = x, Y = y, Z = z, InReach = inReach,
+		Allowed = allowed, NeedTool = (not allowed) and Defs.ToolNameForTier(layer.MinToolTier or 1) or nil }
 end
 
 local function aimScreen(vp: Vector2, length: number): Target?
@@ -209,6 +214,40 @@ local function isBlocked(): boolean
 	return InputMode.IsCursorFree() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
 end
 
+-- The reason-label under the crosshair.
+local hintLabel: TextLabel? = nil
+local function setHint(text: string?)
+	if not hintLabel then
+		return
+	end
+	if text then
+		hintLabel.Text = text
+	end
+	hintLabel.Visible = text ~= nil
+end
+
+local function buildHint()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "DigHint"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 3
+	gui.Parent = player:WaitForChild("PlayerGui")
+	local l = Instance.new("TextLabel")
+	l.AnchorPoint = Vector2.new(0.5, 0)
+	l.Position = UDim2.new(0.5, 0, 0.5, 34) -- below the crosshair, never on it
+	l.Size = UDim2.fromOffset(320, 26)
+	l.BackgroundTransparency = 1
+	l.Font = Enum.Font.FredokaOne
+	l.TextSize = 20
+	l.TextColor3 = P.Danger
+	l.TextStrokeTransparency = 0.3
+	l.TextStrokeColor3 = P.Dark
+	l.Visible = false
+	l.Parent = gui
+	hintLabel = l
+end
+
 local function onStep()
 	local blocked = isBlocked()
 	if blocked then
@@ -231,14 +270,24 @@ local function onStep()
 	-- Highlight + crosshair come from the very same result the hit request uses below.
 	if target then
 		targetBox.Adornee = target.Part
-		targetBox.Color3 = target.InReach and P.Gold or P.Danger
-		CameraController.SetCrosshairState(target.InReach and "hit" or "far")
+		local good = target.InReach and target.Allowed
+		targetBox.Color3 = good and P.Gold or P.Danger
+		CameraController.SetCrosshairState(good and "hit" or "far")
+		-- one short reason under the crosshair (never over it) whenever the block can not be dug
+		if not target.InReach then
+			setHint("TOO FAR - step closer")
+		elseif not target.Allowed then
+			setHint(("TOO HARD - needs the %s"):format(target.NeedTool or "a stronger tool"))
+		else
+			setHint(nil)
+		end
 	else
 		targetBox.Adornee = nil
 		CameraController.SetCrosshairState("none")
+		setHint(nil)
 	end
 
-	if blocked or not target or not (pointerHeld or buttonHeld) or not target.InReach then
+	if blocked or not target or not (pointerHeld or buttonHeld) or not target.InReach or not target.Allowed then
 		return
 	end
 
@@ -268,6 +317,7 @@ function DigController.Init()
 	targetBox.Parent = Workspace
 
 	refreshFilter()
+	buildHint()
 
 	local function onCharacter(char: Model)
 		refreshFilter()
@@ -281,6 +331,15 @@ function DigController.Init()
 	if player.Character then
 		task.spawn(onCharacter, player.Character)
 	end
+
+	-- Switching tools (shop purchase / equip) never leaves a held click behind.
+	local lastToolId: string? = nil
+	State.Connect(function(d)
+		if lastToolId and d.ToolId ~= lastToolId then
+			DigController.ClearInput()
+		end
+		lastToolId = d.ToolId
+	end)
 
 	-- Anything that steals the cursor/keyboard drops held mining.
 	InputMode.OnChanged(DigController.ClearInput)

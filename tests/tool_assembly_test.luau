@@ -180,7 +180,7 @@ for id, def in pairs(Defs.Treasure) do
 		for _, aspect in ipairs(aspects) do
 			local blocked = false
 			for _, part in ipairs(specs) do
-				local hit = projectPart(part, ViewmodelMath.ArtifactScale, ViewmodelMath.ArtifactRest, aspect)
+				local hit = projectPart(part, ViewmodelMath.ArtifactScaleFor(specs), ViewmodelMath.ArtifactRest, aspect)
 				if hit then blocked = true end
 			end
 			check(("carried %s: crosshair area clear (aspect %.2f)"):format(id, aspect), not blocked)
