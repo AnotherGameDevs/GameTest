@@ -1,0 +1,2851 @@
+<roblox version="4">
+  <Item class="ReplicatedStorage" referent="0">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="1">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="2">
+        <Properties>
+          <string name="Name">Config</string>
+          <string name="Source"><![CDATA[-- All tunable balance/feel values live here. Nothing in the services should hardcode these.
+local Config = {}
+
+Config.GameName = "DIG & RUN!"
+
+Config.Palette = {
+	Dirt = Color3.fromHex("9A623A"),
+	Clay = Color3.fromHex("C97846"),
+	Sandstone = Color3.fromHex("D8B678"),
+	Rock = Color3.fromHex("68717C"),
+	Dark = Color3.fromHex("262A30"),
+	Cream = Color3.fromHex("EFE2C3"),
+	Gold = Color3.fromHex("F5B942"),
+	Teal = Color3.fromHex("41BDAE"),
+	Danger = Color3.fromHex("EF5944"),
+}
+
+-- Excavation grid. Surface of the site is Y = 0, the site extends downward.
+Config.Site = {
+	CellSize = 4, -- studs per dig cell
+	SizeX = 24, -- cells
+	SizeZ = 24,
+	Depth = 14, -- cells deep
+	Center = Vector3.new(0, 0, 0), -- world XZ centre of the site, Y of the surface
+	Seed = 1337, -- change for a different (seeded) layout
+	StudsPerMeter = 3.5, -- for the depth readout
+	BorderHeight = 6, -- decorative rim
+}
+
+-- Depth layers, ordered shallow -> deep. FromCell is the first cell-depth index (0 = top row).
+Config.Layers = {
+	{ Id = "Soil", Name = "SOIL", FromCell = 0, Color = Config.Palette.Dirt, Health = 24, TreasureChance = 0.20 },
+	{ Id = "Clay", Name = "CLAY", FromCell = 4, Color = Config.Palette.Clay, Health = 42, TreasureChance = 0.26 },
+	{ Id = "Stone", Name = "STONE", FromCell = 8, Color = Config.Palette.Rock, Health = 70, TreasureChance = 0.30 },
+	{ Id = "Ruins", Name = "RUINS", FromCell = 11, Color = Config.Palette.Sandstone, Health = 100, TreasureChance = 0.34 },
+}
+
+Config.Dig = {
+	ReachPadding = 4, -- studs added to tool reach for server distance check (lag tolerance)
+	CooldownTolerance = 0.80, -- server accepts hits at >= 80% of the tool's nominal interval
+	SplashFraction = 0.55, -- damage fraction applied to neighbours when tool DigRadius > 0
+	MaxBroadcastDistance = 220, -- only clients within this distance get hit feedback
+}
+
+Config.Backpack = {
+	AutoSellEnabled = true, -- stepping onto the Sell Zone sells everything
+	SellCooldown = 1.0,
+}
+
+Config.Camp = {
+	Position = Vector3.new(0, 0, 78), -- centre of Base Camp floor (surface level)
+	Size = Vector3.new(60, 2, 44),
+	SellZoneOffset = Vector3.new(-14, 0, 0),
+	ShopOffset = Vector3.new(14, 0, -4),
+	SellZoneRadius = 9,
+}
+
+Config.ReturnToCamp = {
+	Enabled = true,
+	Cooldown = 8,
+}
+
+Config.Starting = {
+	Cash = 0,
+	ToolId = "rusty_shovel",
+	BackpackId = "pouch",
+}
+
+Config.Data = {
+	Enabled = true, -- false = never touch DataStore (everything in memory)
+	StoreName = "DigAndRun_PlayerData_v1",
+	AutosaveInterval = 60,
+	CurrentVersion = 1,
+}
+
+Config.RateLimits = { -- { max calls, per seconds }
+	DigHit = { 14, 1 },
+	RequestPurchase = { 5, 2 },
+	ReturnToCamp = { 2, 5 },
+	ClientReady = { 3, 5 },
+}
+
+return Config
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">Defs</string>
+          <string name="Source"><![CDATA[-- Data-driven definitions: tools, backpacks, treasure, rarity.
+local Config = require(script.Parent.Config)
+local P = Config.Palette
+
+local Defs = {}
+
+Defs.Rarity = {
+	Common = { Order = 1, Color = Color3.fromHex("C9C4B8"), Reveal = false },
+	Uncommon = { Order = 2, Color = Color3.fromHex("7BD36B"), Reveal = true },
+	Rare = { Order = 3, Color = Color3.fromHex("4DA3FF"), Reveal = true },
+	Epic = { Order = 4, Color = Color3.fromHex("B565F2"), Reveal = true },
+	Legendary = { Order = 5, Color = P.Gold, Reveal = true },
+	Mythic = { Order = 6, Color = P.Danger, Reveal = true },
+}
+
+-- Tools. Power = damage per hit, Rate = hits/second, DigRadius = extra cells hit around the target
+-- (this is what makes better shovels *behave* differently, not only hit harder).
+Defs.Tools = {
+	rusty_shovel = {
+		DisplayName = "Rusty Shovel", ToolType = "Shovel", Power = 8, Rate = 2.0, DigRadius = 0, Reach = 14,
+		Price = 0, RequiredReputation = 0, Order = 1, Color = Color3.fromHex("8A6A55"), Scale = 1.0,
+		Blurb = "Slow. One block at a time.",
+	},
+	digging_shovel = {
+		DisplayName = "Digging Shovel", ToolType = "Shovel", Power = 18, Rate = 3.0, DigRadius = 1, Reach = 16,
+		Price = 180, RequiredReputation = 0, Order = 2, Color = P.Teal, Scale = 1.35,
+		Blurb = "Faster, harder, and smashes neighbouring blocks too!",
+	},
+}
+
+Defs.Backpacks = {
+	pouch = { DisplayName = "Pouch", Capacity = 12, Price = 0, RequiredReputation = 0, Order = 1 },
+	satchel = { DisplayName = "Big Satchel", Capacity = 30, Price = 120, RequiredReputation = 0, Order = 2,
+		Blurb = "Carry 30 treasures per trip." },
+}
+
+-- Treasure. Layers lists which layer ids can drop it; Weight is relative inside a layer.
+Defs.Treasure = {
+	old_coin = { Name = "Old Coin", Rarity = "Common", Value = 8, Layers = { Soil = 10, Clay = 6 }, Category = "Coins", Color = P.Gold, Shape = "Coin" },
+	pottery_shard = { Name = "Pottery Shard", Rarity = "Common", Value = 12, Layers = { Soil = 8, Clay = 8 }, Category = "Pottery", Color = P.Clay, Shape = "Block" },
+	bronze_ring = { Name = "Bronze Ring", Rarity = "Uncommon", Value = 40, Layers = { Soil = 2, Clay = 6, Stone = 3 }, Category = "Jewelry", Color = Color3.fromHex("CD7F32"), Shape = "Ring" },
+	clay_figurine = { Name = "Clay Figurine", Rarity = "Uncommon", Value = 65, Layers = { Clay = 6, Stone = 4 }, Category = "Pottery", Color = P.Sandstone, Shape = "Block" },
+	fossil_fragment = { Name = "Fossil Fragment", Rarity = "Uncommon", Value = 85, Layers = { Clay = 3, Stone = 8 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
+	ancient_necklace = { Name = "Ancient Necklace", Rarity = "Rare", Value = 240, Layers = { Clay = 1, Stone = 5, Ruins = 4 }, Category = "Jewelry", Color = P.Gold, Shape = "Ring" },
+	cut_gemstone = { Name = "Cut Gemstone", Rarity = "Rare", Value = 320, Layers = { Stone = 4, Ruins = 5 }, Category = "Gemstones", Color = Color3.fromHex("4DD2FF"), Shape = "Gem" },
+	fossil_claw = { Name = "Fossil Claw", Rarity = "Epic", Value = 900, Layers = { Stone = 1, Ruins = 4 }, Category = "Fossils", Color = P.Cream, Shape = "Block" },
+	golden_scarab = { Name = "Golden Scarab", Rarity = "Epic", Value = 1400, Layers = { Ruins = 3 }, Category = "Ancient Egypt", Color = P.Gold, Shape = "Gem" },
+}
+
+function Defs.LayerAtCell(y: number)
+	local found = Config.Layers[1]
+	for _, layer in ipairs(Config.Layers) do
+		if y >= layer.FromCell then
+			found = layer
+		end
+	end
+	return found
+end
+
+-- Per-layer weighted lists, built once.
+local weighted = {}
+for _, layer in ipairs(Config.Layers) do
+	local list, total = {}, 0
+	for id, def in pairs(Defs.Treasure) do
+		local w = def.Layers[layer.Id]
+		if w then
+			total += w
+			table.insert(list, { Id = id, Cum = total })
+		end
+	end
+	table.sort(list, function(a, b) return a.Id < b.Id end)
+	total = 0
+	for _, e in ipairs(list) do
+		total += (Defs.Treasure[e.Id].Layers[layer.Id])
+		e.Cum = total
+	end
+	weighted[layer.Id] = { List = list, Total = total }
+end
+
+function Defs.PickTreasure(layerId: string, rng: Random): string?
+	local w = weighted[layerId]
+	if not w or w.Total <= 0 then
+		return nil
+	end
+	local roll = rng:NextNumber() * w.Total
+	for _, e in ipairs(w.List) do
+		if roll <= e.Cum then
+			return e.Id
+		end
+	end
+	return w.List[#w.List].Id
+end
+
+-- Shop catalogue, sorted. Items: { Kind = "Tool"|"Backpack", Id, Def }
+function Defs.ShopItems()
+	local items = {}
+	for id, def in pairs(Defs.Tools) do
+		if def.Price > 0 then
+			table.insert(items, { Kind = "Tool", Id = id, Def = def })
+		end
+	end
+	for id, def in pairs(Defs.Backpacks) do
+		if def.Price > 0 then
+			table.insert(items, { Kind = "Backpack", Id = id, Def = def })
+		end
+	end
+	table.sort(items, function(a, b)
+		if a.Def.Price ~= b.Def.Price then
+			return a.Def.Price < b.Def.Price
+		end
+		return a.Id < b.Id
+	end)
+	return items
+end
+
+return Defs
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
+          <string name="Name">Grid</string>
+          <string name="Source"><![CDATA[-- Pure grid math shared by server and client. Cell coordinates are 0-based integers (x, y, z);
+-- y = 0 is the top row (surface), y grows downward.
+local Config = require(script.Parent.Config)
+
+local Grid = {}
+local S = Config.Site
+
+Grid.SizeX, Grid.SizeY, Grid.SizeZ = S.SizeX, S.Depth, S.SizeZ
+Grid.CellSize = S.CellSize
+Grid.Count = S.SizeX * S.Depth * S.SizeZ
+
+local originX = S.Center.X - (S.SizeX * S.CellSize) / 2
+local originZ = S.Center.Z - (S.SizeZ * S.CellSize) / 2
+Grid.OriginX, Grid.OriginZ, Grid.SurfaceY = originX, originZ, S.Center.Y
+
+function Grid.InBounds(x: number, y: number, z: number): boolean
+	return x >= 0 and x < S.SizeX and y >= 0 and y < S.Depth and z >= 0 and z < S.SizeZ
+end
+
+function Grid.ToIndex(x: number, y: number, z: number): number
+	return (y * S.SizeZ + z) * S.SizeX + x + 1
+end
+
+function Grid.FromIndex(i: number): (number, number, number)
+	i -= 1
+	local x = i % S.SizeX
+	local rest = (i - x) // S.SizeX
+	local z = rest % S.SizeZ
+	local y = rest // S.SizeZ
+	return x, y, z
+end
+
+function Grid.CellCenter(x: number, y: number, z: number): Vector3
+	local c = S.CellSize
+	return Vector3.new(originX + (x + 0.5) * c, Grid.SurfaceY - (y + 0.5) * c, originZ + (z + 0.5) * c)
+end
+
+function Grid.WorldToCell(p: Vector3): (number, number, number)
+	local c = S.CellSize
+	return math.floor((p.X - originX) / c), math.floor((Grid.SurfaceY - p.Y) / c), math.floor((p.Z - originZ) / c)
+end
+
+-- Depth in metres below the surface for a world Y (clamped at 0).
+function Grid.DepthMeters(worldY: number): number
+	return math.max(0, (Grid.SurfaceY - worldY) / S.StudsPerMeter)
+end
+
+Grid.Neighbours6 = {
+	{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 },
+}
+
+return Grid
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="5">
+        <Properties>
+          <string name="Name">Remotes</string>
+          <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Remotes = {}
+
+local EVENTS = {
+	"ClientReady", -- C->S  client finished loading, wants initial state
+	"DigHit", -- C->S  (x, y, z) request to hit a cell
+	"RequestPurchase", -- C->S  (kind, id)
+	"ReturnToCamp", -- C->S
+	"PlayerState", -- S->C  full state snapshot
+	"DigResult", -- S->C  { hits = {...}, depth }
+	"TreasureFound", -- S->C  treasure reveal
+	"Sold", -- S->C  (amount, count)
+	"Notify", -- S->C  (text, kind)
+}
+
+local folder: Folder
+if RunService:IsServer() then
+	folder = ReplicatedStorage:FindFirstChild("Remotes") or Instance.new("Folder")
+	folder.Name = "Remotes"
+	folder.Parent = ReplicatedStorage
+	for _, name in ipairs(EVENTS) do
+		if not folder:FindFirstChild(name) then
+			local ev = Instance.new("RemoteEvent")
+			ev.Name = name
+			ev.Parent = folder
+		end
+	end
+else
+	folder = ReplicatedStorage:WaitForChild("Remotes")
+end
+
+function Remotes.Get(name: string): RemoteEvent
+	return folder:WaitForChild(name) :: RemoteEvent
+end
+
+return Remotes
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">Util</string>
+          <string name="Source"><![CDATA[local Util = {}
+
+function Util.FormatCash(n: number): string
+	n = math.floor(n + 0.5)
+	local s = tostring(n)
+	local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+	if out:sub(1, 1) == "," then
+		out = out:sub(2)
+	end
+	return "$" .. out
+end
+
+function Util.FormatCashShort(n: number): string
+	if n >= 1e6 then
+		return string.format("$%.1fM", n / 1e6)
+	elseif n >= 1e4 then
+		return string.format("$%.0fK", n / 1e3)
+	end
+	return Util.FormatCash(n)
+end
+
+function Util.DeepCopy(t)
+	if type(t) ~= "table" then
+		return t
+	end
+	local c = {}
+	for k, v in pairs(t) do
+		c[k] = Util.DeepCopy(v)
+	end
+	return c
+end
+
+-- Adds any keys missing from `data` using `template`, recursively. Never overwrites existing values.
+function Util.Reconcile(data, template)
+	for k, v in pairs(template) do
+		if data[k] == nil then
+			data[k] = Util.DeepCopy(v)
+		elseif type(data[k]) == "table" and type(v) == "table" then
+			Util.Reconcile(data[k], v)
+		end
+	end
+end
+
+return Util
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="7">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Folder" referent="8">
+      <Properties>
+        <string name="Name">Server</string>
+      </Properties>
+      <Item class="Script" referent="9">
+        <Properties>
+          <string name="Name">Main</string>
+          <token name="RunContext">0</token>
+          <string name="Source"><![CDATA[-- DIG & RUN! server entry point. Order matters: remotes -> world -> services.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local Services = script.Parent:WaitForChild("Services")
+local WorldBuilder = require(Services.WorldBuilder)
+local SiteService = require(Services.SiteService)
+local DataService = require(Services.DataService)
+local StateService = require(Services.StateService)
+local EquipmentService = require(Services.EquipmentService)
+local DigService = require(Services.DigService)
+local EconomyService = require(Services.EconomyService)
+local RateLimiter = require(Services.RateLimiter)
+
+WorldBuilder.Build()
+SiteService.Generate(Config.Site.Seed)
+
+DataService.Init()
+EquipmentService.Init()
+DigService.Init()
+EconomyService.Init()
+
+DataService.OnLoaded(function(player)
+	StateService.Push(player)
+end)
+
+Remotes.Get("ClientReady").OnServerEvent:Connect(function(player)
+	if RateLimiter.Check(player, "ClientReady") then
+		StateService.Push(player)
+	end
+end)
+
+print(("[%s] Server ready."):format(Config.GameName))
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="10">
+        <Properties>
+          <string name="Name">Services</string>
+        </Properties>
+        <Item class="ModuleScript" referent="11">
+          <Properties>
+            <string name="Name">AnalyticsService</string>
+            <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
+local AnalyticsService = {}
+
+AnalyticsService.Verbose = false
+
+function AnalyticsService.Log(player: Player?, event: string, data: { [string]: any }?)
+	if AnalyticsService.Verbose then
+		print(("[Analytics] %s %s"):format(player and player.Name or "server", event), data)
+	end
+end
+
+return AnalyticsService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="12">
+          <Properties>
+            <string name="Name">DataService</string>
+            <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
+-- graceful fallback to memory-only when DataStores are unavailable (e.g. unpublished place in Studio).
+local Players = game:GetService("Players")
+local DataStoreService = game:GetService("DataStoreService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Util = require(ReplicatedStorage.Shared.Util)
+
+local DataService = {}
+
+local function defaultData()
+	return {
+		Version = Config.Data.CurrentVersion,
+		Cash = Config.Starting.Cash,
+		Reputation = 0,
+		Equipment = { ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId },
+		OwnedTools = { [Config.Starting.ToolId] = true },
+		OwnedBackpacks = { [Config.Starting.BackpackId] = true },
+		BackpackItems = {}, -- [treasureId] = count (persisted so a reset/rejoin never eats your haul)
+		Research = {},
+		UnlockedSites = {},
+		Collection = {}, -- [treasureId] = { Count, FirstFound }
+		Stats = {
+			BlocksDug = 0, TreasureFound = 0, CashEarned = 0,
+			RelicsDiscovered = 0, RelicsExtracted = 0, RelicsStolen = 0, DeepestDepth = 0,
+		},
+		Cosmetics = {},
+		EquippedCosmetics = {},
+		Settings = {},
+	}
+end
+
+-- Migrations: [n] upgrades data from version n to n+1.
+local Migrations: { [number]: (any) -> () } = {
+	-- [1] = function(data) ... end,
+}
+
+local function migrate(data)
+	local v = data.Version or 0
+	while v < Config.Data.CurrentVersion do
+		local step = Migrations[v]
+		if step then
+			step(data)
+		end
+		v += 1
+		data.Version = v
+	end
+	Util.Reconcile(data, defaultData())
+end
+
+local store
+if Config.Data.Enabled then
+	store = DataStoreService:GetDataStore(Config.Data.StoreName)
+end
+
+local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean } } = {}
+local loadedCallbacks: { (Player, any) -> () } = {}
+local warnedUnavailable = false
+
+local function key(player: Player)
+	return "Player_" .. player.UserId
+end
+
+local function attempt(fn: () -> any, tries: number)
+	local ok, result
+	for i = 1, tries do
+		ok, result = pcall(fn)
+		if ok then
+			return true, result
+		end
+		task.wait(i)
+	end
+	return false, result
+end
+
+function DataService.OnLoaded(cb: (Player, any) -> ())
+	table.insert(loadedCallbacks, cb)
+end
+
+function DataService.Get(player: Player)
+	local p = profiles[player]
+	return p and p.Data
+end
+
+function DataService.MarkDirty(player: Player)
+	local p = profiles[player]
+	if p then
+		p.Dirty = true
+	end
+end
+
+function DataService.Save(player: Player, force: boolean?)
+	local p = profiles[player]
+	if not p or not store or p.NoSave then
+		return
+	end
+	if not p.Dirty and not force then
+		return
+	end
+	p.Dirty = false
+	local ok, err = attempt(function()
+		store:SetAsync(key(player), p.Data)
+	end, 3)
+	if not ok then
+		p.Dirty = true
+		if not warnedUnavailable then
+			warnedUnavailable = true
+			warn("[DataService] Save failed (is Studio API access enabled for this place?): " .. tostring(err))
+		end
+	end
+end
+
+local function load(player: Player)
+	local data
+	local noSave = false
+	if store then
+		local ok, result = attempt(function()
+			return store:GetAsync(key(player))
+		end, 3)
+		if ok then
+			data = result
+		else
+			-- Could not read. Do NOT risk overwriting real data with defaults later.
+			noSave = true
+			if RunService:IsStudio() then
+				warn("[DataService] DataStore unavailable in Studio - progress this session will not persist. (" .. tostring(result) .. ")")
+			else
+				warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
+			end
+		end
+	end
+	if type(data) ~= "table" then
+		data = defaultData()
+	else
+		migrate(data)
+	end
+	if not player.Parent then
+		return
+	end
+	profiles[player] = { Data = data, Dirty = noSave == false and false, NoSave = noSave }
+	for _, cb in ipairs(loadedCallbacks) do
+		task.spawn(cb, player, data)
+	end
+end
+
+function DataService.IsPersistent(player: Player): boolean
+	local p = profiles[player]
+	return p ~= nil and not p.NoSave and store ~= nil
+end
+
+function DataService.Init()
+	Players.PlayerAdded:Connect(load)
+	for _, p in ipairs(Players:GetPlayers()) do
+		task.spawn(load, p)
+	end
+
+	Players.PlayerRemoving:Connect(function(player)
+		DataService.Save(player, true)
+		profiles[player] = nil
+	end)
+
+	task.spawn(function()
+		while true do
+			task.wait(Config.Data.AutosaveInterval)
+			for player in pairs(profiles) do
+				task.spawn(DataService.Save, player)
+			end
+		end
+	end)
+
+	game:BindToClose(function()
+		for player in pairs(profiles) do
+			task.spawn(DataService.Save, player, true)
+		end
+		if not RunService:IsStudio() then
+			task.wait(3)
+		end
+	end)
+end
+
+return DataService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="13">
+          <Properties>
+            <string name="Name">DigService</string>
+            <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
+-- everything else: which tool, damage, cooldown, reach, target validity, loot and rewards.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local DataService = require(script.Parent.DataService)
+local SiteService = require(script.Parent.SiteService)
+local LootService = require(script.Parent.LootService)
+local StateService = require(script.Parent.StateService)
+local RateLimiter = require(script.Parent.RateLimiter)
+
+local DigService = {}
+
+local lastHit: { [Player]: number } = {}
+local digResult = Remotes.Get("DigResult")
+
+local function isInt(n: any): boolean
+	return type(n) == "number" and n == math.floor(n) and n == n and math.abs(n) < 1e6
+end
+
+local function handleHit(player: Player, x: any, y: any, z: any)
+	if not (isInt(x) and isInt(y) and isInt(z)) then
+		return
+	end
+	if not RateLimiter.Check(player, "DigHit") then
+		return
+	end
+	if not Grid.InBounds(x, y, z) then
+		return
+	end
+	local data = DataService.Get(player)
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not data or not hrp or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	local tool = Defs.Tools[data.Equipment.ToolId]
+	local now = os.clock()
+	if now - (lastHit[player] or 0) < (1 / tool.Rate) * Config.Dig.CooldownTolerance then
+		return
+	end
+
+	local idx = Grid.ToIndex(x, y, z)
+	if not SiteService.IsExposed(idx) then
+		return
+	end
+	local center = Grid.CellCenter(x, y, z)
+	local maxDist = tool.Reach + Config.Dig.ReachPadding + Grid.CellSize
+	if (hrp.Position - center).Magnitude > maxDist then
+		return
+	end
+	lastHit[player] = now
+
+	-- Resolve target + splash
+	local targets = { { idx, tool.Power } }
+	for _, ni in ipairs(SiteService.ExposedNeighbours(idx, tool.DigRadius)) do
+		table.insert(targets, { ni, tool.Power * Config.Dig.SplashFraction })
+	end
+
+	local hits = {}
+	local destroyed = {}
+	for _, t in ipairs(targets) do
+		local frac, dead, treasureId = SiteService.Damage(t[1], t[2])
+		table.insert(hits, { t[1], frac, dead and 1 or 0 })
+		if dead then
+			table.insert(destroyed, t[1])
+			data.Stats.BlocksDug += 1
+			local _, cy = Grid.FromIndex(t[1])
+			local depthM = (cy + 1) * Grid.CellSize / Config.Site.StudsPerMeter
+			if depthM > data.Stats.DeepestDepth then
+				data.Stats.DeepestDepth = math.floor(depthM)
+			end
+			if treasureId then
+				LootService.Award(player, treasureId, t[1])
+			end
+		end
+	end
+	for _, di in ipairs(destroyed) do
+		SiteService.ExposeAround(di)
+	end
+	DataService.MarkDirty(player)
+
+	-- Feedback to everyone nearby (cosmetic only)
+	local payload = { Digger = player.UserId, Hits = hits }
+	for _, other in ipairs(Players:GetPlayers()) do
+		local oh = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
+		if other == player or (oh and (oh.Position - center).Magnitude <= Config.Dig.MaxBroadcastDistance) then
+			digResult:FireClient(other, payload)
+		end
+	end
+	if #destroyed > 0 then
+		StateService.Push(player)
+	end
+end
+
+function DigService.Init()
+	Remotes.Get("DigHit").OnServerEvent:Connect(handleHit)
+	Players.PlayerRemoving:Connect(function(player)
+		lastHit[player] = nil
+		RateLimiter.Forget(player)
+		LootService.Forget(player)
+	end)
+end
+
+return DigService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="14">
+          <Properties>
+            <string name="Name">EconomyService</string>
+            <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local DataService = require(script.Parent.DataService)
+local InventoryService = require(script.Parent.InventoryService)
+local StateService = require(script.Parent.StateService)
+local EquipmentService = require(script.Parent.EquipmentService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+local RateLimiter = require(script.Parent.RateLimiter)
+local AnalyticsService = require(script.Parent.AnalyticsService)
+
+local EconomyService = {}
+
+local soldRemote = Remotes.Get("Sold")
+local notifyRemote = Remotes.Get("Notify")
+local lastSell: { [Player]: number } = {}
+local lastReturn: { [Player]: number } = {}
+
+function EconomyService.SellAll(player: Player)
+	local data = DataService.Get(player)
+	if not data then
+		return
+	end
+	local count, value = InventoryService.TakeAll(player)
+	if count <= 0 then
+		return
+	end
+	data.Cash += value
+	data.Stats.CashEarned += value
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+	soldRemote:FireClient(player, value, count)
+	AnalyticsService.Log(player, "Sell", { value = value, count = count })
+end
+
+local function inSellZone(player: Player): boolean
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return false
+	end
+	local d = hrp.Position - WorldBuilder.SellZoneCenter
+	return Vector3.new(d.X, 0, d.Z).Magnitude <= Config.Camp.SellZoneRadius and math.abs(d.Y) < 10
+end
+
+local function purchase(player: Player, kind: any, id: any)
+	if type(kind) ~= "string" or type(id) ~= "string" then
+		return
+	end
+	if not RateLimiter.Check(player, "RequestPurchase") then
+		return
+	end
+	local data = DataService.Get(player)
+	if not data then
+		return
+	end
+	local def, owned
+	if kind == "Tool" then
+		def, owned = Defs.Tools[id], data.OwnedTools
+	elseif kind == "Backpack" then
+		def, owned = Defs.Backpacks[id], data.OwnedBackpacks
+	end
+	if not def or def.Price <= 0 then
+		return
+	end
+	if owned[id] then
+		notifyRemote:FireClient(player, "You already own that.", "Info")
+		return
+	end
+	if (data.Reputation or 0) < def.RequiredReputation then
+		notifyRemote:FireClient(player, "Not enough Reputation.", "Danger")
+		return
+	end
+	if data.Cash < def.Price then
+		notifyRemote:FireClient(player, "Not enough Cash!", "Danger")
+		return
+	end
+
+	data.Cash -= def.Price
+	owned[id] = true
+	if kind == "Tool" then
+		data.Equipment.ToolId = id
+	else
+		data.Equipment.BackpackId = id
+	end
+	DataService.MarkDirty(player)
+	StateService.Push(player)
+	if kind == "Tool" then
+		EquipmentService.Refresh(player)
+	end
+	notifyRemote:FireClient(player, ("Bought %s!"):format(def.DisplayName), "Good")
+	AnalyticsService.Log(player, "Purchase", { kind = kind, id = id, price = def.Price })
+end
+
+local function returnToCamp(player: Player)
+	if not Config.ReturnToCamp.Enabled or not RateLimiter.Check(player, "ReturnToCamp") then
+		return
+	end
+	local now = os.clock()
+	local wait = Config.ReturnToCamp.Cooldown - (now - (lastReturn[player] or -1e9))
+	if wait > 0 then
+		notifyRemote:FireClient(player, ("Return to Camp ready in %ds"):format(math.ceil(wait)), "Info")
+		return
+	end
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		lastReturn[player] = now
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = WorldBuilder.SpawnCFrame
+	end
+end
+
+function EconomyService.Init()
+	Remotes.Get("RequestPurchase").OnServerEvent:Connect(purchase)
+	Remotes.Get("ReturnToCamp").OnServerEvent:Connect(returnToCamp)
+
+	local acc = 0
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.25 then
+			return
+		end
+		acc = 0
+		if not Config.Backpack.AutoSellEnabled then
+			return
+		end
+		local now = os.clock()
+		for _, player in ipairs(Players:GetPlayers()) do
+			if now - (lastSell[player] or 0) >= Config.Backpack.SellCooldown and inSellZone(player) then
+				local data = DataService.Get(player)
+				if data and InventoryService.Count(data) > 0 then
+					lastSell[player] = now
+					EconomyService.SellAll(player)
+				end
+			end
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function(p)
+		lastSell[p] = nil
+		lastReturn[p] = nil
+	end)
+end
+
+return EconomyService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="15">
+          <Properties>
+            <string name="Name">EquipmentService</string>
+            <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Config = require(ReplicatedStorage.Shared.Config)
+local DataService = require(script.Parent.DataService)
+
+local EquipmentService = {}
+
+local function buildShovel(toolId: string): Tool
+	local def = Defs.Tools[toolId]
+	local s = def.Scale
+	local P = Config.Palette
+
+	local tool = Instance.new("Tool")
+	tool.Name = "Shovel"
+	tool.CanBeDropped = false
+	tool.ManualActivationOnly = true
+	tool.RequiresHandle = true
+	tool.ToolTip = def.DisplayName
+	tool:SetAttribute("ToolId", toolId)
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Size = Vector3.new(0.5, 4.2 * s, 0.5)
+	handle.Color = P.Dark
+	handle.Material = Enum.Material.Wood
+	handle.CanCollide = false
+	handle.Massless = true
+	handle.Parent = tool
+
+	local function add(name: string, size: Vector3, offset: Vector3, color: Color3)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size
+		p.Color = color
+		p.Material = Enum.Material.SmoothPlastic
+		p.CanCollide = false
+		p.Massless = true
+		p.Parent = tool
+		local w = Instance.new("Weld")
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = CFrame.new(offset)
+		w.Parent = p
+	end
+	add("Blade", Vector3.new(1.8 * s, 1.7 * s, 0.3 * s), Vector3.new(0, 2.5 * s, 0), def.Color)
+	add("Grip", Vector3.new(1.5 * s, 0.4, 0.4), Vector3.new(0, -2.1 * s, 0), P.Dark)
+	if def.DigRadius > 0 then
+		add("Spike", Vector3.new(0.5 * s, 0.9 * s, 0.4 * s), Vector3.new(0, 3.7 * s, 0), P.Gold)
+	end
+
+	tool.Grip = CFrame.new(0, -1.0 * s, 0)
+	return tool
+end
+
+local function clearTools(player: Player)
+	for _, container in ipairs({ player:FindFirstChild("Backpack"), player.Character }) do
+		if container then
+			for _, child in ipairs(container:GetChildren()) do
+				if child:IsA("Tool") and child.Name == "Shovel" then
+					child:Destroy()
+				end
+			end
+		end
+	end
+end
+
+function EquipmentService.Refresh(player: Player)
+	local data = DataService.Get(player)
+	local character = player.Character
+	if not data or not character then
+		return
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return
+	end
+	clearTools(player)
+	local tool = buildShovel(data.Equipment.ToolId)
+	tool.Parent = player:WaitForChild("Backpack")
+	humanoid:EquipTool(tool)
+end
+
+function EquipmentService.Init()
+	local function onCharacter(player: Player, character: Model)
+		-- Wait for data, then give the shovel.
+		task.spawn(function()
+			local t = os.clock()
+			while not DataService.Get(player) and os.clock() - t < 30 and player.Parent do
+				task.wait(0.1)
+			end
+			character:WaitForChild("Humanoid")
+			character:WaitForChild("HumanoidRootPart")
+			task.wait(0.1)
+			if player.Character == character then
+				EquipmentService.Refresh(player)
+			end
+			-- Keep the shovel in hand: if it ever gets unequipped, put it back next frame.
+			character.ChildRemoved:Connect(function(child)
+				if child:IsA("Tool") and child.Name == "Shovel" and child.Parent == player:FindFirstChild("Backpack") then
+					task.defer(function()
+						local h = character:FindFirstChildOfClass("Humanoid")
+						if h and h.Health > 0 and child.Parent == player.Backpack then
+							h:EquipTool(child)
+						end
+					end)
+				end
+			end)
+		end)
+	end
+
+	local function onPlayer(player: Player)
+		player.CharacterAdded:Connect(function(char)
+			onCharacter(player, char)
+		end)
+		if player.Character then
+			onCharacter(player, player.Character)
+		end
+	end
+	Players.PlayerAdded:Connect(onPlayer)
+	for _, p in ipairs(Players:GetPlayers()) do
+		onPlayer(p)
+	end
+end
+
+return EquipmentService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="16">
+          <Properties>
+            <string name="Name">InventoryService</string>
+            <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local DataService = require(script.Parent.DataService)
+
+local InventoryService = {}
+
+function InventoryService.Capacity(data): number
+	return Defs.Backpacks[data.Equipment.BackpackId].Capacity
+end
+
+function InventoryService.Count(data): number
+	local n = 0
+	for _, c in pairs(data.BackpackItems) do
+		n += c
+	end
+	return n
+end
+
+function InventoryService.Value(data): number
+	local v = 0
+	for id, c in pairs(data.BackpackItems) do
+		local def = Defs.Treasure[id]
+		if def then
+			v += def.Value * c
+		end
+	end
+	return v
+end
+
+function InventoryService.IsFull(data): boolean
+	return InventoryService.Count(data) >= InventoryService.Capacity(data)
+end
+
+-- Returns true if stored, false if the backpack was full.
+function InventoryService.Add(player: Player, treasureId: string): boolean
+	local data = DataService.Get(player)
+	if not data or not Defs.Treasure[treasureId] then
+		return false
+	end
+	if InventoryService.IsFull(data) then
+		return false
+	end
+	data.BackpackItems[treasureId] = (data.BackpackItems[treasureId] or 0) + 1
+	DataService.MarkDirty(player)
+	return true
+end
+
+-- Empties the backpack and returns what was in it (and its sell value, priced by the server).
+function InventoryService.TakeAll(player: Player): (number, number)
+	local data = DataService.Get(player)
+	if not data then
+		return 0, 0
+	end
+	local count, value = InventoryService.Count(data), InventoryService.Value(data)
+	data.BackpackItems = {}
+	DataService.MarkDirty(player)
+	return count, value
+end
+
+return InventoryService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="17">
+          <Properties>
+            <string name="Name">LootService</string>
+            <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
+-- decides what drops (the table was rolled with a server-side seed at site generation).
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+
+local DataService = require(script.Parent.DataService)
+local InventoryService = require(script.Parent.InventoryService)
+local AnalyticsService = require(script.Parent.AnalyticsService)
+
+local LootService = {}
+local treasureRemote = Remotes.Get("TreasureFound")
+local notifyRemote = Remotes.Get("Notify")
+local lastFullWarn: { [Player]: number } = {}
+
+-- Returns true if the treasure ended up in the backpack.
+function LootService.Award(player: Player, treasureId: string, cellIndex: number): boolean
+	local data = DataService.Get(player)
+	local def = Defs.Treasure[treasureId]
+	if not data or not def then
+		return false
+	end
+	local x, y, z = Grid.FromIndex(cellIndex)
+	local stored = InventoryService.Add(player, treasureId)
+
+	local entry = data.Collection[treasureId]
+	local isNew = false
+	if stored then
+		if not entry then
+			entry = { Count = 0, FirstFound = os.time() }
+			data.Collection[treasureId] = entry
+			isNew = true
+		end
+		entry.Count += 1
+		data.Stats.TreasureFound += 1
+	end
+
+	treasureRemote:FireClient(player, {
+		Id = treasureId,
+		Position = Grid.CellCenter(x, y, z),
+		Stored = stored,
+		IsNew = isNew,
+	})
+
+	if not stored then
+		local now = os.clock()
+		if now - (lastFullWarn[player] or 0) > 2 then
+			lastFullWarn[player] = now
+			notifyRemote:FireClient(player, "BACKPACK FULL! Treasure lost - return to Base Camp to sell!", "Danger")
+		end
+	end
+	AnalyticsService.Log(player, "TreasureFound", { id = treasureId, stored = stored })
+	return stored
+end
+
+function LootService.Forget(player: Player)
+	lastFullWarn[player] = nil
+end
+
+return LootService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="18">
+          <Properties>
+            <string name="Name">RateLimiter</string>
+            <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
+local Config = require(game:GetService("ReplicatedStorage").Shared.Config)
+
+local RateLimiter = {}
+local buckets: { [Player]: { [string]: { number } } } = {}
+
+function RateLimiter.Check(player: Player, name: string): boolean
+	local limit = Config.RateLimits[name]
+	if not limit then
+		return true
+	end
+	local maxCalls, window = limit[1], limit[2]
+	local perPlayer = buckets[player]
+	if not perPlayer then
+		perPlayer = {}
+		buckets[player] = perPlayer
+	end
+	local log = perPlayer[name]
+	if not log then
+		log = {}
+		perPlayer[name] = log
+	end
+	local now = os.clock()
+	local keep = {}
+	for _, t in ipairs(log) do
+		if now - t < window then
+			table.insert(keep, t)
+		end
+	end
+	if #keep >= maxCalls then
+		perPlayer[name] = keep
+		return false
+	end
+	table.insert(keep, now)
+	perPlayer[name] = keep
+	return true
+end
+
+function RateLimiter.Forget(player: Player)
+	buckets[player] = nil
+end
+
+return RateLimiter
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="19">
+          <Properties>
+            <string name="Name">SiteService</string>
+            <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
+-- *exposed* cells (those touching air), so the instance count stays tiny even for a big site.
+-- Generation is seeded, so the site can be reset/regenerated cleanly (future "Excavation Shift").
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+
+local SiteService = {}
+
+local health: { number } = {}
+local maxHealth: { number } = {}
+local loot: { [number]: string } = {}
+local parts: { [number]: Part } = {}
+local tints: { number } = {}
+local folder: Folder
+local generation = 0
+
+local function spawnPart(idx: number)
+	if parts[idx] then
+		return
+	end
+	local x, y, z = Grid.FromIndex(idx)
+	local layer = Defs.LayerAtCell(y)
+	local part = Instance.new("Part")
+	part.Name = tostring(idx)
+	part.Anchored = true
+	part.Size = Vector3.one * Grid.CellSize
+	part.Position = Grid.CellCenter(x, y, z)
+	part.Material = Enum.Material.SmoothPlastic
+	part.Color = layer.Color:Lerp(tints[idx] > 0 and Color3.new(1, 1, 1) or Color3.new(0, 0, 0), math.abs(tints[idx]))
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.CanTouch = false
+	part.Parent = folder
+	parts[idx] = part
+end
+
+function SiteService.Generate(seed: number?)
+	generation += 1
+	seed = seed or Config.Site.Seed
+	if folder then
+		folder:Destroy()
+	end
+	folder = Instance.new("Folder")
+	folder.Name = "DigSite"
+	folder.Parent = Workspace
+
+	table.clear(health)
+	table.clear(maxHealth)
+	table.clear(loot)
+	table.clear(parts)
+	table.clear(tints)
+
+	local rng = Random.new(seed)
+	for idx = 1, Grid.Count do
+		local _, y = Grid.FromIndex(idx)
+		local layer = Defs.LayerAtCell(y)
+		health[idx] = layer.Health
+		maxHealth[idx] = layer.Health
+		tints[idx] = (rng:NextNumber() - 0.5) * 0.16
+		if rng:NextNumber() < layer.TreasureChance then
+			local id = Defs.PickTreasure(layer.Id, rng)
+			if id then
+				loot[idx] = id
+			end
+		end
+	end
+
+	-- Instance only the cells that start exposed (the top surface row).
+	for idx = 1, Grid.Count do
+		local _, y = Grid.FromIndex(idx)
+		if y == 0 then
+			spawnPart(idx)
+		end
+	end
+	return generation
+end
+
+function SiteService.IsAlive(idx: number): boolean
+	return (health[idx] or 0) > 0
+end
+
+function SiteService.IsExposed(idx: number): boolean
+	return parts[idx] ~= nil and (health[idx] or 0) > 0
+end
+
+function SiteService.GetPart(idx: number): Part?
+	return parts[idx]
+end
+
+-- Applies damage. Returns (newHealthFraction, destroyed, treasureId?). Does NOT expose neighbours;
+-- call SiteService.ExposeAround for destroyed cells once a whole hit has been resolved.
+function SiteService.Damage(idx: number, amount: number): (number, boolean, string?)
+	local hp = health[idx]
+	if not hp or hp <= 0 then
+		return 0, false, nil
+	end
+	hp -= amount
+	if hp <= 0 then
+		health[idx] = 0
+		local treasure = loot[idx]
+		loot[idx] = nil
+		local part = parts[idx]
+		parts[idx] = nil
+		if part then
+			part:Destroy()
+		end
+		return 0, true, treasure
+	end
+	health[idx] = hp
+	return hp / maxHealth[idx], false, nil
+end
+
+function SiteService.ExposeAround(idx: number)
+	local x, y, z = Grid.FromIndex(idx)
+	for _, n in ipairs(Grid.Neighbours6) do
+		local nx, ny, nz = x + n[1], y + n[2], z + n[3]
+		if Grid.InBounds(nx, ny, nz) then
+			local ni = Grid.ToIndex(nx, ny, nz)
+			if health[ni] > 0 and not parts[ni] then
+				spawnPart(ni)
+			end
+		end
+	end
+end
+
+-- Cells (that currently have a Part) within `radius` cells (Chebyshev) of the target, excluding it.
+function SiteService.ExposedNeighbours(idx: number, radius: number): { number }
+	local out = {}
+	if radius <= 0 then
+		return out
+	end
+	local x, y, z = Grid.FromIndex(idx)
+	for dx = -radius, radius do
+		for dy = -radius, radius do
+			for dz = -radius, radius do
+				if not (dx == 0 and dy == 0 and dz == 0) then
+					local nx, ny, nz = x + dx, y + dy, z + dz
+					if Grid.InBounds(nx, ny, nz) then
+						local ni = Grid.ToIndex(nx, ny, nz)
+						if parts[ni] and health[ni] > 0 then
+							table.insert(out, ni)
+						end
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
+return SiteService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="20">
+          <Properties>
+            <string name="Name">StateService</string>
+            <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local DataService = require(script.Parent.DataService)
+local InventoryService = require(script.Parent.InventoryService)
+
+local StateService = {}
+local pending: { [Player]: boolean } = {}
+local stateRemote = Remotes.Get("PlayerState")
+
+function StateService.Snapshot(player: Player)
+	local data = DataService.Get(player)
+	if not data then
+		return nil
+	end
+	return {
+		Cash = data.Cash,
+		Reputation = data.Reputation,
+		Count = InventoryService.Count(data),
+		Capacity = InventoryService.Capacity(data),
+		BackpackValue = InventoryService.Value(data),
+		ToolId = data.Equipment.ToolId,
+		BackpackId = data.Equipment.BackpackId,
+		OwnedTools = data.OwnedTools,
+		OwnedBackpacks = data.OwnedBackpacks,
+		Stats = data.Stats,
+	}
+end
+
+function StateService.Push(player: Player)
+	if pending[player] then
+		return
+	end
+	pending[player] = true
+	task.defer(function()
+		pending[player] = nil
+		if player.Parent then
+			local snap = StateService.Snapshot(player)
+			if snap then
+				stateRemote:FireClient(player, snap)
+			end
+		end
+	end)
+end
+
+return StateService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="21">
+          <Properties>
+            <string name="Name">WorldBuilder</string>
+            <string name="Source"><![CDATA[-- Builds the graybox world (lighting, ground, Base Camp, Sell Zone, Shop) from code, idempotently:
+-- anything it made before is destroyed first, so nothing is ever duplicated.
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+
+local P = Config.Palette
+local WorldBuilder = {}
+
+WorldBuilder.SellZoneCenter = Config.Camp.Position + Config.Camp.SellZoneOffset
+WorldBuilder.SpawnCFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 4, 16))
+
+local function part(parent: Instance, name: string, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?): Part
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Anchored = true
+	p.Size = size
+	p.CFrame = cf
+	p.Color = color
+	p.Material = material or Enum.Material.SmoothPlastic
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Parent = parent
+	return p
+end
+
+local function sign(parent: Part, text: string, color: Color3, studsAbove: number, size: UDim2)
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "Sign"
+	gui.Size = size
+	gui.StudsOffset = Vector3.new(0, studsAbove, 0)
+	gui.AlwaysOnTop = true
+	gui.MaxDistance = 400
+	gui.Parent = parent
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextColor3 = color
+	label.TextStrokeTransparency = 0
+	label.TextStrokeColor3 = P.Dark
+	label.Font = Enum.Font.FredokaOne
+	label.TextScaled = true
+	label.Parent = gui
+end
+
+function WorldBuilder.Build()
+	local old = Workspace:FindFirstChild("World")
+	if old then
+		old:Destroy()
+	end
+	local world = Instance.new("Folder")
+	world.Name = "World"
+	world.Parent = Workspace
+
+	-- Lighting: warm afternoon
+	Lighting.ClockTime = 15.5
+	Lighting.Brightness = 2.4
+	Lighting.Ambient = Color3.fromHex("8A7A68")
+	Lighting.OutdoorAmbient = Color3.fromHex("9C8B77")
+	Lighting.ColorShift_Top = Color3.fromHex("FFE2B0")
+	Lighting.EnvironmentDiffuseScale = 0.5
+	Lighting.EnvironmentSpecularScale = 0.2
+	if not Lighting:FindFirstChild("DigAtmosphere") then
+		local atm = Instance.new("Atmosphere")
+		atm.Name = "DigAtmosphere"
+		atm.Density = 0.25
+		atm.Color = Color3.fromHex("F0D9B5")
+		atm.Decay = Color3.fromHex("C9985F")
+		atm.Haze = 1.2
+		atm.Parent = Lighting
+	end
+
+	-- Ground: four slabs around the dig footprint, thick enough that you never see void beside the shaft.
+	local half = Config.Site.SizeX * Config.Site.CellSize / 2
+	local halfZ = Config.Site.SizeZ * Config.Site.CellSize / 2
+	local ext = 170
+	local thickness = Config.Site.Depth * Config.Site.CellSize + 12
+	local cy = Grid.SurfaceY - thickness / 2
+	local ground = Instance.new("Folder")
+	ground.Name = "Ground"
+	ground.Parent = world
+	local function slab(name: string, x0: number, x1: number, z0: number, z1: number)
+		part(ground, name, Vector3.new(x1 - x0, thickness, z1 - z0),
+			CFrame.new((x0 + x1) / 2, cy, (z0 + z1) / 2), P.Sandstone, Enum.Material.Sand)
+	end
+	slab("North", -ext, ext, -ext, -halfZ)
+	slab("South", -ext, ext, halfZ, ext)
+	slab("West", -ext, -half, -halfZ, halfZ)
+	slab("East", half, ext, -halfZ, halfZ)
+
+	-- Bedrock under the shaft
+	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
+	part(world, "Bedrock", Vector3.new(half * 2, 8, halfZ * 2), CFrame.new(0, floorY - 4, 0), P.Dark, Enum.Material.Slate)
+
+	-- Invisible boundary walls so nobody wanders off the map
+	for i, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+		local wall = part(world, "Boundary" .. i,
+			Vector3.new(d[1] ~= 0 and 2 or ext * 2, 120, d[2] ~= 0 and 2 or ext * 2),
+			CFrame.new(d[1] * ext, 50, d[2] * ext), P.Dark)
+		wall.Transparency = 1
+	end
+
+	-- Rim posts around the pit so the site reads from afar
+	for i = 0, 7 do
+		local ang = i / 8 * math.pi * 2
+		local r = math.max(half, halfZ) * 1.5
+		part(world, "RimPost" .. i, Vector3.new(2, Config.Site.BorderHeight, 2),
+			CFrame.new(math.cos(ang) * r, Config.Site.BorderHeight / 2, math.sin(ang) * r), P.Clay)
+	end
+
+	-- Base Camp
+	local camp = Instance.new("Folder")
+	camp.Name = "BaseCamp"
+	camp.Parent = world
+	local c = Config.Camp
+	part(camp, "CampFloor", Vector3.new(c.Size.X, 0.5, c.Size.Z), CFrame.new(c.Position + Vector3.new(0, 0.25, 0)), P.Cream)
+
+	local spawn = Instance.new("SpawnLocation")
+	spawn.Name = "CampSpawn"
+	spawn.Anchored = true
+	spawn.Size = Vector3.new(10, 1, 10)
+	spawn.CFrame = CFrame.new(c.Position + Vector3.new(0, 0.5, 16))
+	spawn.Neutral = true
+	spawn.Duration = 0
+	spawn.Color = P.Gold
+	spawn.Material = Enum.Material.SmoothPlastic
+	spawn.TopSurface = Enum.SurfaceType.Smooth
+	spawn.Parent = camp
+	WorldBuilder.SpawnCFrame = CFrame.new(spawn.Position + Vector3.new(0, 4, 0))
+
+	-- Sell Zone
+	local sz = WorldBuilder.SellZoneCenter
+	local pad = part(camp, "SellZone", Vector3.new(c.SellZoneRadius * 2, 0.4, c.SellZoneRadius * 2),
+		CFrame.new(sz + Vector3.new(0, 0.7, 0)), P.Gold)
+	pad.Shape = Enum.PartType.Cylinder
+	pad.CFrame = CFrame.new(sz + Vector3.new(0, 0.7, 0)) * CFrame.Angles(0, 0, math.rad(90))
+	pad.Size = Vector3.new(0.4, c.SellZoneRadius * 2, c.SellZoneRadius * 2)
+	local post = part(camp, "SellPost", Vector3.new(1.5, 14, 1.5), CFrame.new(sz + Vector3.new(0, 7.5, 0)), P.Dark)
+	sign(post, "SELL ZONE", P.Gold, 6, UDim2.fromOffset(240, 60))
+
+	-- Shop stall
+	local sp = c.Position + c.ShopOffset
+	part(camp, "ShopCounter", Vector3.new(12, 4, 4), CFrame.new(sp + Vector3.new(0, 2.5, 0)), P.Clay)
+	part(camp, "ShopBack", Vector3.new(12, 10, 1), CFrame.new(sp + Vector3.new(0, 5.5, -3)), P.Dark)
+	part(camp, "ShopRoof", Vector3.new(14, 1, 7), CFrame.new(sp + Vector3.new(0, 11, -1)), P.Danger)
+	local anchor = part(camp, "ShopAnchor", Vector3.new(2, 2, 2), CFrame.new(sp + Vector3.new(0, 5.5, 0)), P.Teal)
+	anchor.Transparency = 1
+	anchor.CanCollide = false
+	sign(anchor, "EQUIPMENT SHOP", P.Teal, 5, UDim2.fromOffset(260, 56))
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "ShopPrompt"
+	prompt.ObjectText = "Equipment Shop"
+	prompt.ActionText = "Browse"
+	prompt.HoldDuration = 0
+	prompt.MaxActivationDistance = 14
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = anchor
+
+	-- Dig-site welcome sign
+	local board = part(camp, "SiteBoard", Vector3.new(14, 6, 1), CFrame.new(Vector3.new(0, 6, halfZ + 8)), P.Dark)
+	sign(board, "DIG HERE  ▼", P.Cream, 0, UDim2.fromOffset(280, 70))
+
+	return world
+end
+
+return WorldBuilder
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="22">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="23">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="Folder" referent="24">
+        <Properties>
+          <string name="Name">Client</string>
+        </Properties>
+        <Item class="Folder" referent="25">
+          <Properties>
+            <string name="Name">Controllers</string>
+          </Properties>
+          <Item class="ModuleScript" referent="26">
+            <Properties>
+              <string name="Name">AudioController</string>
+              <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
+-- The defaults are Roblox's built-in client sounds (placeholders). Set Id = "" to silence one.
+local SoundService = game:GetService("SoundService")
+local Debris = game:GetService("Debris")
+
+local Audio = {}
+
+Audio.Sounds = {
+	Impact = { Id = "rbxasset://sounds/action_jump_land.mp3", Volume = 0.8, Pitch = 0.8 },
+	Break = { Id = "rbxasset://sounds/snap.mp3", Volume = 0.9, Pitch = 0.7 },
+	Coin = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.5, Pitch = 1.3 },
+	Reveal = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.8, Pitch = 1.0 },
+	Sell = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.9, Pitch = 0.8 },
+	Buy = { Id = "rbxasset://sounds/electronicpingshort.wav", Volume = 0.9, Pitch = 1.5 },
+	Error = { Id = "rbxasset://sounds/uuhhh.mp3", Volume = 0.4, Pitch = 1.2 },
+	UI = { Id = "rbxasset://sounds/switch.wav", Volume = 0.5, Pitch = 1.0 },
+}
+
+function Audio.Play(name: string, pitchMul: number?, volumeMul: number?)
+	local def = Audio.Sounds[name]
+	if not def or def.Id == "" then
+		return
+	end
+	local s = Instance.new("Sound")
+	s.SoundId = def.Id
+	s.Volume = def.Volume * (volumeMul or 1)
+	s.PlaybackSpeed = def.Pitch * (pitchMul or 1)
+	s.Parent = SoundService
+	s:Play()
+	Debris:AddItem(s, 4)
+end
+
+return Audio
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="27">
+            <Properties>
+              <string name="Name">DigController</string>
+              <string name="Source"><![CDATA[-- Input + targeting for digging. Desktop: hold click/tap on dirt. Mobile: tap/hold the dirt, or hold the DIG button
+-- (auto-aims forward-down). The client only *requests* hits; the server validates everything.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local State = require(script.Parent.State)
+local Effects = require(script.Parent.EffectsController)
+local UI = require(script.Parent.UIController)
+
+local P = Config.Palette
+local player = Players.LocalPlayer
+local DigController = {}
+
+local FEEL = {
+	SwingPitchSign = 1, -- flip to -1 if the shovel swings the wrong way
+	SwingWindup = 0.9, -- radians
+	SwingStrike = 0.7,
+}
+
+local TOUCH = UserInputService.TouchEnabled
+local digHit = Remotes.Get("DigHit")
+
+local pointerHeld = false
+local pointerPos: Vector2? = nil
+local buttonHeld = false
+local lastSent = 0
+local targetBox: SelectionBox
+local swingToken = 0
+
+local function viewportPos(input: InputObject): Vector2
+	return Vector2.new(input.Position.X, input.Position.Y) + GuiService:GetGuiInset()
+end
+
+local function siteParams(): RaycastParams?
+	local site = Workspace:FindFirstChild("DigSite")
+	if not site then
+		return nil
+	end
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Include
+	rp.FilterDescendantsInstances = { site }
+	return rp
+end
+
+local function castResult(origin: Vector3, dir: Vector3): (Part?, Vector3?, Vector3?)
+	local rp = siteParams()
+	if not rp then
+		return nil
+	end
+	local r = Workspace:Raycast(origin, dir, rp)
+	if r and r.Instance:IsA("Part") and tonumber(r.Instance.Name) then
+		return r.Instance, r.Position, r.Normal
+	end
+	return nil
+end
+
+local function aimFromScreen(vp: Vector2): (Part?, Vector3?, Vector3?)
+	local cam = Workspace.CurrentCamera
+	local ray = cam:ViewportPointToRay(vp.X, vp.Y)
+	return castResult(ray.Origin, ray.Direction * 300)
+end
+
+local function aimAuto(): (Part?, Vector3?, Vector3?)
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return nil
+	end
+	local reach = State.Tool().Reach
+	local origin = hrp.Position + Vector3.new(0, 1, 0)
+	local look = hrp.CFrame.LookVector
+	local dirs = {
+		(look + Vector3.new(0, -1, 0)).Unit,
+		(look * 1.5 + Vector3.new(0, -0.4, 0)).Unit,
+		Vector3.new(0, -1, 0),
+	}
+	for _, d in ipairs(dirs) do
+		local part, pos, normal = castResult(origin, d * (reach + 2))
+		if part then
+			return part, pos, normal
+		end
+	end
+	return nil
+end
+
+local function inReach(part: Part): boolean
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return false
+	end
+	return (hrp.Position - part.Position).Magnitude <= State.Tool().Reach + Grid.CellSize
+end
+
+local function swing(interval: number)
+	local char = player.Character
+	local tool = char and char:FindFirstChild("Shovel")
+	if not tool or not tool:IsA("Tool") then
+		return
+	end
+	local base = tool:FindFirstChild("BaseGripValue")
+	if not base then
+		base = Instance.new("CFrameValue")
+		base.Name = "BaseGripValue"
+		base.Value = tool.Grip
+		base.Parent = tool
+	end
+	swingToken += 1
+	local token = swingToken
+	local sign = FEEL.SwingPitchSign
+	local t = math.min(interval, 0.5)
+	local g = base.Value
+	TweenService:Create(tool, TweenInfo.new(t * 0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Grip = g * CFrame.Angles(-sign * FEEL.SwingWindup, 0, 0) }):Play()
+	task.delay(t * 0.3, function()
+		if token ~= swingToken or not tool.Parent then
+			return
+		end
+		TweenService:Create(tool, TweenInfo.new(t * 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{ Grip = g * CFrame.Angles(sign * FEEL.SwingStrike, 0, 0) }):Play()
+		task.delay(t * 0.2, function()
+			if token ~= swingToken or not tool.Parent then
+				return
+			end
+			TweenService:Create(tool, TweenInfo.new(t * 0.35, Enum.EasingStyle.Quad), { Grip = g }):Play()
+		end)
+	end)
+end
+
+local function faceTarget(pos: Vector3)
+	local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return
+	end
+	local flat = Vector3.new(pos.X - hrp.Position.X, 0, pos.Z - hrp.Position.Z)
+	if flat.Magnitude > 1.5 then
+		hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + flat)
+	end
+end
+
+local function currentAim(): (Part?, Vector3?, Vector3?)
+	if buttonHeld then
+		return aimAuto()
+	end
+	if pointerHeld and pointerPos then
+		return aimFromScreen(pointerPos)
+	end
+	if not TOUCH then
+		return aimFromScreen(UserInputService:GetMouseLocation())
+	end
+	return nil
+end
+
+function DigController.Init()
+	targetBox = Instance.new("SelectionBox")
+	targetBox.Name = "DigTarget"
+	targetBox.LineThickness = 0.07
+	targetBox.Color3 = P.Gold
+	targetBox.SurfaceColor3 = P.Gold
+	targetBox.SurfaceTransparency = 0.85
+	targetBox.Parent = Workspace
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			pointerHeld = true
+			pointerPos = viewportPos(input)
+		elseif input.KeyCode == Enum.KeyCode.ButtonR2 or input.KeyCode == Enum.KeyCode.ButtonA then
+			buttonHeld = true
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if pointerHeld and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			pointerPos = viewportPos(input)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			pointerHeld = false
+		elseif input.KeyCode == Enum.KeyCode.ButtonR2 or input.KeyCode == Enum.KeyCode.ButtonA then
+			buttonHeld = false
+		end
+	end)
+
+	-- Mobile DIG button
+	if TOUCH then
+		local btn = Instance.new("TextButton")
+		btn.Name = "DigButton"
+		btn.Size = UDim2.fromOffset(104, 104)
+		btn.AnchorPoint = Vector2.new(1, 1)
+		btn.Position = UDim2.new(1, -120, 1, -150)
+		btn.BackgroundColor3 = P.Gold
+		btn.Text = "DIG"
+		btn.TextSize = 34
+		btn.Font = Enum.Font.FredokaOne
+		btn.TextColor3 = P.Dark
+		btn.AutoButtonColor = true
+		btn.Parent = UI.GetGui()
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(1, 0)
+		c.Parent = btn
+		local s = Instance.new("UIStroke")
+		s.Thickness = 4
+		s.Color = P.Dark
+		s.Parent = btn
+		btn.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				buttonHeld = true
+			end
+		end)
+		btn.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				buttonHeld = false
+			end
+		end)
+	end
+
+	RunService.RenderStepped:Connect(function()
+		local part, pos, normal = currentAim()
+		if part and not part.Parent then
+			part = nil
+		end
+		if part then
+			targetBox.Adornee = part
+			targetBox.Color3 = inReach(part) and P.Gold or P.Danger
+		else
+			targetBox.Adornee = nil
+		end
+
+		if not (pointerHeld or buttonHeld) or not part or not pos or not normal then
+			return
+		end
+		if State.Data.Count == nil or not inReach(part) then
+			return
+		end
+		local tool = State.Tool()
+		local interval = 1 / tool.Rate
+		local now = os.clock()
+		if now - lastSent < interval then
+			return
+		end
+		lastSent = now
+
+		local x, y, z = Grid.FromIndex(tonumber(part.Name) :: number)
+		digHit:FireServer(x, y, z)
+		faceTarget(part.Position)
+		swing(interval)
+		Effects.NoteFace(part, normal)
+		Effects.Impact(part, pos, normal)
+	end)
+end
+
+return DigController
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="28">
+            <Properties>
+              <string name="Name">EffectsController</string>
+              <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
+-- camera kick, and the treasure reveal. The server decides outcomes; this only makes them feel good.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local Audio = require(script.Parent.AudioController)
+local UI = require(script.Parent.UIController)
+
+local player = Players.LocalPlayer
+local Effects = {}
+
+-- Tunables for feel -----------------------------------------------------------------------
+local FEEL = {
+	ImpactChunks = 4,
+	BreakChunks = 10,
+	MaxChunks = 140,
+	Gravity = 70,
+	BlockShakeTime = 0.16,
+	BlockShakeAmp = 0.35,
+	CameraKickImpact = 0.05,
+	CameraKickBreak = 0.16,
+	CameraKickDecay = 7,
+}
+
+local fxFolder = Instance.new("Folder")
+fxFolder.Name = "LocalFX"
+fxFolder.Parent = Workspace
+
+-- Chunk pool ------------------------------------------------------------------------------
+local pool: { Part } = {}
+local active: { any } = {}
+
+local function takeChunk(): Part
+	local p = table.remove(pool)
+	if p then
+		return p
+	end
+	p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CastShadow = false
+	p.Material = Enum.Material.SmoothPlastic
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	return p
+end
+
+local function spawnChunk(pos: Vector3, vel: Vector3, color: Color3, size: number, life: number)
+	if #active >= FEEL.MaxChunks then
+		return
+	end
+	local p = takeChunk()
+	p.Color = color
+	p.Size = Vector3.one * size
+	p.CFrame = CFrame.new(pos)
+	p.Parent = fxFolder
+	table.insert(active, {
+		Part = p, Pos = pos, Vel = vel, Size = size, Life = life, Age = 0,
+		Rot = CFrame.Angles(math.random() * 6, math.random() * 6, math.random() * 6),
+		Spin = Vector3.new(math.random() * 12 - 6, math.random() * 12 - 6, math.random() * 12 - 6),
+	})
+end
+
+local function burst(pos: Vector3, normal: Vector3, color: Color3, count: number, speed: number, size: number)
+	for _ = 1, count do
+		local rand = Vector3.new(math.random() - 0.5, math.random() - 0.2, math.random() - 0.5)
+		local vel = (normal * 0.9 + rand * 1.4).Unit * speed * (0.5 + math.random())
+		local c = color:Lerp(Color3.new(1, 1, 1), math.random() * 0.15)
+		spawnChunk(pos, vel, c, size * (0.6 + math.random() * 0.8), 0.45 + math.random() * 0.35)
+	end
+end
+
+-- Block shake -----------------------------------------------------------------------------
+local shaking: { [Part]: { Base: CFrame, T0: number } } = {}
+
+local function shakeBlock(part: Part)
+	local s = shaking[part]
+	if s then
+		s.T0 = os.clock()
+	else
+		shaking[part] = { Base = part.CFrame, T0 = os.clock() }
+	end
+end
+
+-- Cracks / damage tint --------------------------------------------------------------------
+local CRACK_STAGES = {
+	{ { 0.5, 0.5, 0.35, 35 }, { 0.62, 0.38, 0.25, -20 } },
+	{ { 0.38, 0.6, 0.3, 110 }, { 0.55, 0.68, 0.28, 75 } },
+	{ { 0.3, 0.35, 0.3, -60 }, { 0.7, 0.55, 0.32, 10 } },
+	{ { 0.5, 0.25, 0.3, 95 }, { 0.45, 0.78, 0.3, -30 }, { 0.78, 0.78, 0.25, 50 } },
+}
+local damageInfo: any = setmetatable({}, { __mode = "k" })
+
+local function faceFromNormal(n: Vector3): Enum.NormalId
+	local ax, ay, az = math.abs(n.X), math.abs(n.Y), math.abs(n.Z)
+	if ay >= ax and ay >= az then
+		return n.Y >= 0 and Enum.NormalId.Top or Enum.NormalId.Bottom
+	elseif ax >= az then
+		return n.X >= 0 and Enum.NormalId.Right or Enum.NormalId.Left
+	end
+	return n.Z >= 0 and Enum.NormalId.Back or Enum.NormalId.Front
+end
+
+local function buildCracks(gui: SurfaceGui, uptoStage: number, fromStage: number)
+	for stage = fromStage + 1, uptoStage do
+		for _, c in ipairs(CRACK_STAGES[stage]) do
+			local f = Instance.new("Frame")
+			f.AnchorPoint = Vector2.new(0.5, 0.5)
+			f.Position = UDim2.fromScale(c[1], c[2])
+			f.Size = UDim2.fromScale(c[3], 0.035)
+			f.Rotation = c[4]
+			f.BackgroundColor3 = Color3.fromRGB(28, 20, 14)
+			f.BackgroundTransparency = 0.05
+			f.BorderSizePixel = 0
+			f.Parent = gui
+		end
+	end
+end
+
+local function applyDamage(part: Part, frac: number, face: Enum.NormalId?)
+	local info = damageInfo[part]
+	if not info then
+		info = { Base = part.Color, Stage = 0, Gui = {} }
+		damageInfo[part] = info
+	end
+	local stage = math.clamp(math.ceil((1 - frac) * 4), 1, 4)
+	part.Color = info.Base:Lerp(Color3.fromRGB(30, 22, 16), (1 - frac) * 0.4)
+
+	local f = face or Enum.NormalId.Top
+	local gui = info.Gui[f]
+	if not gui then
+		gui = Instance.new("SurfaceGui")
+		gui.Face = f
+		gui.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+		gui.CanvasSize = Vector2.new(200, 200)
+		gui.LightInfluence = 0
+		gui.Parent = part
+		info.Gui[f] = gui
+		buildCracks(gui, stage, 0)
+		info.Stage = math.max(info.Stage, stage)
+	end
+	if stage > info.Stage then
+		for _, g in pairs(info.Gui) do
+			buildCracks(g, stage, info.Stage)
+		end
+		info.Stage = stage
+	end
+end
+
+-- Camera kick -------------------------------------------------------------------------------
+local kick = 0
+local function cameraKick(amount: number)
+	kick = math.max(kick, amount)
+end
+
+RunService.RenderStepped:Connect(function(dt)
+	-- chunks
+	for i = #active, 1, -1 do
+		local c = active[i]
+		c.Age += dt
+		if c.Age >= c.Life then
+			c.Part.Parent = nil
+			table.insert(pool, c.Part)
+			table.remove(active, i)
+		else
+			c.Vel += Vector3.new(0, -FEEL.Gravity * dt, 0)
+			c.Pos += c.Vel * dt
+			c.Rot *= CFrame.Angles(c.Spin.X * dt, c.Spin.Y * dt, c.Spin.Z * dt)
+			local k = 1 - (c.Age / c.Life) ^ 2
+			c.Part.Size = Vector3.one * c.Size * math.max(k, 0.05)
+			c.Part.CFrame = CFrame.new(c.Pos) * c.Rot
+		end
+	end
+	-- block shake
+	local now = os.clock()
+	for part, s in pairs(shaking) do
+		local t = (now - s.T0) / FEEL.BlockShakeTime
+		if part.Parent == nil then
+			shaking[part] = nil
+		elseif t >= 1 then
+			part.CFrame = s.Base
+			shaking[part] = nil
+		else
+			local a = FEEL.BlockShakeAmp * (1 - t)
+			part.CFrame = s.Base + Vector3.new(
+				(math.random() - 0.5) * a, (math.random() - 0.5) * a, (math.random() - 0.5) * a)
+		end
+	end
+	-- camera kick via Humanoid.CameraOffset (works with default cameras, no camera takeover)
+	local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		if kick > 0.002 then
+			humanoid.CameraOffset = Vector3.new(
+				(math.random() - 0.5) * kick, (math.random() - 0.5) * kick, 0)
+			kick = kick * math.max(0, 1 - FEEL.CameraKickDecay * dt)
+		elseif humanoid.CameraOffset ~= Vector3.zero then
+			humanoid.CameraOffset = Vector3.zero
+			kick = 0
+		end
+	end
+end)
+
+-- Public feedback -----------------------------------------------------------------------------
+local function layerColorAt(y: number): Color3
+	return Defs.LayerAtCell(y).Color
+end
+
+-- Instant, client-predicted feedback at the moment of a swing (before the server answers).
+function Effects.Impact(part: Part, hitPos: Vector3, normal: Vector3)
+	local _, y = Grid.FromIndex(tonumber(part.Name) or 1)
+	shakeBlock(part)
+	burst(hitPos, normal, layerColorAt(y), FEEL.ImpactChunks, 14, 0.7)
+	Audio.Play("Impact", 0.9 + math.random() * 0.25)
+	cameraKick(FEEL.CameraKickImpact)
+end
+
+local function onHit(idx: number, frac: number, dead: boolean, mine: boolean, face: Enum.NormalId?)
+	local x, y, z = Grid.FromIndex(idx)
+	local center = Grid.CellCenter(x, y, z)
+	local site = Workspace:FindFirstChild("DigSite")
+	local part = site and site:FindFirstChild(tostring(idx))
+	if dead then
+		if part then
+			shaking[part] = nil
+		end
+		local color = layerColorAt(y)
+		burst(center, Vector3.yAxis, color, FEEL.BreakChunks, 24, 1.3)
+		Audio.Play("Break", 0.85 + math.random() * 0.3, mine and 1 or 0.5)
+		if mine then
+			cameraKick(FEEL.CameraKickBreak)
+		end
+	elseif part then
+		applyDamage(part :: Part, frac, face)
+		if not mine then
+			shakeBlock(part :: Part)
+			Audio.Play("Impact", 0.9 + math.random() * 0.25, 0.4)
+		end
+	end
+end
+
+-- Last face we hit locally per cell, so cracks appear on the side the player is looking at.
+local lastFace: { [number]: Enum.NormalId } = {}
+function Effects.NoteFace(part: Part, normal: Vector3)
+	local idx = tonumber(part.Name)
+	if idx then
+		lastFace[idx] = faceFromNormal(normal)
+	end
+end
+
+-- Treasure reveal ---------------------------------------------------------------------------------
+local REVEAL = { -- per rarity: float height, hold time, burst count
+	Common = { 3, 0.12, 4 },
+	Uncommon = { 5, 0.45, 12 },
+	Rare = { 6, 0.7, 20 },
+	Epic = { 8, 1.0, 34 },
+	Legendary = { 9, 1.3, 50 },
+	Mythic = { 10, 1.6, 70 },
+}
+
+local function buildTreasureModel(def): Part
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	p.Color = def.Color
+	p.Material = Enum.Material.SmoothPlastic
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	if def.Shape == "Coin" then
+		p.Shape = Enum.PartType.Cylinder
+		p.Size = Vector3.new(0.5, 2.4, 2.4)
+	elseif def.Shape == "Ring" then
+		p.Shape = Enum.PartType.Cylinder
+		p.Size = Vector3.new(0.8, 2.4, 2.4)
+	elseif def.Shape == "Gem" then
+		p.Size = Vector3.new(1.8, 1.8, 1.8)
+		p.Material = Enum.Material.Neon
+	else
+		p.Size = Vector3.new(2.2, 1.6, 1.8)
+	end
+	return p
+end
+
+function Effects.RevealTreasure(info)
+	local def = Defs.Treasure[info.Id]
+	if not def then
+		return
+	end
+	local rar = Defs.Rarity[def.Rarity]
+	local cfg = REVEAL[def.Rarity] or REVEAL.Common
+
+	UI.ShowTreasure(info.Id, info.Stored, info.IsNew)
+	local order = rar.Order
+	Audio.Play(order >= 2 and "Reveal" or "Coin", 0.9 + order * 0.12 + math.random() * 0.1)
+
+	local model = buildTreasureModel(def)
+	local start = info.Position
+	local top = start + Vector3.new(0, cfg[1], 0)
+	model.CFrame = CFrame.new(start)
+	model.Size = model.Size * 0.2
+	local fullSize = buildTreasureModel(def).Size
+	model.Parent = fxFolder
+
+	if rar.Reveal then
+		local hl = Instance.new("Highlight")
+		hl.FillColor = rar.Color
+		hl.OutlineColor = Color3.new(1, 1, 1)
+		hl.FillTransparency = 0.5
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Parent = model
+		local light = Instance.new("PointLight")
+		light.Color = rar.Color
+		light.Range = 12 + order * 3
+		light.Brightness = 2
+		light.Parent = model
+		burst(start, Vector3.yAxis, rar.Color, cfg[3], 22, 0.8)
+	end
+
+	task.spawn(function()
+		-- pop up while spinning
+		local t0, dur = os.clock(), 0.3
+		while true do
+			local a = math.min((os.clock() - t0) / dur, 1)
+			local e = TweenService:GetValue(a, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+			model.Size = fullSize * (0.2 + 0.8 * e)
+			model.CFrame = CFrame.new(start:Lerp(top, e)) * CFrame.Angles(0, a * 8, math.rad(15))
+			if a >= 1 then
+				break
+			end
+			RunService.RenderStepped:Wait()
+		end
+		-- hold + gentle spin
+		local hold = os.clock() + cfg[2]
+		local spin = 8
+		while os.clock() < hold do
+			spin += RunService.RenderStepped:Wait() * 4
+			model.CFrame = CFrame.new(top + Vector3.new(0, math.sin(os.clock() * 6) * 0.2, 0))
+				* CFrame.Angles(0, spin, math.rad(15))
+		end
+		-- fly to the player (or fizzle if it didn't fit in the backpack)
+		local t1, d1 = os.clock(), 0.35
+		local from = model.Position
+		while true do
+			local a = math.min((os.clock() - t1) / d1, 1)
+			local char = player.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local target = (info.Stored and hrp) and (hrp :: BasePart).Position or (from + Vector3.new(0, 2, 0))
+			local e = a * a
+			model.Position = from:Lerp(target, e)
+			model.Size = fullSize * (1 - e * 0.9)
+			if a >= 1 then
+				break
+			end
+			RunService.RenderStepped:Wait()
+		end
+		model:Destroy()
+	end)
+end
+
+function Effects.Init()
+	Remotes.Get("DigResult").OnClientEvent:Connect(function(payload)
+		local mine = payload.Digger == player.UserId
+		for _, h in ipairs(payload.Hits) do
+			local idx = h[1]
+			onHit(idx, h[2], h[3] == 1, mine, lastFace[idx])
+			if h[3] == 1 then
+				lastFace[idx] = nil
+			end
+		end
+	end)
+	Remotes.Get("TreasureFound").OnClientEvent:Connect(Effects.RevealTreasure)
+end
+
+return Effects
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="29">
+            <Properties>
+              <string name="Name">InteractionController</string>
+              <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local UI = require(script.Parent.UIController)
+
+local InteractionController = {}
+
+function InteractionController.Init()
+	ProximityPromptService.PromptTriggered:Connect(function(prompt)
+		if prompt.Name == "ShopPrompt" then
+			UI.OpenShop()
+		end
+	end)
+end
+
+return InteractionController
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="30">
+            <Properties>
+              <string name="Name">State</string>
+              <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Config = require(ReplicatedStorage.Shared.Config)
+
+local State = {
+	Data = {
+		Cash = 0, Reputation = 0, Count = 0, Capacity = 1, BackpackValue = 0,
+		ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId,
+		OwnedTools = {}, OwnedBackpacks = {},
+	},
+	Loaded = false,
+}
+
+local listeners: { (any) -> () } = {}
+
+function State.Connect(cb: (any) -> ())
+	table.insert(listeners, cb)
+	if State.Loaded then
+		cb(State.Data)
+	end
+end
+
+function State.Tool()
+	return Defs.Tools[State.Data.ToolId] or Defs.Tools[Config.Starting.ToolId]
+end
+
+function State.Init()
+	Remotes.Get("PlayerState").OnClientEvent:Connect(function(snap)
+		State.Data = snap
+		State.Loaded = true
+		for _, cb in ipairs(listeners) do
+			task.spawn(cb, snap)
+		end
+	end)
+end
+
+return State
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="31">
+            <Properties>
+              <string name="Name">UIController</string>
+              <string name="Source"><![CDATA[-- All UI is built from code (no manual UI objects). Scale-based + UIScale so it works on phones and desktop.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui = game:GetService("StarterGui")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local Util = require(ReplicatedStorage.Shared.Util)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local State = require(script.Parent.State)
+local Audio = require(script.Parent.AudioController)
+
+local P = Config.Palette
+local player = Players.LocalPlayer
+local UI = {}
+
+local FONT = Enum.Font.FredokaOne
+local TOUCH = UserInputService.TouchEnabled
+
+local gui: ScreenGui
+local refs: { [string]: any } = {}
+local shopOpen = false
+
+local function mk(class: string, props: { [string]: any }, parent: Instance?): any
+	local o = Instance.new(class)
+	for k, v in pairs(props) do
+		o[k] = v
+	end
+	if parent then
+		o.Parent = parent
+	end
+	return o
+end
+
+local function corner(parent: Instance, r: number?)
+	mk("UICorner", { CornerRadius = UDim.new(0, r or 10) }, parent)
+end
+
+local function stroke(parent: Instance, color: Color3?, thickness: number?)
+	mk("UIStroke", { Color = color or P.Dark, Thickness = thickness or 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, parent)
+end
+
+local function label(parent: Instance, text: string, size: number, color: Color3?, props: { [string]: any }?): TextLabel
+	local l = mk("TextLabel", {
+		BackgroundTransparency = 1, Text = text, TextSize = size, Font = FONT,
+		TextColor3 = color or P.Cream, TextStrokeTransparency = 0.5, TextStrokeColor3 = P.Dark,
+	}, parent)
+	for k, v in pairs(props or {}) do
+		l[k] = v
+	end
+	return l
+end
+
+local function panel(parent: Instance, size: UDim2, pos: UDim2): Frame
+	local f = mk("Frame", { Size = size, Position = pos, BackgroundColor3 = P.Dark, BackgroundTransparency = 0.15 }, parent)
+	corner(f, 12)
+	stroke(f, P.Dark, 2)
+	return f
+end
+
+local function button(parent: Instance, text: string, size: UDim2, pos: UDim2, color: Color3): TextButton
+	local b = mk("TextButton", {
+		Size = size, Position = pos, BackgroundColor3 = color, Text = text, TextSize = 22, Font = FONT,
+		TextColor3 = P.Dark, AutoButtonColor = true, TextStrokeTransparency = 1,
+	}, parent)
+	corner(b, 12)
+	stroke(b, P.Dark, 3)
+	return b
+end
+
+-- Rolling cash display ---------------------------------------------------------------------
+local shownCash, targetCash = 0, 0
+
+local function toast(text: string, color: Color3)
+	local l = refs.notify
+	l.Text = text
+	l.TextColor3 = color
+	l.Visible = true
+	refs.notifyToken = (refs.notifyToken or 0) + 1
+	local token = refs.notifyToken
+	l.TextTransparency = 0
+	task.delay(2.6, function()
+		if refs.notifyToken == token then
+			l.Visible = false
+		end
+	end)
+end
+
+-- Objective ---------------------------------------------------------------------------------
+local function nextAffordable(d)
+	for _, item in ipairs(Defs.ShopItems()) do
+		local owned = (item.Kind == "Tool" and d.OwnedTools[item.Id]) or (item.Kind == "Backpack" and d.OwnedBackpacks[item.Id])
+		if not owned then
+			return item, d.Cash >= item.Def.Price
+		end
+	end
+	return nil, false
+end
+
+local function updateObjective(d)
+	local text, color
+	local full = d.Count >= d.Capacity
+	local item, canBuy = nextAffordable(d)
+	if full then
+		text, color = "BACKPACK FULL! Go to the SELL ZONE at Base Camp", P.Danger
+	elseif canBuy and item then
+		text, color = ("You can afford the %s - visit the SHOP!"):format(item.Def.DisplayName), P.Teal
+	elseif d.Count == 0 and d.Cash == 0 then
+		text, color = (TOUCH and "Tap the dirt (or hold DIG) to dig!" or "Hold click on the dirt to dig!"), P.Gold
+	elseif d.Count >= d.Capacity * 0.7 then
+		text, color = "Backpack almost full - dig a bit more or sell!", P.Gold
+	elseif d.Count > 0 then
+		text, color = "Keep digging - deeper means better treasure", P.Cream
+	else
+		text, color = "Dig for treasure, sell it, upgrade!", P.Cream
+	end
+	refs.objective.Text = text
+	refs.objective.TextColor3 = color
+end
+
+-- Shop ----------------------------------------------------------------------------------------
+local function toolStats(def, cur): string
+	local area = def.DigRadius > 0 and ("Smashes %dx%dx%d blocks"):format(def.DigRadius * 2 + 1, def.DigRadius * 2 + 1, def.DigRadius * 2 + 1)
+		or "Single block"
+	return ("Power %d (now %d)  -  %.1f swings/s (now %.1f)\n%s"):format(def.Power, cur.Power, def.Rate, cur.Rate, area)
+end
+
+local function renderShop()
+	local list = refs.shopList
+	for _, c in ipairs(list:GetChildren()) do
+		if c:IsA("Frame") then
+			c:Destroy()
+		end
+	end
+	local d = State.Data
+	for i, item in ipairs(Defs.ShopItems()) do
+		local def = item.Def
+		local owned, equipped
+		if item.Kind == "Tool" then
+			owned = d.OwnedTools[item.Id]
+			equipped = d.ToolId == item.Id
+		else
+			owned = d.OwnedBackpacks[item.Id]
+			equipped = d.BackpackId == item.Id
+		end
+		local card = mk("Frame", { Size = UDim2.new(1, 0, 0, 120), BackgroundColor3 = P.Cream, LayoutOrder = i }, list)
+		corner(card, 12)
+		stroke(card, P.Dark, 3)
+		label(card, def.DisplayName:upper(), 26, P.Dark, {
+			Size = UDim2.new(0.62, 0, 0, 30), Position = UDim2.fromOffset(12, 8),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+		local stats
+		if item.Kind == "Tool" then
+			stats = toolStats(def, Defs.Tools[d.ToolId])
+		else
+			stats = ("Carries %d treasures (now %d)\n%s"):format(def.Capacity, Defs.Backpacks[d.BackpackId].Capacity, def.Blurb or "")
+		end
+		label(card, stats, 16, Color3.fromHex("4A3A2A"), {
+			Size = UDim2.new(0.62, 0, 0, 60), Position = UDim2.fromOffset(12, 42),
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+			TextWrapped = true, TextStrokeTransparency = 1 })
+		local text, color, canBuy
+		if equipped and owned then
+			text, color = "EQUIPPED", Color3.fromHex("B9B2A0")
+		elseif owned then
+			text, color = "OWNED", Color3.fromHex("B9B2A0")
+		elseif d.Cash >= def.Price then
+			text, color, canBuy = "BUY  " .. Util.FormatCash(def.Price), P.Gold, true
+		else
+			text, color = Util.FormatCash(def.Price) .. "\nneed " .. Util.FormatCash(def.Price - d.Cash) .. " more", Color3.fromHex("B9B2A0")
+		end
+		local b = button(card, text, UDim2.new(0.32, 0, 0, 64), UDim2.new(0.66, 0, 0.5, -32), color)
+		b.TextSize = 20
+		b.MouseButton1Click:Connect(function()
+			if canBuy then
+				Audio.Play("UI")
+				Remotes.Get("RequestPurchase"):FireServer(item.Kind, item.Id)
+			else
+				Audio.Play("Error")
+			end
+		end)
+	end
+end
+
+function UI.OpenShop()
+	shopOpen = true
+	refs.shop.Visible = true
+	renderShop()
+	Audio.Play("UI")
+end
+
+function UI.CloseShop()
+	shopOpen = false
+	refs.shop.Visible = false
+end
+
+-- Treasure cards --------------------------------------------------------------------------------
+function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?)
+	local def = Defs.Treasure[id]
+	if not def then
+		return
+	end
+	local rar = Defs.Rarity[def.Rarity]
+	local big = rar.Order >= 2
+	local h = big and 78 or 30
+	local wrap = mk("Frame", { Size = UDim2.new(1, 0, 0, h), BackgroundTransparency = 1, LayoutOrder = -os.clock() * 100 }, refs.cards)
+	local card = mk("CanvasGroup", {
+		Size = UDim2.fromScale(1, 1), BackgroundColor3 = P.Dark, BackgroundTransparency = 0.1,
+	}, wrap)
+	corner(card, 10)
+	stroke(card, rar.Color, big and 4 or 2)
+	local sc = mk("UIScale", { Scale = 0.6 }, card)
+	if big then
+		label(card, def.Name:upper(), 24, P.Cream, { Size = UDim2.new(1, -16, 0, 30), Position = UDim2.fromOffset(10, 4),
+			TextXAlignment = Enum.TextXAlignment.Left })
+		label(card, ("%s  -  %s"):format(def.Rarity:upper(), Util.FormatCash(def.Value)), 20, rar.Color, {
+			Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(10, 38), TextXAlignment = Enum.TextXAlignment.Left })
+		if isNew then
+			label(card, "NEW!", 20, P.Gold, { Size = UDim2.fromOffset(60, 26), Position = UDim2.new(1, -68, 0, 6) })
+		end
+	else
+		label(card, ("+ %s   %s"):format(def.Name, Util.FormatCash(def.Value)), 17, rar.Color, {
+			Size = UDim2.new(1, -12, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = Enum.TextXAlignment.Left })
+	end
+	if not stored then
+		card.GroupColor3 = Color3.fromRGB(200, 120, 120)
+	end
+	TweenService:Create(sc, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	task.delay(big and 3.2 or 1.8, function()
+		TweenService:Create(card, TweenInfo.new(0.4), { GroupTransparency = 1 }):Play()
+		task.wait(0.45)
+		wrap:Destroy()
+	end)
+	-- keep list short
+	local kids = refs.cards:GetChildren()
+	local frames = {}
+	for _, k in ipairs(kids) do
+		if k:IsA("Frame") then
+			table.insert(frames, k)
+		end
+	end
+	if #frames > 6 then
+		table.sort(frames, function(a, b) return a.LayoutOrder > b.LayoutOrder end)
+		frames[1]:Destroy()
+	end
+end
+
+local function showSold(amount: number, count: number)
+	Audio.Play("Sell")
+	local pop = refs.sold
+	pop.Visible = true
+	refs.soldAmount.Text = "+" .. Util.FormatCash(amount)
+	refs.soldSub.Text = ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S")
+	pop.GroupTransparency = 0
+	refs.soldScale.Scale = 0.5
+	TweenService:Create(refs.soldScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1.1 }):Play()
+	refs.soldToken = (refs.soldToken or 0) + 1
+	local token = refs.soldToken
+	task.delay(1.6, function()
+		if refs.soldToken == token then
+			local tw = TweenService:Create(pop, TweenInfo.new(0.5), { GroupTransparency = 1 })
+			tw:Play()
+			tw.Completed:Wait()
+			if refs.soldToken == token then
+				pop.Visible = false
+			end
+		end
+	end)
+end
+
+-- Build ---------------------------------------------------------------------------------------------
+local function build()
+	gui = mk("ScreenGui", { Name = "DigHUD", ResetOnSpawn = false, IgnoreGuiInset = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, player:WaitForChild("PlayerGui"))
+	local scale = mk("UIScale", {}, gui)
+	local function rescale()
+		local vp = Workspace.CurrentCamera.ViewportSize
+		scale.Scale = math.clamp(vp.Y / 720, 0.75, 1.4)
+	end
+	rescale()
+	Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
+
+	-- Top-left: cash + backpack
+	local stats = panel(gui, UDim2.fromOffset(250, 104), UDim2.fromOffset(10, 8))
+	refs.cash = label(stats, "$0", 40, P.Gold, { Size = UDim2.new(1, -16, 0, 44), Position = UDim2.fromOffset(12, 4),
+		TextXAlignment = Enum.TextXAlignment.Left })
+	local barBack = mk("Frame", { Size = UDim2.new(1, -24, 0, 22), Position = UDim2.fromOffset(12, 54), BackgroundColor3 = Color3.fromHex("3A3F47") }, stats)
+	corner(barBack, 8)
+	refs.barFill = mk("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = P.Teal }, barBack)
+	corner(refs.barFill, 8)
+	refs.barText = label(barBack, "0 / 12", 16, P.Cream, { Size = UDim2.fromScale(1, 1) })
+	refs.bagValue = label(stats, "Backpack worth ~$0", 15, P.Cream, { Size = UDim2.new(1, -24, 0, 18), Position = UDim2.fromOffset(12, 80),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+
+	-- Top-center: objective + notify
+	refs.objective = label(gui, "", 24, P.Cream, { Size = UDim2.new(0.5, 0, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10), TextStrokeTransparency = 0 })
+	refs.notify = label(gui, "", 22, P.Cream, { Size = UDim2.new(0.5, 0, 0, 30), AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 48), Visible = false })
+
+	-- Top-right: depth
+	local depth = panel(gui, UDim2.fromOffset(170, 56), UDim2.new(1, -180, 0, 8))
+	refs.depth = label(depth, "SURFACE", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 30), Position = UDim2.fromOffset(0, 4) })
+	refs.layer = label(depth, "BASE CAMP", 15, P.Gold, { Size = UDim2.new(1, 0, 0, 18), Position = UDim2.fromOffset(0, 33), TextStrokeTransparency = 1 })
+
+	-- Treasure cards (left, mid)
+	refs.cards = mk("Frame", { Size = UDim2.fromOffset(260, 300), Position = UDim2.new(0, 10, 0.5, -60), BackgroundTransparency = 1 }, gui)
+	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 6) }, refs.cards)
+
+	-- Sold popup
+	refs.sold = mk("CanvasGroup", { Size = UDim2.fromOffset(360, 130), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.36), BackgroundTransparency = 1, Visible = false }, gui)
+	refs.soldScale = mk("UIScale", {}, refs.sold)
+	refs.soldAmount = label(refs.sold, "+$0", 76, P.Gold, { Size = UDim2.new(1, 0, 0, 84), TextStrokeTransparency = 0 })
+	refs.soldSub = label(refs.sold, "", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 88) })
+
+	-- Return to camp
+	local ret = button(gui, "TO CAMP", UDim2.fromOffset(120, 46), UDim2.new(0, 12, 1, -(TOUCH and 230 or 70)), P.Cream)
+	ret.MouseButton1Click:Connect(function()
+		Audio.Play("UI")
+		Remotes.Get("ReturnToCamp"):FireServer()
+	end)
+	refs.returnBtn = ret
+	if not Config.ReturnToCamp.Enabled then
+		ret.Visible = false
+	end
+
+	-- Shop modal
+	local shop = mk("Frame", { Size = UDim2.fromOffset(560, 420), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = P.Dark, BackgroundTransparency = 0.05, Visible = false }, gui)
+	corner(shop, 16)
+	stroke(shop, P.Gold, 4)
+	label(shop, "EQUIPMENT SHOP", 32, P.Gold, { Size = UDim2.new(1, -70, 0, 44), Position = UDim2.fromOffset(16, 6), TextXAlignment = Enum.TextXAlignment.Left })
+	local close = button(shop, "X", UDim2.fromOffset(52, 44), UDim2.new(1, -62, 0, 8), P.Danger)
+	close.MouseButton1Click:Connect(UI.CloseShop)
+	refs.shopList = mk("ScrollingFrame", { Size = UDim2.new(1, -24, 1, -64), Position = UDim2.fromOffset(12, 56), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 6, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, shop)
+	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10) }, refs.shopList)
+	refs.shop = shop
+end
+
+function UI.GetGui(): ScreenGui
+	return gui
+end
+
+function UI.Init()
+	pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+	end)
+	build()
+
+	State.Connect(function(d)
+		targetCash = d.Cash
+		refs.barText.Text = ("%d / %d"):format(d.Count, d.Capacity)
+		local frac = math.clamp(d.Count / math.max(d.Capacity, 1), 0, 1)
+		TweenService:Create(refs.barFill, TweenInfo.new(0.2), { Size = UDim2.fromScale(frac, 1) }):Play()
+		refs.barFill.BackgroundColor3 = frac >= 1 and P.Danger or (frac >= 0.7 and P.Gold or P.Teal)
+		refs.barText.Text = d.Count >= d.Capacity and "FULL!" or refs.barText.Text
+		refs.bagValue.Text = "Backpack worth ~" .. Util.FormatCash(d.BackpackValue)
+		updateObjective(d)
+		if shopOpen then
+			renderShop()
+		end
+	end)
+
+	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
+	Remotes.Get("Notify").OnClientEvent:Connect(function(text, kind)
+		local c = kind == "Danger" and P.Danger or (kind == "Good" and P.Teal or P.Cream)
+		toast(text, c)
+		Audio.Play(kind == "Danger" and "Error" or (kind == "Good" and "Buy" or "UI"))
+	end)
+
+	RunService.Heartbeat:Connect(function(dt)
+		-- rolling cash
+		if shownCash ~= targetCash then
+			local diff = targetCash - shownCash
+			shownCash += (math.abs(diff) < 1) and diff or diff * math.min(1, dt * 8)
+			refs.cash.Text = Util.FormatCash(shownCash)
+		end
+		-- depth readout + auto-close shop when walking away
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local p = hrp.Position
+			local m = Grid.DepthMeters(p.Y)
+			local cx, cy, cz = Grid.WorldToCell(p)
+			local inSite = cx >= 0 and cx < Grid.SizeX and cz >= 0 and cz < Grid.SizeZ
+			if inSite and m > 0.5 then
+				refs.depth.Text = ("%dm"):format(math.floor(m))
+				refs.layer.Text = Defs.LayerAtCell(math.clamp(cy, 0, Grid.SizeY - 1)).Name
+			else
+				refs.depth.Text = "SURFACE"
+				refs.layer.Text = (p - Config.Camp.Position).Magnitude < 40 and "BASE CAMP" or "DIG SITE"
+			end
+			if shopOpen and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
+				UI.CloseShop()
+			end
+		end
+		-- pulse the bar when full
+		if State.Data.Count >= State.Data.Capacity then
+			refs.barFill.BackgroundColor3 = P.Danger:Lerp(P.Gold, (math.sin(os.clock() * 8) + 1) / 2)
+		end
+	end)
+end
+
+return UI
+]]></string>
+            </Properties>
+          </Item>
+        </Item>
+        <Item class="LocalScript" referent="32">
+          <Properties>
+            <string name="Name">Main</string>
+            <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local Controllers = script.Parent:WaitForChild("Controllers")
+local State = require(Controllers.State)
+local UI = require(Controllers.UIController)
+local Effects = require(Controllers.EffectsController)
+local Dig = require(Controllers.DigController)
+local Interaction = require(Controllers.InteractionController)
+
+State.Init()
+UI.Init()
+Effects.Init()
+Dig.Init()
+Interaction.Init()
+
+-- Ask for state until the server answers (data may still be loading).
+task.spawn(function()
+	local tries = 0
+	while not State.Loaded and tries < 20 do
+		Remotes.Get("ClientReady"):FireServer()
+		tries += 1
+		task.wait(1.5)
+	end
+end)
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
