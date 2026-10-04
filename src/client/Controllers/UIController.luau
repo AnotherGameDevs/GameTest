@@ -395,9 +395,11 @@ function UI.Init()
 				refs.layer.Text = Defs.LayerAtCell(math.clamp(cy, 0, Grid.SizeY - 1)).Name
 			else
 				refs.depth.Text = "SURFACE"
-				refs.layer.Text = (p - Config.Camp.Position).Magnitude < 40 and "BASE CAMP" or "DIG SITE"
+				local cp, cs = Config.Camp.Position, Config.Camp.Size
+				local onCamp = math.abs(p.X - cp.X) <= cs.X / 2 + 4 and math.abs(p.Z - cp.Z) <= cs.Z / 2 + 4
+				refs.layer.Text = onCamp and "BASE CAMP" or "DIG SITE"
 			end
-			if ShopUI.IsOpen() and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
+			if ShopUI.IsOpen() and (p - Config.Camp.ShopPosition).Magnitude > 30 then
 				UI.CloseShop()
 			end
 		end

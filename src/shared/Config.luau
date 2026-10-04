@@ -46,12 +46,36 @@ Config.Backpack = {
 	SellCooldown = 1.0,
 }
 
+-- Map boundary: invisible walls stand at +-BoundaryExtent. Ground, slabs and landforms are built relative to it.
+Config.World = {
+	BoundaryExtent = 170,
+}
+
+-- Base Camp. Every location other systems act on (spawn, return-to-camp, shop, selling, deposit) comes from here, so moving a
+-- station means changing ONE value; the model, the prompt and the server check all follow.
+-- The camp floor starts exactly at the shaft/elevator edge (z = 56) and runs south, away from the mine.
+-- Layout (z increases away from the mine): mine rim z=48 -> entrance gate z=58.5 -> stations beside the route -> spawn z=98.
 Config.Camp = {
-	Position = Vector3.new(0, 0, 78), -- centre of Base Camp floor (surface level)
-	Size = Vector3.new(60, 2, 44),
-	SellZoneOffset = Vector3.new(-14, 0, 0),
-	ShopOffset = Vector3.new(14, 0, -4),
+	Position = Vector3.new(0, 0, 82), -- centre of the camp floor (surface level)
+	Size = Vector3.new(80, 2, 52), -- floor spans x -40..40, z 56..108
+	SpawnPosition = Vector3.new(0, 0, 98), -- ~39.5 studs of straight walking from the entrance gate
+	EntranceZ = 58.5, -- the mine entrance gate (EntranceZ is where "walking distance to the mine" ends)
+	SellZoneCenter = Vector3.new(-18, 0, 82), -- logic centre of the sell trigger; the appraisal stall stands 12 studs north of it
 	SellZoneRadius = 9,
+	ShopPosition = Vector3.new(20, 0, 88),
+	ReceivingPosition = Vector3.new(24, 0, 73), -- artifact receiving table (a short walk from the elevator exit)
+	LostFoundPosition = Vector3.new(31, 0, 73), -- beside the table
+	-- Declared footprints (half-extents on X and Z) of what each builder actually builds; used by the layout test and
+	-- by any future placement tool. Keep in step with WorldCamp.
+	Footprints = {
+		Shop = { Center = Vector3.new(20, 0, 88), HalfX = 7.0, HalfZ = 4.8 },
+		Appraisal = { Center = Vector3.new(-18, 0, 70), HalfX = 6.5, HalfZ = 4.2 },
+		Receiving = { Center = Vector3.new(24, 0, 73), HalfX = 3.7, HalfZ = 2.6 },
+	},
+	-- Required clear spaces (checked by tests/camp_layout_test.luau)
+	ArrivalHalfSize = 8, -- 16 x 16 clear area around the spawn
+	MinStationGap = 12, -- walking width between the stations either side of the route
+	MinRimClearance = 8, -- station structures to the mine rim
 }
 
 -- "Important" artifacts (Defs.Treasure[...].RequiresCarry = true) must be physically carried to camp.

@@ -74,10 +74,15 @@ function WorldLandscape.Build(world: Folder)
 	local land = Instance.new("Folder")
 	land.Name = "Landscape"
 	land.Parent = world
-	local ext = 170 -- map boundary (the invisible walls are built by WorldBuilder at +-ext)
+	local ext = Config.World.BoundaryExtent -- map boundary (the invisible walls are built by WorldBuilder at +-ext)
 
 	-- Distant ground + mesas beyond the boundary: decoration only (non-solid, not raycast).
-	Kit.deco(Kit.box(land, "FarGround", V(1400, 2, 1400), V(0, -1.1, 0), C.Sand, Enum.Material.Sand))
+	-- The far ground is a FRAME around the playable square (never under it): the mine is entirely inside the square, so no
+	-- far-ground piece can occupy dig-cell space. Top flush with the slab tops (y = 0); non-solid decoration.
+	local reach = 700
+	for i, r in ipairs({ { -reach, reach, -reach, -ext }, { -reach, reach, ext, reach }, { -reach, -ext, -ext, ext }, { ext, reach, -ext, ext } }) do
+		Kit.deco(Kit.box(land, "FarGround" .. i, V(r[2] - r[1], 2, r[4] - r[3]), V((r[1] + r[2]) / 2, -1, (r[3] + r[4]) / 2), C.Sand, Enum.Material.Sand))
+	end
 	local far = Instance.new("Folder")
 	far.Name = "FarMesas"
 	far.Parent = land

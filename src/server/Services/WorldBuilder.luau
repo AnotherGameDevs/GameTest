@@ -12,6 +12,8 @@ local Kit = require(script.Parent.WorldKit)
 local WorldLandscape = require(script.Parent.WorldLandscape)
 local WorldCamp = require(script.Parent.WorldCamp)
 local WorldElevator = require(script.Parent.WorldElevator)
+local WorldAudit = require(script.Parent.WorldAudit)
+local GroundPlan = require(ReplicatedStorage.Shared.GroundPlan)
 
 local C = Kit.Color
 local WorldBuilder = {}
@@ -56,35 +58,25 @@ function WorldBuilder.Build()
 	world.Parent = Workspace
 	lighting()
 
-	-- Ground: slabs around the dig footprint, thick enough that you never see void beside the shaft.
-	local half = Config.Site.SizeX * Config.Site.CellSize / 2
-	local halfZ = Config.Site.SizeZ * Config.Site.CellSize / 2
-	local ext = 170
+	-- Ground: slabs around the mine, thick enough that you never see void beside the shaft. The slabs are produced by
+	-- subtracting the mine footprint (Grid.Bounds) and the elevator shaft (Config.Exit) from the playable square, so the
+	-- opening always matches the configured bounds and no slab can cross the excavation.
+	local ext = Config.World.BoundaryExtent
 	local thickness = Config.Site.Depth * Config.Site.CellSize + 12
 	local cy = Grid.SurfaceY - thickness / 2
 	local ground = Instance.new("Folder")
 	ground.Name = "Ground"
 	ground.Parent = world
-	local function slab(name: string, x0: number, x1: number, z0: number, z1: number)
-		Kit.box(ground, name, Vector3.new(x1 - x0, thickness, z1 - z0), Vector3.new((x0 + x1) / 2, cy, (z0 + z1) / 2), C.Sand, Enum.Material.Sand)
-	end
-	slab("North", -ext, ext, -ext, -halfZ)
-	slab("West", -ext, -half, -halfZ, halfZ)
-	slab("East", half, ext, -halfZ, halfZ)
 	local ex = Config.Exit
-	local exMinX, exMaxX, exMaxZ = ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, halfZ + ex.Run
-	if ex.Enabled then
-		-- the south slab is carved around the elevator shaft
-		slab("SouthWest", -ext, exMinX, halfZ, ext)
-		slab("SouthEast", exMaxX, ext, halfZ, ext)
-		slab("SouthFront", exMinX, exMaxX, exMaxZ, ext)
-	else
-		slab("South", -ext, ext, halfZ, ext)
+	for i, r in ipairs(GroundPlan.Subtract({ -ext, ext, -ext, ext }, WorldCamp.MineHoles(ex))) do
+		Kit.box(ground, "Slab" .. i, Vector3.new(r[2] - r[1], thickness, r[4] - r[3]),
+			Vector3.new((r[1] + r[2]) / 2, cy, (r[3] + r[4]) / 2), C.Sand, Enum.Material.Sand)
 	end
 
 	-- Bedrock under the shaft, invisible boundary walls (unchanged)
-	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
-	Kit.box(world, "Bedrock", Vector3.new(half * 2, 8, halfZ * 2), Vector3.new(0, floorY - 4, 0), C.Iron, Enum.Material.Slate)
+	local gb = Grid.Bounds()
+	Kit.box(world, "Bedrock", Vector3.new(gb.MaxX - gb.MinX, 8, gb.MaxZ - gb.MinZ),
+		Vector3.new((gb.MinX + gb.MaxX) / 2, gb.BottomY - 4, (gb.MinZ + gb.MaxZ) / 2), C.Iron, Enum.Material.Slate)
 	for i, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
 		local wall = Kit.box(world, "Boundary" .. i,
 			Vector3.new(d[1] ~= 0 and 2 or ext * 2, 120, d[2] ~= 0 and 2 or ext * 2),
@@ -95,8 +87,10 @@ function WorldBuilder.Build()
 	WorldLandscape.Build(world)
 	WorldCamp.Build(world, ex)
 	if ex.Enabled then
-		WorldElevator.Build(world, exMinX, exMaxX, halfZ, exMaxZ)
+		local gb2 = Grid.Bounds()
+		WorldElevator.Build(world, ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, gb2.MaxZ, gb2.MaxZ + ex.Run)
 	end
+	WorldBuilder.LastAudit = WorldAudit.Run(world)
 	return world
 end
 

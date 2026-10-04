@@ -13,6 +13,16 @@ local originX = S.Center.X - (S.SizeX * S.CellSize) / 2
 local originZ = S.Center.Z - (S.SizeZ * S.CellSize) / 2
 Grid.OriginX, Grid.OriginZ, Grid.SurfaceY = originX, originZ, S.Center.Y
 
+-- The mine volume, derived from configuration (never hardcoded elsewhere). X/Z are world studs, Y runs from the
+-- surface (TopY) down to the bedrock top (BottomY).
+function Grid.Bounds()
+	return {
+		MinX = originX, MaxX = originX + S.SizeX * S.CellSize,
+		MinZ = originZ, MaxZ = originZ + S.SizeZ * S.CellSize,
+		TopY = Grid.SurfaceY, BottomY = Grid.SurfaceY - S.Depth * S.CellSize,
+	}
+end
+
 function Grid.InBounds(x: number, y: number, z: number): boolean
 	return x >= 0 and x < S.SizeX and y >= 0 and y < S.Depth and z >= 0 and z < S.SizeZ
 end

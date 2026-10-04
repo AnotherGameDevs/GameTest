@@ -5,6 +5,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local GroundPlan = require(ReplicatedStorage.Shared.GroundPlan)
 local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
 
 local Kit = require(script.Parent.WorldKit)
@@ -14,12 +16,13 @@ local box, part, deco, sign = Kit.box, Kit.part, Kit.deco, Kit.sign
 
 local WorldCamp = {}
 
--- Exposed to WorldBuilder / services
-WorldCamp.SellZoneCenter = Config.Camp.Position + Config.Camp.SellZoneOffset
-WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 4.5, 16))
-WorldCamp.ReceivingCenter = Config.Camp.Position + Vector3.new(-27, 3.5, -7)
-WorldCamp.ReceivingDisplayPosition = Config.Camp.Position + Vector3.new(-27, 5.2, -7)
-WorldCamp.LostFoundPosition = Config.Camp.Position + Vector3.new(-27, 2.2, -13)
+-- Exposed to WorldBuilder / services. EVERY gameplay location comes from Config.Camp: the spawn, the return-to-camp
+-- destination, the sell trigger centre, and the deposit check centre are the same values the models are built from.
+WorldCamp.SellZoneCenter = Config.Camp.SellZoneCenter
+WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.SpawnPosition + Vector3.new(0, 4.5, 0))
+WorldCamp.ReceivingCenter = Config.Camp.ReceivingPosition + Vector3.new(0, 3.5, 0)
+WorldCamp.ReceivingDisplayPosition = Config.Camp.ReceivingPosition + Vector3.new(0, 5.2, 0)
+WorldCamp.LostFoundPosition = Config.Camp.LostFoundPosition + Vector3.new(0, 2.2, 0)
 
 local function cylinder(parent: Instance, name: string, length: number, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?, flat: boolean?): Part
 	-- Roblox cylinders run along X. `flat` lays the disc on the ground (axis up).
@@ -36,40 +39,54 @@ local function rope(parent: Instance, a: Vector3, b: Vector3)
 end
 
 -- Ground ------------------------------------------------------------------------------------------------------------
+-- The mine footprint and the elevator shaft are HOLES in every ground treatment, derived from Grid.Bounds() and Config.Exit.
+-- Nothing below can extend across the mine, because the rectangles are produced by subtracting those holes (GroundPlan).
+local function mineHoles(ex): { { number } }
+	local b = Grid.Bounds()
+	local holes = { { b.MinX, b.MaxX, b.MinZ, b.MaxZ } }
+	if ex.Enabled then
+		table.insert(holes, { ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, b.MaxZ, b.MaxZ + ex.Run })
+	end
+	return holes
+end
+WorldCamp.MineHoles = mineHoles
+
 local function buildGround(camp: Folder, ex: { Enabled: boolean, CenterX: number, Width: number, Run: number })
 	local c = Config.Camp
+	local b = Grid.Bounds()
+	local holes = mineHoles(ex)
 	local ground = Instance.new("Folder")
 	ground.Name = "GroundTreatment"
 	ground.Parent = camp
 
-	-- camp: compacted warm sand, with a slightly wider apron so it sits in the desert instead of on it
-	box(camp, "CampApron", V(c.Size.X + 6, 0.3, c.Size.Z + 6), c.Position + V(0, 0.15, 0), C.CampEdge, Enum.Material.Sand)
+	-- camp: compacted warm sand. The floor starts exactly at the shaft edge; a wider apron on the far sides only.
+	local fx0, fx1 = c.Position.X - c.Size.X / 2, c.Position.X + c.Size.X / 2
+	local fz0, fz1 = c.Position.Z - c.Size.Z / 2, c.Position.Z + c.Size.Z / 2
+	for i, r in ipairs(GroundPlan.Subtract({ fx0 - 3, fx1 + 3, fz0, fz1 + 3 }, holes)) do
+		box(camp, "CampApron" .. i, V(r[2] - r[1], 0.3, r[4] - r[3]), V((r[1] + r[2]) / 2, 0.15, (r[3] + r[4]) / 2), C.CampEdge, Enum.Material.Sand)
+	end
 	box(camp, "CampFloor", V(c.Size.X, 0.5, c.Size.Z), c.Position + V(0, 0.25, 0), C.Camp, Enum.Material.Sand)
 
 	-- routes: worn earth from the back of camp to the mine entrance, with short branches to the stations
-	local zBack = c.Position.Z + c.Size.Z / 2
-	box(ground, "RouteMain", V(12, 0.1, zBack - 56), V(0, 0.55, (zBack + 56) / 2), C.Route, Enum.Material.Ground)
-	box(ground, "RouteShop", V(18, 0.1, 5), V(15, 0.55, 82), C.Route, Enum.Material.Ground)
-	box(ground, "RouteSell", V(18, 0.1, 5), V(-15, 0.55, 82), C.Route, Enum.Material.Ground)
+	local routeLen = fz1 - fz0
+	box(ground, "RouteMain", V(12, 0.1, routeLen), V(0, 0.55, (fz0 + fz1) / 2), C.Route, Enum.Material.Ground)
+	local shop, recv = c.ShopPosition, c.ReceivingPosition
+	box(ground, "RouteShop", V(shop.X - 6 - 6.5, 0.1, 5), V((6 + shop.X - 6.5) / 2, 0.55, shop.Z), C.Route, Enum.Material.Ground)
+	box(ground, "RouteReceiving", V(recv.X - 6 - 3.7, 0.1, 5), V((6 + recv.X - 3.7) / 2, 0.55, recv.Z), C.Route, Enum.Material.Ground)
 
-	-- excavation edge: gravel and disturbed soil in four broad strips just outside the grid (not across the shaft)
-	local half = Config.Site.SizeX * Config.Site.CellSize / 2
+	-- excavation edge: gravel in broad strips around the grid (a ring MINUS the mine and the shaft)
 	local rim = 8
-	local function strip(name: string, x0: number, x1: number, z0: number, z1: number)
-		box(ground, name, V(x1 - x0, 0.12, z1 - z0), V((x0 + x1) / 2, 0.06, (z0 + z1) / 2), C.Gravel, Enum.Material.Pebble)
+	for i, r in ipairs(GroundPlan.Subtract({ b.MinX - rim, b.MaxX + rim, b.MinZ - rim, b.MaxZ + rim }, holes)) do
+		box(ground, "Rim" .. i, V(r[2] - r[1], 0.12, r[4] - r[3]), V((r[1] + r[2]) / 2, 0.06, (r[3] + r[4]) / 2), C.Gravel, Enum.Material.Pebble)
 	end
-	strip("RimNorth", -half - rim, half + rim, -half - rim, -half)
-	strip("RimWest", -half - rim, -half, -half, half)
-	strip("RimEast", half, half + rim, -half, half)
-	if ex.Enabled then
-		strip("RimSouthA", -half - rim, ex.CenterX - ex.Width / 2, half, half + rim)
-		strip("RimSouthB", ex.CenterX + ex.Width / 2, half + rim, half, half + rim)
-	else
-		strip("RimSouth", -half - rim, half + rim, half, half + rim)
-	end
-	-- disturbed-soil patches (broad, low contrast, deterministic)
-	local patches = { { -40, -52, 9, 5 }, { 8, -53, 12, 4 }, { 44, -51, 8, 6 }, { -52, -10, 5, 10 }, { -51, 28, 4, 8 },
-		{ 52, -30, 4, 9 }, { 51, 14, 5, 11 }, { -46, 52, 10, 4 }, { 46, 52, 8, 4 } }
+	-- disturbed-soil patches: broad, low contrast, placed relative to the grid edge so they follow the configuration
+	local midX, midZ = (b.MinX + b.MaxX) / 2, (b.MinZ + b.MaxZ) / 2
+	local patches = {
+		{ b.MinX + 8, b.MinZ - 4, 9, 5 }, { midX, b.MinZ - 5, 12, 4 }, { b.MaxX - 4, b.MinZ - 3, 8, 6 },
+		{ b.MinX - 4, midZ - 14, 5, 10 }, { b.MinX - 3, midZ + 22, 4, 8 },
+		{ b.MaxX + 4, midZ - 8, 4, 9 }, { b.MaxX + 3, midZ + 16, 5, 11 },
+		{ b.MinX + 6, b.MaxZ + 4, 10, 4 }, { b.MaxX - 6, b.MaxZ + 4, 8, 4 },
+	}
 	for i, p in ipairs(patches) do
 		box(ground, "Disturbed" .. i, V(p[3], 0.14, p[4]), V(p[1], 0.07, p[2]), C.Disturbed, Enum.Material.Ground)
 	end
@@ -80,8 +97,9 @@ local function buildFence(camp: Folder, ex: { Enabled: boolean, CenterX: number,
 	local fence = Instance.new("Folder")
 	fence.Name = "Fence"
 	fence.Parent = camp
-	local lim = 55
-	local zS = 54.5
+	local gb = Grid.Bounds()
+	local lim = gb.MaxX + 7
+	local zS = gb.MaxZ + 6.5
 	local function inGap(x: number, z: number): boolean
 		if z > 40 and math.abs(x) <= 10 then
 			return true -- the way in
@@ -119,22 +137,25 @@ local function buildEntrance(camp: Folder)
 	local e = Instance.new("Folder")
 	e.Name = "Entrance"
 	e.Parent = camp
-	box(e, "Boardwalk", V(12, 0.4, 10), V(0, 0.2, 53), C.TimberLight, Enum.Material.WoodPlanks)
+	local gb = Grid.Bounds()
+	local gateZ = Config.Camp.EntranceZ
+	local len = gateZ - gb.MaxZ - 0.5
+	box(e, "Boardwalk", V(12, 0.4, len), V(0, 0.2, gb.MaxZ + len / 2), C.TimberLight, Enum.Material.WoodPlanks)
 	for _, sx in ipairs({ -6.3, 6.3 }) do
-		for _, z in ipairs({ 49.5, 53, 56.5 }) do
-			box(e, "RailPost", V(0.6, 3, 0.6), V(sx, 1.5, z), C.TimberDark, Enum.Material.Wood)
+		for _, dz in ipairs({ 1.5, len / 2, len - 1.5 }) do
+			box(e, "RailPost", V(0.6, 3, 0.6), V(sx, 1.5, gb.MaxZ + dz), C.TimberDark, Enum.Material.Wood)
 		end
-		rope(e, V(sx, 2.5, 49.5), V(sx, 2.5, 56.5))
+		rope(e, V(sx, 2.5, gb.MaxZ + 1.5), V(sx, 2.5, gb.MaxZ + len - 1.5))
 	end
 	for _, sx in ipairs({ -7.4, 7.4 }) do
-		box(e, "GatePost", V(1, 9.5, 1), V(sx, 5.25, 58.5), C.Timber, Enum.Material.Wood)
-		box(e, "GateBand", V(1.15, 0.4, 1.15), V(sx, 3, 58.5), C.Iron, Enum.Material.Metal)
+		box(e, "GatePost", V(1, 9.5, 1), V(sx, 5.25, gateZ), C.Timber, Enum.Material.Wood)
+		box(e, "GateBand", V(1.15, 0.4, 1.15), V(sx, 3, gateZ), C.Iron, Enum.Material.Metal)
 	end
-	box(e, "GateLintel", V(16.6, 0.9, 0.9), V(0, 10.1, 58.5), C.TimberDark, Enum.Material.Wood)
+	box(e, "GateLintel", V(16.6, 0.9, 0.9), V(0, 10.1, gateZ), C.TimberDark, Enum.Material.Wood)
 	for _, sx in ipairs({ -3, 3 }) do
-		deco(box(e, "SignChain", V(0.08, 0.8, 0.08), V(sx, 9.35, 58.5), C.Iron, Enum.Material.Metal))
+		deco(box(e, "SignChain", V(0.08, 0.8, 0.08), V(sx, 9.35, gateZ), C.Iron, Enum.Material.Metal))
 	end
-	local board = box(e, "EntranceSign", V(8, 1.9, 0.3), V(0, 8.0, 58.5), C.TimberDark, Enum.Material.Wood)
+	local board = box(e, "EntranceSign", V(8, 1.9, 0.3), V(0, 8.0, gateZ), C.TimberDark, Enum.Material.Wood)
 	sign(board, Enum.NormalId.Back, "DIG SITE", C.TimberDark, C.Trim)
 end
 
@@ -143,7 +164,7 @@ local function buildShop(camp: Folder)
 	local s = Instance.new("Folder")
 	s.Name = "EquipmentShop"
 	s.Parent = camp
-	local o = Config.Camp.Position + Config.Camp.ShopOffset -- (14, 0, 74)
+	local o = Config.Camp.ShopPosition
 	local base = V(o.X, 0.5, o.Z)
 	for _, sx in ipairs({ -6, 6 }) do
 		for _, sz in ipairs({ -3.3, 3.3 }) do
@@ -203,8 +224,8 @@ local function buildAppraisal(camp: Folder)
 	local s = Instance.new("Folder")
 	s.Name = "AppraisalStation"
 	s.Parent = camp
-	local sz = WorldCamp.SellZoneCenter -- (-14, 0, 78): the sell logic radius is unchanged
-	local base = V(sz.X, 0.5, 66)
+	local sz = WorldCamp.SellZoneCenter -- the sell trigger centre (logic) = the marked circle (visual)
+	local base = V(sz.X, 0.5, sz.Z - 12) -- the stall stands just north of the circle
 
 	for _, sx in ipairs({ -5.5, 5.5 }) do
 		for _, z in ipairs({ -2.6, 2.6 }) do
@@ -292,7 +313,7 @@ local function buildReceiving(camp: Folder)
 
 	-- lost & found pad: fallback drop point (death/disconnect)
 	local lf = WorldCamp.LostFoundPosition
-	local pad = box(folder, "LostFoundPad", V(4, 0.3, 4), V(c.X, 0.65, lf.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
+	local pad = box(folder, "LostFoundPad", V(4, 0.3, 4), V(lf.X, 0.65, lf.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
 	sign(pad, Enum.NormalId.Top, "LOST & FOUND", Color3.fromHex("CDBE98"), C.TimberDark)
 end
 
@@ -307,7 +328,7 @@ function WorldCamp.Build(world: Folder, ex)
 	spawn.Name = "CampSpawn"
 	spawn.Anchored = true
 	spawn.Size = Vector3.new(10, 0.2, 10)
-	spawn.CFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 0.6, 16))
+	spawn.CFrame = CFrame.new(Config.Camp.SpawnPosition + Vector3.new(0, 0.6, 0))
 	spawn.Neutral = true
 	spawn.Duration = 0
 	spawn.Transparency = 1

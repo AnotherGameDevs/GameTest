@@ -97,12 +97,36 @@ Config.Backpack = {
 	SellCooldown = 1.0,
 }
 
+-- Map boundary: invisible walls stand at +-BoundaryExtent. Ground, slabs and landforms are built relative to it.
+Config.World = {
+	BoundaryExtent = 170,
+}
+
+-- Base Camp. Every location other systems act on (spawn, return-to-camp, shop, selling, deposit) comes from here, so moving a
+-- station means changing ONE value; the model, the prompt and the server check all follow.
+-- The camp floor starts exactly at the shaft/elevator edge (z = 56) and runs south, away from the mine.
+-- Layout (z increases away from the mine): mine rim z=48 -> entrance gate z=58.5 -> stations beside the route -> spawn z=98.
 Config.Camp = {
-	Position = Vector3.new(0, 0, 78), -- centre of Base Camp floor (surface level)
-	Size = Vector3.new(60, 2, 44),
-	SellZoneOffset = Vector3.new(-14, 0, 0),
-	ShopOffset = Vector3.new(14, 0, -4),
+	Position = Vector3.new(0, 0, 82), -- centre of the camp floor (surface level)
+	Size = Vector3.new(80, 2, 52), -- floor spans x -40..40, z 56..108
+	SpawnPosition = Vector3.new(0, 0, 98), -- ~39.5 studs of straight walking from the entrance gate
+	EntranceZ = 58.5, -- the mine entrance gate (EntranceZ is where "walking distance to the mine" ends)
+	SellZoneCenter = Vector3.new(-18, 0, 82), -- logic centre of the sell trigger; the appraisal stall stands 12 studs north of it
 	SellZoneRadius = 9,
+	ShopPosition = Vector3.new(20, 0, 88),
+	ReceivingPosition = Vector3.new(24, 0, 73), -- artifact receiving table (a short walk from the elevator exit)
+	LostFoundPosition = Vector3.new(31, 0, 73), -- beside the table
+	-- Declared footprints (half-extents on X and Z) of what each builder actually builds; used by the layout test and
+	-- by any future placement tool. Keep in step with WorldCamp.
+	Footprints = {
+		Shop = { Center = Vector3.new(20, 0, 88), HalfX = 7.0, HalfZ = 4.8 },
+		Appraisal = { Center = Vector3.new(-18, 0, 70), HalfX = 6.5, HalfZ = 4.2 },
+		Receiving = { Center = Vector3.new(24, 0, 73), HalfX = 3.7, HalfZ = 2.6 },
+	},
+	-- Required clear spaces (checked by tests/camp_layout_test.luau)
+	ArrivalHalfSize = 8, -- 16 x 16 clear area around the spawn
+	MinStationGap = 12, -- walking width between the stations either side of the route
+	MinRimClearance = 8, -- station structures to the mine rim
 }
 
 -- "Important" artifacts (Defs.Treasure[...].RequiresCarry = true) must be physically carried to camp.
@@ -402,6 +426,16 @@ local originX = S.Center.X - (S.SizeX * S.CellSize) / 2
 local originZ = S.Center.Z - (S.SizeZ * S.CellSize) / 2
 Grid.OriginX, Grid.OriginZ, Grid.SurfaceY = originX, originZ, S.Center.Y
 
+-- The mine volume, derived from configuration (never hardcoded elsewhere). X/Z are world studs, Y runs from the
+-- surface (TopY) down to the bedrock top (BottomY).
+function Grid.Bounds()
+	return {
+		MinX = originX, MaxX = originX + S.SizeX * S.CellSize,
+		MinZ = originZ, MaxZ = originZ + S.SizeZ * S.CellSize,
+		TopY = Grid.SurfaceY, BottomY = Grid.SurfaceY - S.Depth * S.CellSize,
+	}
+end
+
 function Grid.InBounds(x: number, y: number, z: number): boolean
 	return x >= 0 and x < S.SizeX and y >= 0 and y < S.Depth and z >= 0 and z < S.SizeZ
 end
@@ -443,6 +477,100 @@ return Grid
         </Properties>
       </Item>
       <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">GroundPlan</string>
+          <string name="Source"><![CDATA[-- Pure rectangle maths for building ground AROUND the mine. Given an outer rectangle and a list of "holes" (the mine
+-- footprint, the elevator shaft, ...), returns non-overlapping rectangles that exactly tile (outer minus holes). Because
+-- the opening is a hole in the plan, no ground piece can ever extend across the mine. Rectangles are {x0, x1, z0, z1}.
+local GroundPlan = {}
+
+local function intersectsInterval(a0, a1, b0, b1)
+	return a0 < b1 and b0 < a1
+end
+
+-- Outer minus holes -> rectangles (adjacent identical strips are merged, so the part count stays small).
+function GroundPlan.Subtract(outer, holes)
+	local xs = { outer[1], outer[2] }
+	for _, h in ipairs(holes) do
+		if intersectsInterval(h[1], h[2], outer[1], outer[2]) then
+			table.insert(xs, math.max(h[1], outer[1]))
+			table.insert(xs, math.min(h[2], outer[2]))
+		end
+	end
+	table.sort(xs)
+	local uniq = {}
+	for _, x in ipairs(xs) do
+		if #uniq == 0 or x - uniq[#uniq] > 1e-6 then
+			table.insert(uniq, x)
+		end
+	end
+
+	local columns = {} -- each: { x0, x1, intervals = { {z0, z1}, ... } }
+	for i = 1, #uniq - 1 do
+		local xa, xb = uniq[i], uniq[i + 1]
+		local cuts = {}
+		for _, h in ipairs(holes) do
+			if h[1] <= xa + 1e-6 and h[2] >= xb - 1e-6 and intersectsInterval(h[3], h[4], outer[3], outer[4]) then
+				table.insert(cuts, { math.max(h[3], outer[3]), math.min(h[4], outer[4]) })
+			end
+		end
+		table.sort(cuts, function(p, q) return p[1] < q[1] end)
+		local intervals, cursor = {}, outer[3]
+		for _, c in ipairs(cuts) do
+			if c[1] > cursor + 1e-6 then
+				table.insert(intervals, { cursor, c[1] })
+			end
+			cursor = math.max(cursor, c[2])
+		end
+		if outer[4] > cursor + 1e-6 then
+			table.insert(intervals, { cursor, outer[4] })
+		end
+		table.insert(columns, { xa, xb, intervals })
+	end
+
+	-- merge neighbouring columns whose intervals are identical
+	local merged = {}
+	for _, col in ipairs(columns) do
+		local last = merged[#merged]
+		local same = last and #last[3] == #col[3]
+		if same then
+			for k = 1, #col[3] do
+				if math.abs(last[3][k][1] - col[3][k][1]) > 1e-6 or math.abs(last[3][k][2] - col[3][k][2]) > 1e-6 then
+					same = false
+					break
+				end
+			end
+		end
+		if same then
+			last[2] = col[2]
+		else
+			table.insert(merged, { col[1], col[2], col[3] })
+		end
+	end
+
+	local rects = {}
+	for _, col in ipairs(merged) do
+		for _, iv in ipairs(col[3]) do
+			table.insert(rects, { col[1], col[2], iv[1], iv[2] })
+		end
+	end
+	return rects
+end
+
+function GroundPlan.Area(r)
+	return (r[2] - r[1]) * (r[4] - r[3])
+end
+
+-- Strict overlap test (touching edges do not count).
+function GroundPlan.Overlaps(a, b)
+	return a[1] < b[2] - 1e-6 and b[1] < a[2] - 1e-6 and a[3] < b[4] - 1e-6 and b[3] < a[4] - 1e-6
+end
+
+return GroundPlan
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
         <Properties>
           <string name="Name">ModelKit</string>
           <string name="Source"><![CDATA[-- Tiny parts-only modelling kit for the "chunky dig-site" look. A model is a list of part specs positioned
@@ -593,7 +721,7 @@ return Kit
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="7">
+      <Item class="ModuleScript" referent="8">
         <Properties>
           <string name="Name">Remotes</string>
           <string name="Source"><![CDATA[-- Single place that declares every remote. Server creates them; client waits for them.
@@ -645,7 +773,7 @@ return Remotes
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">SettingsSpec</string>
           <string name="Source"><![CDATA[-- Player settings: one definition used by the client (UI + clamping) and the server (validation before saving).
@@ -708,7 +836,7 @@ return SettingsSpec
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
@@ -1072,7 +1200,7 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">TreasureModels</string>
           <string name="Source"><![CDATA[-- Polished chunky models for notable artifacts. Treasures without a Model id keep the generic coin/ring/gem/block
@@ -1192,7 +1320,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="11">
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -1242,7 +1370,7 @@ return Util
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="12">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">ViewmodelMath</string>
           <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
@@ -1306,15 +1434,15 @@ return ViewmodelMath
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="13">
+  <Item class="ServerScriptService" referent="14">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="14">
+    <Item class="Folder" referent="15">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="15">
+      <Item class="Script" referent="16">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -1373,11 +1501,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="16">
+      <Item class="Folder" referent="17">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="17">
+        <Item class="ModuleScript" referent="18">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -1395,7 +1523,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="18">
+        <Item class="ModuleScript" referent="19">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -1508,7 +1636,7 @@ return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="19">
+        <Item class="ModuleScript" referent="20">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -1987,7 +2115,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="20">
+        <Item class="ModuleScript" referent="21">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -2014,7 +2142,7 @@ return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="21">
+        <Item class="ModuleScript" referent="22">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -2113,7 +2241,7 @@ return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="22">
+        <Item class="ModuleScript" referent="23">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -2308,7 +2436,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="23">
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -2433,7 +2561,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -2586,7 +2714,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="26">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -2809,7 +2937,7 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">ElevatorService</string>
             <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
@@ -2968,7 +3096,7 @@ return ElevatorService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -3071,7 +3199,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -3138,7 +3266,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -3222,7 +3350,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -3313,7 +3441,7 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="32">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -3362,7 +3490,7 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">SettingsService</string>
             <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
@@ -3398,7 +3526,7 @@ return SettingsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -3633,7 +3761,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -3693,7 +3821,69 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="35">
+        <Item class="ModuleScript" referent="36">
+          <Properties>
+            <string name="Name">WorldAudit</string>
+            <string name="Source"><![CDATA[-- Runtime self-check run at the end of WorldBuilder.Build(): proves nothing from the world builder sits inside the mine
+-- volume (only dig cells, which are not built here, and the designated Bedrock may) or inside the elevator shaft (only the
+-- Elevator folder may). It reports offenders by path in the server Output instead of hiding them. Pure geometry, no
+-- transparency or offset tricks.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+
+local WorldAudit = {}
+
+local EPS = 0.05 -- parts that merely touch a boundary are fine
+
+local function aabb(p: BasePart)
+	local cf, s = p.CFrame, p.Size
+	local r, u, l = cf.RightVector, cf.UpVector, cf.LookVector
+	local function half(ax: string): number
+		return (math.abs(r[ax]) * s.X + math.abs(u[ax]) * s.Y + math.abs(l[ax]) * s.Z) / 2
+	end
+	local c = cf.Position
+	local hx, hy, hz = half("X"), half("Y"), half("Z")
+	return { c.X - hx, c.X + hx, c.Y - hy, c.Y + hy, c.Z - hz, c.Z + hz }
+end
+
+local function overlaps(a, b)
+	return a[1] < b[2] - EPS and b[1] < a[2] - EPS and a[3] < b[4] - EPS and b[3] < a[4] - EPS and a[5] < b[6] - EPS and b[5] < a[6] - EPS
+end
+
+function WorldAudit.Run(world: Instance): { Checked: number, Offenders: { string } }
+	local b = Grid.Bounds()
+	local mine = { b.MinX, b.MaxX, b.BottomY, b.TopY, b.MinZ, b.MaxZ }
+	local shaft
+	local ex = Config.Exit
+	if ex.Enabled then
+		shaft = { ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, b.BottomY - 12, b.TopY + 60, b.MaxZ, b.MaxZ + ex.Run }
+	end
+	local offenders, checked = {}, 0
+	for _, d in ipairs(world:GetDescendants()) do
+		if d:IsA("BasePart") then
+			checked += 1
+			local box = aabb(d)
+			if overlaps(box, mine) and d.Name ~= "Bedrock" then
+				table.insert(offenders, "inside the MINE: " .. d:GetFullName())
+			elseif shaft and overlaps(box, shaft) and not d:FindFirstAncestor("Elevator") then
+				table.insert(offenders, "inside the SHAFT: " .. d:GetFullName())
+			end
+		end
+	end
+	if #offenders == 0 then
+		print(("[WorldAudit] OK: %d world parts checked, none inside the mine volume or the elevator shaft."):format(checked))
+	else
+		warn(("[WorldAudit] %d overlap(s):\n  %s"):format(#offenders, table.concat(offenders, "\n  ")))
+	end
+	return { Checked = checked, Offenders = offenders }
+end
+
+return WorldAudit
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="37">
           <Properties>
             <string name="Name">WorldBuilder</string>
             <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
@@ -3710,6 +3900,8 @@ local Kit = require(script.Parent.WorldKit)
 local WorldLandscape = require(script.Parent.WorldLandscape)
 local WorldCamp = require(script.Parent.WorldCamp)
 local WorldElevator = require(script.Parent.WorldElevator)
+local WorldAudit = require(script.Parent.WorldAudit)
+local GroundPlan = require(ReplicatedStorage.Shared.GroundPlan)
 
 local C = Kit.Color
 local WorldBuilder = {}
@@ -3754,35 +3946,25 @@ function WorldBuilder.Build()
 	world.Parent = Workspace
 	lighting()
 
-	-- Ground: slabs around the dig footprint, thick enough that you never see void beside the shaft.
-	local half = Config.Site.SizeX * Config.Site.CellSize / 2
-	local halfZ = Config.Site.SizeZ * Config.Site.CellSize / 2
-	local ext = 170
+	-- Ground: slabs around the mine, thick enough that you never see void beside the shaft. The slabs are produced by
+	-- subtracting the mine footprint (Grid.Bounds) and the elevator shaft (Config.Exit) from the playable square, so the
+	-- opening always matches the configured bounds and no slab can cross the excavation.
+	local ext = Config.World.BoundaryExtent
 	local thickness = Config.Site.Depth * Config.Site.CellSize + 12
 	local cy = Grid.SurfaceY - thickness / 2
 	local ground = Instance.new("Folder")
 	ground.Name = "Ground"
 	ground.Parent = world
-	local function slab(name: string, x0: number, x1: number, z0: number, z1: number)
-		Kit.box(ground, name, Vector3.new(x1 - x0, thickness, z1 - z0), Vector3.new((x0 + x1) / 2, cy, (z0 + z1) / 2), C.Sand, Enum.Material.Sand)
-	end
-	slab("North", -ext, ext, -ext, -halfZ)
-	slab("West", -ext, -half, -halfZ, halfZ)
-	slab("East", half, ext, -halfZ, halfZ)
 	local ex = Config.Exit
-	local exMinX, exMaxX, exMaxZ = ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, halfZ + ex.Run
-	if ex.Enabled then
-		-- the south slab is carved around the elevator shaft
-		slab("SouthWest", -ext, exMinX, halfZ, ext)
-		slab("SouthEast", exMaxX, ext, halfZ, ext)
-		slab("SouthFront", exMinX, exMaxX, exMaxZ, ext)
-	else
-		slab("South", -ext, ext, halfZ, ext)
+	for i, r in ipairs(GroundPlan.Subtract({ -ext, ext, -ext, ext }, WorldCamp.MineHoles(ex))) do
+		Kit.box(ground, "Slab" .. i, Vector3.new(r[2] - r[1], thickness, r[4] - r[3]),
+			Vector3.new((r[1] + r[2]) / 2, cy, (r[3] + r[4]) / 2), C.Sand, Enum.Material.Sand)
 	end
 
 	-- Bedrock under the shaft, invisible boundary walls (unchanged)
-	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
-	Kit.box(world, "Bedrock", Vector3.new(half * 2, 8, halfZ * 2), Vector3.new(0, floorY - 4, 0), C.Iron, Enum.Material.Slate)
+	local gb = Grid.Bounds()
+	Kit.box(world, "Bedrock", Vector3.new(gb.MaxX - gb.MinX, 8, gb.MaxZ - gb.MinZ),
+		Vector3.new((gb.MinX + gb.MaxX) / 2, gb.BottomY - 4, (gb.MinZ + gb.MaxZ) / 2), C.Iron, Enum.Material.Slate)
 	for i, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
 		local wall = Kit.box(world, "Boundary" .. i,
 			Vector3.new(d[1] ~= 0 and 2 or ext * 2, 120, d[2] ~= 0 and 2 or ext * 2),
@@ -3793,8 +3975,10 @@ function WorldBuilder.Build()
 	WorldLandscape.Build(world)
 	WorldCamp.Build(world, ex)
 	if ex.Enabled then
-		WorldElevator.Build(world, exMinX, exMaxX, halfZ, exMaxZ)
+		local gb2 = Grid.Bounds()
+		WorldElevator.Build(world, ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, gb2.MaxZ, gb2.MaxZ + ex.Run)
 	end
+	WorldBuilder.LastAudit = WorldAudit.Run(world)
 	return world
 end
 
@@ -3802,7 +3986,7 @@ return WorldBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="38">
           <Properties>
             <string name="Name">WorldCamp</string>
             <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
@@ -3812,6 +3996,8 @@ return WorldBuilder
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+local GroundPlan = require(ReplicatedStorage.Shared.GroundPlan)
 local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
 
 local Kit = require(script.Parent.WorldKit)
@@ -3821,12 +4007,13 @@ local box, part, deco, sign = Kit.box, Kit.part, Kit.deco, Kit.sign
 
 local WorldCamp = {}
 
--- Exposed to WorldBuilder / services
-WorldCamp.SellZoneCenter = Config.Camp.Position + Config.Camp.SellZoneOffset
-WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 4.5, 16))
-WorldCamp.ReceivingCenter = Config.Camp.Position + Vector3.new(-27, 3.5, -7)
-WorldCamp.ReceivingDisplayPosition = Config.Camp.Position + Vector3.new(-27, 5.2, -7)
-WorldCamp.LostFoundPosition = Config.Camp.Position + Vector3.new(-27, 2.2, -13)
+-- Exposed to WorldBuilder / services. EVERY gameplay location comes from Config.Camp: the spawn, the return-to-camp
+-- destination, the sell trigger centre, and the deposit check centre are the same values the models are built from.
+WorldCamp.SellZoneCenter = Config.Camp.SellZoneCenter
+WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.SpawnPosition + Vector3.new(0, 4.5, 0))
+WorldCamp.ReceivingCenter = Config.Camp.ReceivingPosition + Vector3.new(0, 3.5, 0)
+WorldCamp.ReceivingDisplayPosition = Config.Camp.ReceivingPosition + Vector3.new(0, 5.2, 0)
+WorldCamp.LostFoundPosition = Config.Camp.LostFoundPosition + Vector3.new(0, 2.2, 0)
 
 local function cylinder(parent: Instance, name: string, length: number, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?, flat: boolean?): Part
 	-- Roblox cylinders run along X. `flat` lays the disc on the ground (axis up).
@@ -3843,40 +4030,54 @@ local function rope(parent: Instance, a: Vector3, b: Vector3)
 end
 
 -- Ground ------------------------------------------------------------------------------------------------------------
+-- The mine footprint and the elevator shaft are HOLES in every ground treatment, derived from Grid.Bounds() and Config.Exit.
+-- Nothing below can extend across the mine, because the rectangles are produced by subtracting those holes (GroundPlan).
+local function mineHoles(ex): { { number } }
+	local b = Grid.Bounds()
+	local holes = { { b.MinX, b.MaxX, b.MinZ, b.MaxZ } }
+	if ex.Enabled then
+		table.insert(holes, { ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, b.MaxZ, b.MaxZ + ex.Run })
+	end
+	return holes
+end
+WorldCamp.MineHoles = mineHoles
+
 local function buildGround(camp: Folder, ex: { Enabled: boolean, CenterX: number, Width: number, Run: number })
 	local c = Config.Camp
+	local b = Grid.Bounds()
+	local holes = mineHoles(ex)
 	local ground = Instance.new("Folder")
 	ground.Name = "GroundTreatment"
 	ground.Parent = camp
 
-	-- camp: compacted warm sand, with a slightly wider apron so it sits in the desert instead of on it
-	box(camp, "CampApron", V(c.Size.X + 6, 0.3, c.Size.Z + 6), c.Position + V(0, 0.15, 0), C.CampEdge, Enum.Material.Sand)
+	-- camp: compacted warm sand. The floor starts exactly at the shaft edge; a wider apron on the far sides only.
+	local fx0, fx1 = c.Position.X - c.Size.X / 2, c.Position.X + c.Size.X / 2
+	local fz0, fz1 = c.Position.Z - c.Size.Z / 2, c.Position.Z + c.Size.Z / 2
+	for i, r in ipairs(GroundPlan.Subtract({ fx0 - 3, fx1 + 3, fz0, fz1 + 3 }, holes)) do
+		box(camp, "CampApron" .. i, V(r[2] - r[1], 0.3, r[4] - r[3]), V((r[1] + r[2]) / 2, 0.15, (r[3] + r[4]) / 2), C.CampEdge, Enum.Material.Sand)
+	end
 	box(camp, "CampFloor", V(c.Size.X, 0.5, c.Size.Z), c.Position + V(0, 0.25, 0), C.Camp, Enum.Material.Sand)
 
 	-- routes: worn earth from the back of camp to the mine entrance, with short branches to the stations
-	local zBack = c.Position.Z + c.Size.Z / 2
-	box(ground, "RouteMain", V(12, 0.1, zBack - 56), V(0, 0.55, (zBack + 56) / 2), C.Route, Enum.Material.Ground)
-	box(ground, "RouteShop", V(18, 0.1, 5), V(15, 0.55, 82), C.Route, Enum.Material.Ground)
-	box(ground, "RouteSell", V(18, 0.1, 5), V(-15, 0.55, 82), C.Route, Enum.Material.Ground)
+	local routeLen = fz1 - fz0
+	box(ground, "RouteMain", V(12, 0.1, routeLen), V(0, 0.55, (fz0 + fz1) / 2), C.Route, Enum.Material.Ground)
+	local shop, recv = c.ShopPosition, c.ReceivingPosition
+	box(ground, "RouteShop", V(shop.X - 6 - 6.5, 0.1, 5), V((6 + shop.X - 6.5) / 2, 0.55, shop.Z), C.Route, Enum.Material.Ground)
+	box(ground, "RouteReceiving", V(recv.X - 6 - 3.7, 0.1, 5), V((6 + recv.X - 3.7) / 2, 0.55, recv.Z), C.Route, Enum.Material.Ground)
 
-	-- excavation edge: gravel and disturbed soil in four broad strips just outside the grid (not across the shaft)
-	local half = Config.Site.SizeX * Config.Site.CellSize / 2
+	-- excavation edge: gravel in broad strips around the grid (a ring MINUS the mine and the shaft)
 	local rim = 8
-	local function strip(name: string, x0: number, x1: number, z0: number, z1: number)
-		box(ground, name, V(x1 - x0, 0.12, z1 - z0), V((x0 + x1) / 2, 0.06, (z0 + z1) / 2), C.Gravel, Enum.Material.Pebble)
+	for i, r in ipairs(GroundPlan.Subtract({ b.MinX - rim, b.MaxX + rim, b.MinZ - rim, b.MaxZ + rim }, holes)) do
+		box(ground, "Rim" .. i, V(r[2] - r[1], 0.12, r[4] - r[3]), V((r[1] + r[2]) / 2, 0.06, (r[3] + r[4]) / 2), C.Gravel, Enum.Material.Pebble)
 	end
-	strip("RimNorth", -half - rim, half + rim, -half - rim, -half)
-	strip("RimWest", -half - rim, -half, -half, half)
-	strip("RimEast", half, half + rim, -half, half)
-	if ex.Enabled then
-		strip("RimSouthA", -half - rim, ex.CenterX - ex.Width / 2, half, half + rim)
-		strip("RimSouthB", ex.CenterX + ex.Width / 2, half + rim, half, half + rim)
-	else
-		strip("RimSouth", -half - rim, half + rim, half, half + rim)
-	end
-	-- disturbed-soil patches (broad, low contrast, deterministic)
-	local patches = { { -40, -52, 9, 5 }, { 8, -53, 12, 4 }, { 44, -51, 8, 6 }, { -52, -10, 5, 10 }, { -51, 28, 4, 8 },
-		{ 52, -30, 4, 9 }, { 51, 14, 5, 11 }, { -46, 52, 10, 4 }, { 46, 52, 8, 4 } }
+	-- disturbed-soil patches: broad, low contrast, placed relative to the grid edge so they follow the configuration
+	local midX, midZ = (b.MinX + b.MaxX) / 2, (b.MinZ + b.MaxZ) / 2
+	local patches = {
+		{ b.MinX + 8, b.MinZ - 4, 9, 5 }, { midX, b.MinZ - 5, 12, 4 }, { b.MaxX - 4, b.MinZ - 3, 8, 6 },
+		{ b.MinX - 4, midZ - 14, 5, 10 }, { b.MinX - 3, midZ + 22, 4, 8 },
+		{ b.MaxX + 4, midZ - 8, 4, 9 }, { b.MaxX + 3, midZ + 16, 5, 11 },
+		{ b.MinX + 6, b.MaxZ + 4, 10, 4 }, { b.MaxX - 6, b.MaxZ + 4, 8, 4 },
+	}
 	for i, p in ipairs(patches) do
 		box(ground, "Disturbed" .. i, V(p[3], 0.14, p[4]), V(p[1], 0.07, p[2]), C.Disturbed, Enum.Material.Ground)
 	end
@@ -3887,8 +4088,9 @@ local function buildFence(camp: Folder, ex: { Enabled: boolean, CenterX: number,
 	local fence = Instance.new("Folder")
 	fence.Name = "Fence"
 	fence.Parent = camp
-	local lim = 55
-	local zS = 54.5
+	local gb = Grid.Bounds()
+	local lim = gb.MaxX + 7
+	local zS = gb.MaxZ + 6.5
 	local function inGap(x: number, z: number): boolean
 		if z > 40 and math.abs(x) <= 10 then
 			return true -- the way in
@@ -3926,22 +4128,25 @@ local function buildEntrance(camp: Folder)
 	local e = Instance.new("Folder")
 	e.Name = "Entrance"
 	e.Parent = camp
-	box(e, "Boardwalk", V(12, 0.4, 10), V(0, 0.2, 53), C.TimberLight, Enum.Material.WoodPlanks)
+	local gb = Grid.Bounds()
+	local gateZ = Config.Camp.EntranceZ
+	local len = gateZ - gb.MaxZ - 0.5
+	box(e, "Boardwalk", V(12, 0.4, len), V(0, 0.2, gb.MaxZ + len / 2), C.TimberLight, Enum.Material.WoodPlanks)
 	for _, sx in ipairs({ -6.3, 6.3 }) do
-		for _, z in ipairs({ 49.5, 53, 56.5 }) do
-			box(e, "RailPost", V(0.6, 3, 0.6), V(sx, 1.5, z), C.TimberDark, Enum.Material.Wood)
+		for _, dz in ipairs({ 1.5, len / 2, len - 1.5 }) do
+			box(e, "RailPost", V(0.6, 3, 0.6), V(sx, 1.5, gb.MaxZ + dz), C.TimberDark, Enum.Material.Wood)
 		end
-		rope(e, V(sx, 2.5, 49.5), V(sx, 2.5, 56.5))
+		rope(e, V(sx, 2.5, gb.MaxZ + 1.5), V(sx, 2.5, gb.MaxZ + len - 1.5))
 	end
 	for _, sx in ipairs({ -7.4, 7.4 }) do
-		box(e, "GatePost", V(1, 9.5, 1), V(sx, 5.25, 58.5), C.Timber, Enum.Material.Wood)
-		box(e, "GateBand", V(1.15, 0.4, 1.15), V(sx, 3, 58.5), C.Iron, Enum.Material.Metal)
+		box(e, "GatePost", V(1, 9.5, 1), V(sx, 5.25, gateZ), C.Timber, Enum.Material.Wood)
+		box(e, "GateBand", V(1.15, 0.4, 1.15), V(sx, 3, gateZ), C.Iron, Enum.Material.Metal)
 	end
-	box(e, "GateLintel", V(16.6, 0.9, 0.9), V(0, 10.1, 58.5), C.TimberDark, Enum.Material.Wood)
+	box(e, "GateLintel", V(16.6, 0.9, 0.9), V(0, 10.1, gateZ), C.TimberDark, Enum.Material.Wood)
 	for _, sx in ipairs({ -3, 3 }) do
-		deco(box(e, "SignChain", V(0.08, 0.8, 0.08), V(sx, 9.35, 58.5), C.Iron, Enum.Material.Metal))
+		deco(box(e, "SignChain", V(0.08, 0.8, 0.08), V(sx, 9.35, gateZ), C.Iron, Enum.Material.Metal))
 	end
-	local board = box(e, "EntranceSign", V(8, 1.9, 0.3), V(0, 8.0, 58.5), C.TimberDark, Enum.Material.Wood)
+	local board = box(e, "EntranceSign", V(8, 1.9, 0.3), V(0, 8.0, gateZ), C.TimberDark, Enum.Material.Wood)
 	sign(board, Enum.NormalId.Back, "DIG SITE", C.TimberDark, C.Trim)
 end
 
@@ -3950,7 +4155,7 @@ local function buildShop(camp: Folder)
 	local s = Instance.new("Folder")
 	s.Name = "EquipmentShop"
 	s.Parent = camp
-	local o = Config.Camp.Position + Config.Camp.ShopOffset -- (14, 0, 74)
+	local o = Config.Camp.ShopPosition
 	local base = V(o.X, 0.5, o.Z)
 	for _, sx in ipairs({ -6, 6 }) do
 		for _, sz in ipairs({ -3.3, 3.3 }) do
@@ -4010,8 +4215,8 @@ local function buildAppraisal(camp: Folder)
 	local s = Instance.new("Folder")
 	s.Name = "AppraisalStation"
 	s.Parent = camp
-	local sz = WorldCamp.SellZoneCenter -- (-14, 0, 78): the sell logic radius is unchanged
-	local base = V(sz.X, 0.5, 66)
+	local sz = WorldCamp.SellZoneCenter -- the sell trigger centre (logic) = the marked circle (visual)
+	local base = V(sz.X, 0.5, sz.Z - 12) -- the stall stands just north of the circle
 
 	for _, sx in ipairs({ -5.5, 5.5 }) do
 		for _, z in ipairs({ -2.6, 2.6 }) do
@@ -4099,7 +4304,7 @@ local function buildReceiving(camp: Folder)
 
 	-- lost & found pad: fallback drop point (death/disconnect)
 	local lf = WorldCamp.LostFoundPosition
-	local pad = box(folder, "LostFoundPad", V(4, 0.3, 4), V(c.X, 0.65, lf.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
+	local pad = box(folder, "LostFoundPad", V(4, 0.3, 4), V(lf.X, 0.65, lf.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
 	sign(pad, Enum.NormalId.Top, "LOST & FOUND", Color3.fromHex("CDBE98"), C.TimberDark)
 end
 
@@ -4114,7 +4319,7 @@ function WorldCamp.Build(world: Folder, ex)
 	spawn.Name = "CampSpawn"
 	spawn.Anchored = true
 	spawn.Size = Vector3.new(10, 0.2, 10)
-	spawn.CFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 0.6, 16))
+	spawn.CFrame = CFrame.new(Config.Camp.SpawnPosition + Vector3.new(0, 0.6, 0))
 	spawn.Neutral = true
 	spawn.Duration = 0
 	spawn.Transparency = 1
@@ -4132,7 +4337,7 @@ return WorldCamp
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="39">
           <Properties>
             <string name="Name">WorldElevator</string>
             <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
@@ -4355,7 +4560,7 @@ return WorldElevator
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="40">
           <Properties>
             <string name="Name">WorldKit</string>
             <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
@@ -4458,7 +4663,7 @@ return WorldKit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">WorldLandscape</string>
             <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
@@ -4537,10 +4742,15 @@ function WorldLandscape.Build(world: Folder)
 	local land = Instance.new("Folder")
 	land.Name = "Landscape"
 	land.Parent = world
-	local ext = 170 -- map boundary (the invisible walls are built by WorldBuilder at +-ext)
+	local ext = Config.World.BoundaryExtent -- map boundary (the invisible walls are built by WorldBuilder at +-ext)
 
 	-- Distant ground + mesas beyond the boundary: decoration only (non-solid, not raycast).
-	Kit.deco(Kit.box(land, "FarGround", V(1400, 2, 1400), V(0, -1.1, 0), C.Sand, Enum.Material.Sand))
+	-- The far ground is a FRAME around the playable square (never under it): the mine is entirely inside the square, so no
+	-- far-ground piece can occupy dig-cell space. Top flush with the slab tops (y = 0); non-solid decoration.
+	local reach = 700
+	for i, r in ipairs({ { -reach, reach, -reach, -ext }, { -reach, reach, ext, reach }, { -reach, -ext, -ext, ext }, { ext, reach, -ext, ext } }) do
+		Kit.deco(Kit.box(land, "FarGround" .. i, V(r[2] - r[1], 2, r[4] - r[3]), V((r[1] + r[2]) / 2, -1, (r[3] + r[4]) / 2), C.Sand, Enum.Material.Sand))
+	end
 	local far = Instance.new("Folder")
 	far.Name = "FarMesas"
 	far.Parent = land
@@ -4584,23 +4794,23 @@ return WorldLandscape
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="40">
+  <Item class="StarterPlayer" referent="42">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="41">
+    <Item class="StarterPlayerScripts" referent="43">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="42">
+      <Item class="Folder" referent="44">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="43">
+        <Item class="Folder" referent="45">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="44">
+          <Item class="ModuleScript" referent="46">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
@@ -4640,7 +4850,7 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="45">
+          <Item class="ModuleScript" referent="47">
             <Properties>
               <string name="Name">Bindings</string>
               <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
@@ -4670,7 +4880,7 @@ return Bindings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="46">
+          <Item class="ModuleScript" referent="48">
             <Properties>
               <string name="Name">CameraController</string>
               <string name="Source"><![CDATA[-- Desktop camera.
@@ -4978,7 +5188,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="47">
+          <Item class="ModuleScript" referent="49">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -5348,7 +5558,7 @@ return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="48">
+          <Item class="ModuleScript" referent="50">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -5777,7 +5987,7 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="49">
+          <Item class="ModuleScript" referent="51">
             <Properties>
               <string name="Name">InputMode</string>
               <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
@@ -5853,7 +6063,7 @@ return InputMode
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="50">
+          <Item class="ModuleScript" referent="52">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -5935,7 +6145,7 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="51">
+          <Item class="ModuleScript" referent="53">
             <Properties>
               <string name="Name">PauseMenu</string>
               <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
@@ -6231,7 +6441,7 @@ return PauseMenu
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="52">
+          <Item class="ModuleScript" referent="54">
             <Properties>
               <string name="Name">Settings</string>
               <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
@@ -6304,7 +6514,7 @@ return Settings
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="53">
+          <Item class="ModuleScript" referent="55">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -6420,7 +6630,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="54">
+          <Item class="ModuleScript" referent="56">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks / Utility / Cosmetics), a rotating 3D preview of the ACTUAL
@@ -6946,7 +7156,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="55">
+          <Item class="ModuleScript" referent="57">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -6991,7 +7201,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="56">
+          <Item class="ModuleScript" referent="58">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -7067,7 +7277,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="57">
+          <Item class="ModuleScript" referent="59">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -7467,9 +7677,11 @@ function UI.Init()
 				refs.layer.Text = Defs.LayerAtCell(math.clamp(cy, 0, Grid.SizeY - 1)).Name
 			else
 				refs.depth.Text = "SURFACE"
-				refs.layer.Text = (p - Config.Camp.Position).Magnitude < 40 and "BASE CAMP" or "DIG SITE"
+				local cp, cs = Config.Camp.Position, Config.Camp.Size
+				local onCamp = math.abs(p.X - cp.X) <= cs.X / 2 + 4 and math.abs(p.Z - cp.Z) <= cs.Z / 2 + 4
+				refs.layer.Text = onCamp and "BASE CAMP" or "DIG SITE"
 			end
-			if ShopUI.IsOpen() and (p - (Config.Camp.Position + Config.Camp.ShopOffset)).Magnitude > 30 then
+			if ShopUI.IsOpen() and (p - Config.Camp.ShopPosition).Magnitude > 30 then
 				UI.CloseShop()
 			end
 		end
@@ -7500,7 +7712,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="58">
+          <Item class="ModuleScript" referent="60">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -7567,7 +7779,7 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="59">
+          <Item class="ModuleScript" referent="61">
             <Properties>
               <string name="Name">ViewmodelController</string>
               <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
@@ -7711,7 +7923,7 @@ return ViewmodelController
             </Properties>
           </Item>
         </Item>
-        <Item class="LocalScript" referent="60">
+        <Item class="LocalScript" referent="62">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
