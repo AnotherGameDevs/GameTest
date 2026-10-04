@@ -9,6 +9,8 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local UI = require(script.Parent.UIController)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
 local Audio = require(script.Parent.AudioController)
 
 local P = Config.Palette
@@ -18,7 +20,7 @@ local ThrowController = {}
 local function canThrow(): boolean
 	local d = State.Data
 	return (d.Consumables and (d.Consumables.dynamite or 0) > 0 or false) and d.Carrying == nil
-		and not UI.IsMenuOpen() and UserInputService:GetFocusedTextBox() == nil
+		and not InputMode.IsCursorFree() and UserInputService:GetFocusedTextBox() == nil
 end
 
 local function throw()
@@ -34,7 +36,7 @@ end
 
 function ThrowController.Init()
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if not processed and input.KeyCode == Enum.KeyCode.G then
+		if not processed and input.KeyCode == Bindings.ThrowDynamite and not InputMode.IsMenuOpen() then
 			throw()
 		end
 	end)

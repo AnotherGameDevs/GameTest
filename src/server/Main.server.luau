@@ -16,6 +16,8 @@ local RateLimiter = require(Services.RateLimiter)
 local MetricsService = require(Services.MetricsService)
 local ArtifactService = require(Services.ArtifactService)
 local DynamiteService = require(Services.DynamiteService)
+local SettingsService = require(Services.SettingsService)
+local ElevatorService = require(Services.ElevatorService)
 
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
@@ -28,6 +30,8 @@ for name, init in pairs({
 	Metrics = MetricsService.Init,
 	Artifacts = ArtifactService.Init,
 	Dynamite = DynamiteService.Init,
+	Settings = SettingsService.Init,
+	Elevator = ElevatorService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then

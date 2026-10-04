@@ -9,6 +9,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
 local DataService = {}
 
@@ -31,7 +32,7 @@ local function defaultData()
 		},
 		Cosmetics = {},
 		EquippedCosmetics = {},
-		Settings = {},
+		Settings = SettingsSpec.Defaults(),
 	}
 end
 
@@ -39,6 +40,7 @@ local function migrate(data)
 	DataMigrations.Migrate(data, Config.Data.CurrentVersion, Defs)
 	Util.Reconcile(data, defaultData())
 	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
+	data.Settings = SettingsSpec.Sanitize(data.Settings) -- clamp whatever was saved
 end
 
 -- GetDataStore throws in an unpublished place, so it must never run unprotected.

@@ -5,6 +5,7 @@ local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
 local Defs = require(ReplicatedStorage.Shared.Defs)
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
 local StateService = {}
 local pending: { [Player]: boolean } = {}
@@ -21,6 +22,7 @@ function StateService.Snapshot(player: Player)
 		Cash = data.Cash,
 		Reputation = data.Reputation,
 		Consumables = data.Consumables,
+		Settings = SettingsSpec.Sanitize(data.Settings),
 		Skins = data.EquippedCosmetics,
 		Count = InventoryService.Count(data),
 		Capacity = InventoryService.Capacity(data),

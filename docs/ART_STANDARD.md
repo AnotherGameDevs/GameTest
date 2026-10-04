@@ -3,6 +3,11 @@
 Parts only (no meshes/textures), built with `ModelKit`. Goals: functional, physically constructed, readable at a glance,
 bigger-but-not-huge as tiers rise.
 
+* **Tool axis (one convention, enforced by `tests/tool_assembly_test.luau`).** Origin = an invisible 0.4 cube root named
+  `Handle` (never an oriented cylinder). +Y = forward: working end at +Y, grip at -Y. +X = width, +Z = thickness.
+  Every other part, the shaft included, is welded to `Handle` at its authored offset. The held tool, the shop preview and
+  the first-person viewmodel are all built from the same part list, so they cannot disagree. The shaft must enter the
+  socket/housing, the grip must sit at the opposite end, and the whole thing must be one connected assembly.
 * **Silhouette first.** Long axis along Y: grip at -Y, working end at +Y. Overall length 6-7.5 studs, max width ~2.6.
   Each tier must be recognisable in silhouette alone (grip shape, blade/head shape, body mass).
 * **Palette.** 3 main colours + 1 accent per model, from the project palette. Wood `B07A45`/`6B4A2E`, steel

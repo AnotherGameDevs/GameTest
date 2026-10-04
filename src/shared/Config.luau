@@ -69,8 +69,8 @@ Config.Artifacts = {
 -- Fixed physical exit from the mine: a ladder shaft outside the destructible grid, on the camp (south) edge.
 Config.Exit = {
 	Enabled = true,
-	CenterX = -26, -- world X of the shaft centre (edges should land on cell boundaries: 4-stud multiples)
-	Width = 12,
+	CenterX = 28, -- world X of the shaft centre (edges must land on cell boundaries: 4-stud multiples). Right of the pit.
+	Width = 16, -- left half = ladder + landings, right half = elevator car
 	Run = 8, -- studs the shaft extends south from the grid edge
 }
 
@@ -110,6 +110,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	RequestEquip = { 5, 2 },
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
+	UpdateSettings = { 6, 3 },
 }
 
 return Config

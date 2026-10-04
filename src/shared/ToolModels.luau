@@ -23,8 +23,17 @@ local ORANGE, ORANGE_DARK = hex("E5602B"), hex("B84519") -- family C panels
 local BOLT = hex("C3C8CE")
 local DYNAMITE_RED, CREAM = hex("C23B2A"), P.Cream
 
--- Coordinates: the tool's long axis runs along Y with the grip end at -Y and the working end at +Y (a held tool
--- points forward along its own +Y). Origin = the "Handle" part. Studs. First-person draws tools at FPScale.
+-- TOOL AXIS CONVENTION (every model in this file follows it; docs/ART_STANDARD.md repeats it):
+--   * Origin (0,0,0) = the invisible root part named "Handle" (a 0.4 cube). It is NEVER an oriented cylinder:
+--     a cylinder carries its own axis rotation, and the welds of every other part would then be wrong.
+--   * +Y = forward along the tool: the working end (blade / chisel / bit) is at +Y, the grip is at -Y.
+--   * +X = width (blade width, cross-grip). +Z = thickness (the flat face of a blade faces +/-Z).
+--   * Roblox cylinders run along their own X axis, so Kit.cyl rotates them (Y: roll 90 about Z; Z: yaw 90 about Y).
+--   * Every other part is welded to "Handle" at its authored offset (BuildTool) or posed from the same offsets
+--     (BuildPreview, BuildWelded viewmodel). There is exactly one source of truth: the Parts list below.
+--   * Each spec also carries Checks (names of the shaft / socket / grip / working-end parts) used by
+--     tests/tool_assembly_test.luau to prove the assembly is connected and correctly oriented.
+-- Studs. First-person uses a separate viewmodel built from these same parts (see Viewmodel / ViewmodelMath).
 local builders = {}
 
 local function add(list, ...)
@@ -64,10 +73,11 @@ end
 -- Tier 1: weathered, chunky, obviously a starter. Rust-orange blade, plain wood, T-grip.
 function builders.rusty(_)
 	return {
+		Checks = { Shaft = "Shaft", Socket = { "Ferrule" }, Grip = { "GripBar" }, WorkingEnd = { "BladeTip" } },
 		Grip = CFrame.new(0, -1.2, 0),
 		FPScale = 0.5,
 		Parts = {
-			Kit.cyl("Handle", "Y", 4.4, 0.55, V(0, 0, 0), WOOD, Enum.Material.Wood),
+			Kit.cyl("Shaft", "Y", 4.4, 0.55, V(0, 0, 0), WOOD, Enum.Material.Wood),
 			Kit.cyl("GripBar", "X", 1.5, 0.5, V(0, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
 			Kit.ball("GripCapL", 0.66, V(-0.78, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
 			Kit.ball("GripCapR", 0.66, V(0.78, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
@@ -86,7 +96,7 @@ end
 -- Tier 2: clean steel, teal collar + wraps, closed D-grip, bevelled two-tone blade. Same size, clearly "bought".
 function builders.digging(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 4.4, 0.55, V(0, 0, 0), LACQUER, Enum.Material.Wood),
+		Kit.cyl("Shaft", "Y", 4.4, 0.55, V(0, 0, 0), LACQUER, Enum.Material.Wood),
 		Kit.cyl("WrapA", "Y", 0.45, 0.68, V(0, 0.9, 0), P.Teal),
 		Kit.cyl("WrapB", "Y", 0.3, 0.66, V(0, 0.2, 0), P.Teal),
 		Kit.cyl("Socket", "Y", 0.9, 0.82, V(0, 2.0, 0), STEEL_DARK, Enum.Material.Metal),
@@ -96,14 +106,15 @@ function builders.digging(_)
 	}
 	dGrip(parts, -2.2, 1.6, 0.5, WOOD_DARK, Enum.Material.Wood)
 	spadeBlade(parts, 2.95, 1.9, 1.0, 0.3, STEEL, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
-	return { Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
+	return { Checks = { Shaft = "Shaft", Socket = { "Socket" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "BladeTip" } },
+		Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
 end
 
 -- Tier 3: same wooden family and D-grip, but a thicker shaft, a bigger scooped blade with turned-up side lips, and
 -- strapped socket. Bigger scoop without being much longer.
 function builders.heavy(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 4.4, 0.68, V(0, 0, 0), LACQUER, Enum.Material.Wood),
+		Kit.cyl("Shaft", "Y", 4.4, 0.68, V(0, 0, 0), LACQUER, Enum.Material.Wood),
 		Kit.cyl("Socket", "Y", 1.1, 1.0, V(0, 2.0, 0), STEEL_DARK, Enum.Material.Metal),
 		Kit.cyl("StrapA", "Y", 0.18, 1.1, V(0, 1.7, 0), STEEL_LIGHT, Enum.Material.Metal),
 		Kit.cyl("StrapB", "Y", 0.18, 1.1, V(0, 2.3, 0), STEEL_LIGHT, Enum.Material.Metal),
@@ -114,8 +125,9 @@ function builders.heavy(_)
 		Kit.block("LipR", V(0.24, 1.3, 0.62), V(1.15, 3.2, 0.12), STEEL_DARK, Enum.Material.Metal),
 	}
 	dGrip(parts, -2.2, 1.8, 0.6, WOOD_DARK, Enum.Material.Wood)
-	spadeBlade(parts, 3.1, 2.4, 1.1, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
-	return { Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
+	spadeBlade(parts, 3.0, 2.4, 1.0, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
+	return { Checks = { Shaft = "Shaft", Socket = { "Socket" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "BladeTip" } },
+		Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
 end
 
 ------------------------------------------------------------------------------------------------------------------
@@ -127,7 +139,7 @@ end
 -- housing, welded ribs, and small side lugs that hint at its wider cut.
 function builders.power(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 4.4, 0.6, V(0, 0, 0), AMBER),
+		Kit.cyl("Shaft", "Y", 4.4, 0.6, V(0, 0, 0), AMBER),
 		Kit.cyl("HandSleeve", "Y", 1.1, 0.74, V(0, -1.4, 0), RUBBER),
 		Kit.block("Housing", V(1.3, 1.1, 1.0), V(0, 2.0, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("BandA", V(1.42, 0.18, 1.12), V(0, 1.6, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
@@ -142,16 +154,18 @@ function builders.power(_)
 	}
 	dGrip(parts, -2.2, 1.7, 0.55, RUBBER)
 	spadeBlade(parts, 3.2, 2.0, 1.0, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, GUNMETAL, Enum.Material.Metal)
-	return { Grip = CFrame.new(0, -1.4, 0), FPScale = 0.5, Parts = parts }
+	return { Checks = { Shaft = "Shaft", Socket = { "Housing" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "BladeTip" } },
+		Grip = CFrame.new(0, -1.4, 0), FPScale = 0.5, Parts = parts }
 end
 
 -- Tier 5: a chisel tool. Amber housing on a steel core, rubber cross-grip, steel chisel with a separate bolted edge.
 function builders.jackhammer(_)
 	return {
+		Checks = { Shaft = "Shaft", Socket = { "Collar", "ChiselBar" }, Grip = { "GripBar" }, WorkingEnd = { "ChiselHead", "EdgePlate" } },
 		Grip = CFrame.new(0, -2.4, 0),
 		FPScale = 0.46,
 		Parts = {
-			Kit.cyl("Handle", "Y", 3.0, 0.9, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+			Kit.cyl("Shaft", "Y", 3.0, 0.9, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
 			Kit.cyl("GripBar", "X", 2.4, 0.6, V(0, -2.4, 0), RUBBER),
 			Kit.ball("GripCapL", 0.82, V(-1.25, -2.4, 0), RUBBER),
 			Kit.ball("GripCapR", 0.82, V(1.25, -2.4, 0), RUBBER),
@@ -174,7 +188,8 @@ end
 -- carbide inserts. The head is a static stepped cone (no spiral, nothing that implies it spins).
 function builders.drill(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 3.2, 0.85, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.cyl("Shaft", "Y", 3.2, 0.85, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("Neck", V(0.7, 0.9, 0.7), V(0, -1.75, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("Body", V(1.4, 1.8, 1.2), V(0, 0.3, 0), AMBER),
 		Kit.block("StripeA", V(1.5, 0.2, 1.26), V(0, 0.95, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("StripeB", V(1.5, 0.2, 1.26), V(0, -0.35, 0), GUNMETAL, Enum.Material.Metal),
@@ -191,8 +206,9 @@ function builders.drill(_)
 		Kit.block("InsertE", V(0.3, 0.5, 0.3), V(0.64, 2.15, 0), BOLT, Enum.Material.Metal),
 		Kit.block("InsertW", V(0.3, 0.5, 0.3), V(-0.64, 2.15, 0), BOLT, Enum.Material.Metal),
 	}
-	dGrip(parts, -2.0, 1.7, 0.55, RUBBER)
-	return { Grip = CFrame.new(0, -1.9, 0), FPScale = 0.46, Parts = parts }
+	dGrip(parts, -2.1, 1.7, 0.55, RUBBER)
+	return { Checks = { Shaft = "Shaft", Socket = { "Body", "Collar" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "Tip" } },
+		Grip = CFrame.new(0, -1.9, 0), FPScale = 0.46, Parts = parts }
 end
 
 ------------------------------------------------------------------------------------------------------------------
@@ -203,7 +219,7 @@ end
 -- Tier 7: heavy housing with ribbed side panels, a two-grip assembly and a wide bolted cutting head + edge plate.
 function builders.industrial(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 3.4, 1.0, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.cyl("Shaft", "Y", 3.4, 1.0, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("Housing", V(1.9, 2.6, 1.5), V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("PanelL", V(0.14, 2.0, 1.3), V(-1.0, 0, 0), ORANGE),
 		Kit.block("PanelR", V(0.14, 2.0, 1.3), V(1.0, 0, 0), ORANGE),
@@ -239,7 +255,8 @@ function builders.industrial(_)
 		Kit.ball("EdgeBoltC", 0.26, V(0.28, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
 		Kit.ball("EdgeBoltD", 0.26, V(0.85, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
 	}
-	return { Grip = CFrame.new(0, -2.2, 0), FPScale = 0.4, Parts = parts }
+	return { Checks = { Shaft = "Shaft", Socket = { "Housing", "Socket" }, Grip = { "GripBar" }, WorkingEnd = { "EdgePlate", "ToothM" } },
+		Grip = CFrame.new(0, -2.2, 0), FPScale = 0.4, Parts = parts }
 end
 
 -- Tier 8 (consumable): a bundle of three charges held with steel bands and a stencilled label; one fuse.
@@ -247,7 +264,7 @@ function builders.dynamite(_)
 	local parts = {}
 	local centres = { V(0, 0, 0), V(0.86, 0, 0), V(0.43, 0, 0.75) }
 	for i, c in ipairs(centres) do
-		table.insert(parts, Kit.cyl(i == 1 and "Handle" or ("Stick" .. i), "Y", 3.0, 0.85, c, DYNAMITE_RED))
+		table.insert(parts, Kit.cyl("Stick" .. i, "Y", 3.0, 0.85, c, DYNAMITE_RED))
 		table.insert(parts, Kit.cyl("Label" .. i, "Y", 1.0, 0.89, c, CREAM))
 		table.insert(parts, Kit.cyl("BandLo" .. i, "Y", 0.22, 0.92, c + V(0, -1.05, 0), BOLT, Enum.Material.Metal))
 		table.insert(parts, Kit.cyl("BandHi" .. i, "Y", 0.22, 0.92, c + V(0, 1.05, 0), BOLT, Enum.Material.Metal))
@@ -258,13 +275,27 @@ function builders.dynamite(_)
 	return { Grip = CFrame.new(0, 0, 0), FPScale = 0.5, Parts = parts }
 end
 
+-- Spec = { Parts, Grip, FPScale, Checks }. Parts[1] is ALWAYS the invisible root cube "Handle" at the origin.
 function ToolModels.GetSpec(appearanceId: string)
 	local ap = Appearances.List[appearanceId] or Appearances.List.shovel_rusty
 	local builder = builders[ap.Builder] or builders.rusty
-	return builder(ap)
+	local spec = builder(ap)
+	local root = Kit.block("Handle", V(0.4, 0.4, 0.4), V(0, 0, 0), METAL)
+	root.Transparency = 1
+	table.insert(spec.Parts, 1, root)
+	return spec
 end
 
--- The held Tool (server). Part named "Handle" is the root; everything else is welded to it.
+local function harden(p: Part)
+	p.CanCollide = false -- decorative: never collides
+	p.CanQuery = false -- ...and never intercepts a mining/targeting ray
+	p.CanTouch = false
+	p.Massless = true
+end
+
+-- The held Tool (server). Root "Handle" is an invisible cube; EVERY other part (shaft included) is welded to it at
+-- its authored offset, so the tool is one rigid assembly whichever way the character animates its hand.
+-- Tool.Grip is only a position along the shaft where the hand holds it (no rotation: hand +Y = tool +Y).
 function ToolModels.BuildTool(appearanceId: string): Tool
 	local spec = ToolModels.GetSpec(appearanceId)
 	local tool = Instance.new("Tool")
@@ -273,27 +304,22 @@ function ToolModels.BuildTool(appearanceId: string): Tool
 	tool.ManualActivationOnly = true
 	tool.RequiresHandle = true
 	tool.Grip = spec.Grip
-	tool:SetAttribute("ToolFPScale", spec.FPScale)
+	tool:SetAttribute("AppearanceId", appearanceId)
 
-	local handle
-	for _, ps in ipairs(spec.Parts) do
-		if ps.Name == "Handle" then
-			handle = Kit.make(ps)
-			handle.Massless = true
-			handle.Parent = tool
-		end
-	end
-	for _, ps in ipairs(spec.Parts) do
-		if ps.Name ~= "Handle" then
-			local p = Kit.make(ps)
-			p.Massless = true
-			p.Parent = tool
-			local w = Instance.new("Weld")
-			w.Part0 = handle
-			w.Part1 = p
-			w.C0 = ps.Offset
-			w.Parent = p
-		end
+	local handle = Kit.make(spec.Parts[1])
+	harden(handle)
+	handle.Parent = tool
+	for i = 2, #spec.Parts do
+		local ps = spec.Parts[i]
+		local p = Kit.make(ps)
+		harden(p)
+		p.Parent = tool
+		local w = Instance.new("Weld")
+		w.Name = "Weld_" .. ps.Name
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = ps.Offset
+		w.Parent = p
 	end
 	return tool
 end
@@ -304,32 +330,27 @@ function ToolModels.BuildPreview(appearanceId: string): Model
 	return Kit.BuildModel(spec.Parts, "ToolPreview")
 end
 
--- A physics-ready copy for thrown items (dynamite): the "Handle" collides, everything else is welded and non-colliding.
+-- A physics-ready copy for thrown items (dynamite): every part collides as one welded body around the invisible root.
 function ToolModels.BuildProjectile(appearanceId: string): Model
 	local spec = ToolModels.GetSpec(appearanceId)
 	local model = Instance.new("Model")
 	model.Name = "Projectile"
-	local handle
-	for _, ps in ipairs(spec.Parts) do
+	local handle = Kit.make(spec.Parts[1])
+	handle.CanCollide = false
+	handle.CanTouch = false
+	handle.Parent = model
+	model.PrimaryPart = handle
+	for i = 2, #spec.Parts do
+		local ps = spec.Parts[i]
 		local p = Kit.make(ps)
-		if ps.Name == "Handle" then
-			handle = p
-			p.CanCollide = true
-			p.Parent = model
-			model.PrimaryPart = p
-		end
-	end
-	for _, ps in ipairs(spec.Parts) do
-		if ps.Name ~= "Handle" then
-			local p = Kit.make(ps)
-			p.Massless = true
-			p.Parent = model
-			local w = Instance.new("Weld")
-			w.Part0 = handle
-			w.Part1 = p
-			w.C0 = ps.Offset
-			w.Parent = p
-		end
+		p.CanCollide = true
+		p.CanTouch = false
+		p.Parent = model
+		local w = Instance.new("Weld")
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = ps.Offset
+		w.Parent = p
 	end
 	return model
 end

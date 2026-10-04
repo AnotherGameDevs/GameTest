@@ -17,6 +17,9 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
 local ShopUI = require(script.Parent.ShopUI)
+local PauseMenu = require(script.Parent.PauseMenu)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
 local K = require(script.Parent.UIKit)
 
 local P = Config.Palette
@@ -29,15 +32,6 @@ local CARRY_BLOCKED_TEXT = "Carry your artifact back to camp, or place it down f
 
 local gui: ScreenGui
 local refs: { [string]: any } = {}
-local cursorFree = false -- toggled free-cursor mode (first person)
-local menuCallbacks: { () -> () } = {}
-
-local function menuChanged()
-	for _, cb in ipairs(menuCallbacks) do
-		task.spawn(cb)
-	end
-end
-
 local shownCash, targetCash = 0, 0
 local returnReadyAt = 0
 
@@ -103,44 +97,23 @@ local function updateObjective(d)
 end
 
 -- Menu state ----------------------------------------------------------------------------------------
--- True while any interactive menu wants the cursor (shop, or toggled free-cursor mode).
-function UI.IsMenuOpen(): boolean
-	return ShopUI.IsOpen() or cursorFree
-end
-
+-- All cursor ownership lives in InputMode. These wrappers keep the old call sites (shop prompt, auto-close) simple.
 function UI.IsShopOpen(): boolean
 	return ShopUI.IsOpen()
 end
 
-function UI.IsCursorFree(): boolean
-	return cursorFree
-end
-
-function UI.OnMenuChanged(cb: () -> ())
-	table.insert(menuCallbacks, cb)
-end
-
--- First-person locks the mouse; a visible Modal button is Roblox's supported way to release it.
-function UI.SetCursorFree(free: boolean)
-	if cursorFree == free then
+function UI.OpenShop()
+	if InputMode.IsMenuOpen() then
 		return
 	end
-	cursorFree = free
-	if refs.cursorFree then
-		refs.cursorFree.Visible = free
-	end
-	menuChanged()
-end
-
-function UI.OpenShop()
 	ShopUI.Open()
-	menuChanged()
+	InputMode.OpenMenu("Shop")
 	Audio.Play("UI")
 end
 
 function UI.CloseShop()
 	if ShopUI.IsOpen() then
-		ShopUI.Close() -- its onClose callback announces the menu change
+		ShopUI.Close() -- its closed-callback releases the cursor through InputMode
 	end
 end
 
@@ -300,12 +273,12 @@ local function build()
 
 	-- Bottom-left stack: explanation, place artifact, return to camp
 	local base = TOUCH and 230 or 70
-	refs.returnBtn = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(170, 46), UDim2.new(0, 12, 1, -base), P.Cream)
+	refs.returnBtn = button(gui, TOUCH and "TO CAMP" or ("TO CAMP [" .. Bindings.Name(Bindings.ReturnToCamp) .. "]"), UDim2.fromOffset(170, 46), UDim2.new(0, 12, 1, -base), P.Cream)
 	refs.returnBtn.Activated:Connect(UI.RequestReturnToCamp)
 	if not Config.ReturnToCamp.Enabled then
 		refs.returnBtn.Visible = false
 	end
-	refs.placeBtn = button(gui, TOUCH and "PLACE ARTIFACT" or "PLACE ARTIFACT [X]", UDim2.fromOffset(220, 46),
+	refs.placeBtn = button(gui, TOUCH and "PLACE ARTIFACT" or ("PLACE ARTIFACT [" .. Bindings.Name(Bindings.PlaceArtifact) .. "]"), UDim2.fromOffset(220, 46),
 		UDim2.new(0, 12, 1, -(base + 54)), Color3.fromHex("5BA7E8"))
 	refs.placeBtn.TextSize = 18
 	refs.placeBtn.Visible = false
@@ -319,10 +292,12 @@ local function build()
 	refs.dynBadge.Visible = false
 	refs.dynText = label(refs.dynBadge, "", 17, P.Cream, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
 
-	-- Shop
-	ShopUI.Build(gui, menuChanged)
-	refs.cursorFree = mk("TextButton", { Name = "CursorFree", Text = "", BackgroundTransparency = 1, Modal = true,
-		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5), Visible = false }, gui)
+	-- Shop + menu (both claim the cursor through InputMode only)
+	ShopUI.Build(gui, function()
+		InputMode.CloseMenu("Shop")
+	end)
+	PauseMenu.Build(gui)
+	PauseMenu.BuildGearButton(gui)
 end
 
 function UI.GetGui(): ScreenGui
@@ -353,7 +328,7 @@ function UI.Init()
 		-- dynamite badge
 		local dyn = d.Consumables and d.Consumables.dynamite or 0
 		refs.dynBadge.Visible = dyn > 0 and not TOUCH
-		refs.dynText.Text = ("DYNAMITE x%d   [G] throw"):format(dyn)
+		refs.dynText.Text = ("DYNAMITE x%d   [%s] throw"):format(dyn, Bindings.Name(Bindings.ThrowDynamite))
 		updateObjective(d)
 		if ShopUI.IsOpen() then
 			ShopUI.Render()
@@ -390,9 +365,12 @@ function UI.Init()
 		if processed or UserInputService:GetFocusedTextBox() then
 			return
 		end
-		if input.KeyCode == Enum.KeyCode.R and not ShopUI.IsOpen() then
+		if InputMode.IsMenuOpen() then
+			return -- gameplay shortcuts are off while any menu is open
+		end
+		if input.KeyCode == Bindings.ReturnToCamp then
 			UI.RequestReturnToCamp()
-		elseif input.KeyCode == Enum.KeyCode.X and not TOUCH then
+		elseif input.KeyCode == Bindings.PlaceArtifact and not TOUCH then
 			UI.RequestPlaceArtifact()
 		end
 	end)
@@ -424,7 +402,7 @@ function UI.Init()
 			end
 		end
 		-- return-to-camp button: unavailable (with explanation) while carrying, else the cooldown readout
-		local idle = TOUCH and "TO CAMP" or "TO CAMP [R]"
+		local idle = TOUCH and "TO CAMP" or ("TO CAMP [" .. Bindings.Name(Bindings.ReturnToCamp) .. "]")
 		local left = returnReadyAt - os.clock()
 		if State.Data.Carrying then
 			refs.returnBtn.Text = "TO CAMP - CARRYING"

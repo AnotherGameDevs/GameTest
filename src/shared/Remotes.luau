@@ -17,6 +17,7 @@ local EVENTS = {
 	"Notify", -- S->C  (text, kind)
 	"ReturnResult", -- S->C  (ok, secondsUntilReady, reason?)
 	"PlaceArtifact", -- C->S  put the carried artifact down
+	"UpdateSettings", -- C->S  player settings table (validated + clamped by the server)
 	"ThrowDynamite", -- C->S  (dx, dy, dz) aim direction; the server decides everything else
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)

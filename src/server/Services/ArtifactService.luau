@@ -168,7 +168,7 @@ local function buildCarryTool(rec): Tool
 	tool.ToolTip = def.Name
 	tool.Grip = Config.Artifacts.CarryGrip
 	tool:SetAttribute("ArtifactId", rec.Id)
-	tool:SetAttribute("ToolFPScale", 1)
+	tool:SetAttribute("TreasureId", rec.TreasureId)
 
 	local handle = Instance.new("Part")
 	handle.Name = "Handle"

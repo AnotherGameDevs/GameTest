@@ -45,7 +45,8 @@ function SiteService.IsExitWall(x: number, z: number): boolean
 		return false
 	end
 	local x0 = Grid.OriginX + x * Grid.CellSize
-	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + ex.Width / 2 + 1e-3
+	-- only the LANDING half (left of the shaft centre); the car half of the grid face is covered by an iron plate
+	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + 1e-3
 end
 
 function SiteService.Generate(seed: number?)

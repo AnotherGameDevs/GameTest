@@ -51,6 +51,7 @@ function Kit.make(s): Part
 	p.Size = s.Size
 	p.Color = s.Color
 	p.Material = s.Material
+	p.Transparency = s.Transparency or 0
 	p.TopSurface = Enum.SurfaceType.Smooth
 	p.BottomSurface = Enum.SurfaceType.Smooth
 	p.CanCollide = false
@@ -92,6 +93,39 @@ function Kit.BuildModel(specs, name: string?): Model
 	return model
 end
 
+-- A rigid, WELDED assembly for first-person viewmodels / held visuals. `Root` is an anchored, invisible part at the
+-- origin; every spec part is welded to it at its authored offset, so PivotTo/CFrame on the model moves the whole
+-- assembly as ONE rigid body (nothing is repositioned per part). Parts never collide, are never raycast, cast no shadow.
+function Kit.BuildWelded(specs, name: string?): Model
+	local model = Instance.new("Model")
+	model.Name = name or "Welded"
+	local root = Instance.new("Part")
+	root.Name = "Root"
+	root.Size = Vector3.one * 0.1
+	root.Transparency = 1
+	root.Anchored = true
+	root.CanCollide = false
+	root.CanQuery = false
+	root.CanTouch = false
+	root.CastShadow = false
+	root.Parent = model
+	model.PrimaryPart = root
+	for _, s in ipairs(specs) do
+		local p = Kit.make(s)
+		p.Anchored = false
+		p.Massless = true
+		p.CanQuery = false
+		p.CastShadow = false
+		p.Parent = model
+		local w = Instance.new("Weld")
+		w.Part0 = root
+		w.Part1 = p
+		w.C0 = s.Offset
+		w.Parent = p
+	end
+	return model
+end
+
 -- Returns a copy of `specs` uniformly scaled and rotated (degrees) about the origin.
 function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
 	local rot = rotFromDegrees(rotationDegrees)
@@ -101,6 +135,7 @@ function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
 		local r = s.Offset - s.Offset.Position
 		table.insert(out, {
 			Name = s.Name, Shape = s.Shape, Size = s.Size * scale, Color = s.Color, Material = s.Material,
+			Transparency = s.Transparency,
 			Offset = rot * (CFrame.new(pos) * r),
 		})
 	end

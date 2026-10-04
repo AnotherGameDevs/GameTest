@@ -2,6 +2,7 @@
 -- The defaults are Roblox's built-in client sounds (placeholders). Set Id = "" to silence one.
 local SoundService = game:GetService("SoundService")
 local Debris = game:GetService("Debris")
+local Settings = require(script.Parent.Settings)
 
 local Audio = {}
 
@@ -23,7 +24,7 @@ function Audio.Play(name: string, pitchMul: number?, volumeMul: number?)
 	end
 	local s = Instance.new("Sound")
 	s.SoundId = def.Id
-	s.Volume = def.Volume * (volumeMul or 1)
+	s.Volume = def.Volume * (volumeMul or 1) * Settings.Get("MasterVolume")
 	s.PlaybackSpeed = def.Pitch * (pitchMul or 1)
 	s.Parent = SoundService
 	s:Play()

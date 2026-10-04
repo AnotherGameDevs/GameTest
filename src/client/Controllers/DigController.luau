@@ -19,8 +19,10 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Effects = require(script.Parent.EffectsController)
-local UI = require(script.Parent.UIController)
+local InputMode = require(script.Parent.InputMode)
 local CameraController = require(script.Parent.CameraController)
+local Viewmodel = require(script.Parent.ViewmodelController)
+local UI = require(script.Parent.UIController)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
@@ -145,6 +147,10 @@ local function acquireTarget(): Target?
 end
 
 local function swing(interval: number)
+	if CameraController.IsActive() then
+		Viewmodel.Swing(math.min(interval, 0.5)) -- one animation on the whole first-person assembly
+		return
+	end
 	local char = player.Character
 	local tool = char and char:FindFirstChild("Shovel")
 	if not tool or not tool:IsA("Tool") then
@@ -200,7 +206,7 @@ end
 
 local function isBlocked(): boolean
 	-- A carried important artifact disables ALL mining (the server enforces this independently).
-	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
+	return InputMode.IsCursorFree() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
 end
 
 local function onStep()
@@ -277,7 +283,7 @@ function DigController.Init()
 	end
 
 	-- Anything that steals the cursor/keyboard drops held mining.
-	UI.OnMenuChanged(DigController.ClearInput)
+	InputMode.OnChanged(DigController.ClearInput)
 	UserInputService.WindowFocusReleased:Connect(DigController.ClearInput)
 	UserInputService.TextBoxFocused:Connect(DigController.ClearInput)
 	GuiService.MenuOpened:Connect(DigController.ClearInput)
@@ -352,7 +358,7 @@ function DigController.Init()
 	end)
 
 	-- After the camera has updated, so the centre ray uses this frame's final camera.
-	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 1, onStep)
+	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 2, onStep)
 end
 
 return DigController

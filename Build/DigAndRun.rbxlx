@@ -120,8 +120,8 @@ Config.Artifacts = {
 -- Fixed physical exit from the mine: a ladder shaft outside the destructible grid, on the camp (south) edge.
 Config.Exit = {
 	Enabled = true,
-	CenterX = -26, -- world X of the shaft centre (edges should land on cell boundaries: 4-stud multiples)
-	Width = 12,
+	CenterX = 28, -- world X of the shaft centre (edges must land on cell boundaries: 4-stud multiples). Right of the pit.
+	Width = 16, -- left half = ladder + landings, right half = elevator car
 	Run = 8, -- studs the shaft extends south from the grid edge
 }
 
@@ -161,6 +161,7 @@ Config.RateLimits = { -- { max calls, per seconds }
 	RequestEquip = { 5, 2 },
 	PlaceArtifact = { 3, 3 },
 	ThrowDynamite = { 4, 3 },
+	UpdateSettings = { 6, 3 },
 }
 
 return Config
@@ -497,6 +498,7 @@ function Kit.make(s): Part
 	p.Size = s.Size
 	p.Color = s.Color
 	p.Material = s.Material
+	p.Transparency = s.Transparency or 0
 	p.TopSurface = Enum.SurfaceType.Smooth
 	p.BottomSurface = Enum.SurfaceType.Smooth
 	p.CanCollide = false
@@ -538,6 +540,39 @@ function Kit.BuildModel(specs, name: string?): Model
 	return model
 end
 
+-- A rigid, WELDED assembly for first-person viewmodels / held visuals. `Root` is an anchored, invisible part at the
+-- origin; every spec part is welded to it at its authored offset, so PivotTo/CFrame on the model moves the whole
+-- assembly as ONE rigid body (nothing is repositioned per part). Parts never collide, are never raycast, cast no shadow.
+function Kit.BuildWelded(specs, name: string?): Model
+	local model = Instance.new("Model")
+	model.Name = name or "Welded"
+	local root = Instance.new("Part")
+	root.Name = "Root"
+	root.Size = Vector3.one * 0.1
+	root.Transparency = 1
+	root.Anchored = true
+	root.CanCollide = false
+	root.CanQuery = false
+	root.CanTouch = false
+	root.CastShadow = false
+	root.Parent = model
+	model.PrimaryPart = root
+	for _, s in ipairs(specs) do
+		local p = Kit.make(s)
+		p.Anchored = false
+		p.Massless = true
+		p.CanQuery = false
+		p.CastShadow = false
+		p.Parent = model
+		local w = Instance.new("Weld")
+		w.Part0 = root
+		w.Part1 = p
+		w.C0 = s.Offset
+		w.Parent = p
+	end
+	return model
+end
+
 -- Returns a copy of `specs` uniformly scaled and rotated (degrees) about the origin.
 function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
 	local rot = rotFromDegrees(rotationDegrees)
@@ -547,6 +582,7 @@ function Kit.Transform(specs, scale: number, rotationDegrees: Vector3?)
 		local r = s.Offset - s.Offset.Position
 		table.insert(out, {
 			Name = s.Name, Shape = s.Shape, Size = s.Size * scale, Color = s.Color, Material = s.Material,
+			Transparency = s.Transparency,
 			Offset = rot * (CFrame.new(pos) * r),
 		})
 	end
@@ -579,6 +615,7 @@ local EVENTS = {
 	"Notify", -- S->C  (text, kind)
 	"ReturnResult", -- S->C  (ok, secondsUntilReady, reason?)
 	"PlaceArtifact", -- C->S  put the carried artifact down
+	"UpdateSettings", -- C->S  player settings table (validated + clamped by the server)
 	"ThrowDynamite", -- C->S  (dx, dy, dz) aim direction; the server decides everything else
 	"Explosion", -- S->C  (position) cosmetic blast feedback
 	"ArtifactDeposited", -- S->C  (name, value)
@@ -610,6 +647,69 @@ return Remotes
       </Item>
       <Item class="ModuleScript" referent="8">
         <Properties>
+          <string name="Name">SettingsSpec</string>
+          <string name="Source"><![CDATA[-- Player settings: one definition used by the client (UI + clamping) and the server (validation before saving).
+-- Pure, so it is unit-tested outside Roblox (tests/settings_test.luau).
+local SettingsSpec = {}
+
+SettingsSpec.Order = { "MouseSensitivity", "MasterVolume", "CameraShake", "InvertY" }
+
+SettingsSpec.Defs = {
+	-- Multiplier on the first-person mouse-look baseline (see CameraController). Provisional default; needs playtesting.
+	MouseSensitivity = { Type = "number", Default = 0.30, Min = 0.05, Max = 2.00, Step = 0.01 },
+	MasterVolume = { Type = "number", Default = 1.0, Min = 0, Max = 1, Step = 0.05 },
+	CameraShake = { Type = "boolean", Default = true },
+	InvertY = { Type = "boolean", Default = false },
+}
+
+local function round4(n: number): number
+	return math.floor(n * 10000 + 0.5) / 10000
+end
+
+-- Returns a valid value for `key`: wrong type / NaN / inf -> default; numbers clamped to range and snapped to Step.
+function SettingsSpec.Clamp(key: string, value: any): any
+	local def = SettingsSpec.Defs[key]
+	if not def then
+		return nil
+	end
+	if def.Type == "boolean" then
+		if type(value) == "boolean" then
+			return value
+		end
+		return def.Default
+	end
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		return def.Default
+	end
+	local v = math.clamp(value, def.Min, def.Max)
+	v = round4(math.floor(v / def.Step + 0.5) * def.Step)
+	return math.clamp(v, def.Min, def.Max)
+end
+
+function SettingsSpec.Defaults()
+	local out = {}
+	for _, key in ipairs(SettingsSpec.Order) do
+		out[key] = SettingsSpec.Defs[key].Default
+	end
+	return out
+end
+
+-- Takes anything (saved data, a remote payload) and returns a complete, valid settings table. Unknown keys dropped.
+function SettingsSpec.Sanitize(input: any)
+	local out = {}
+	local src = type(input) == "table" and input or {}
+	for _, key in ipairs(SettingsSpec.Order) do
+		out[key] = SettingsSpec.Clamp(key, src[key])
+	end
+	return out
+end
+
+return SettingsSpec
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
           <string name="Name">ToolModels</string>
           <string name="Source"><![CDATA[-- Builds tool models from Appearance ids. ONE spec drives both the held Tool (server) and the shop preview
 -- (client), so what you preview is exactly what you hold. See docs/ART_STANDARD.md for the rules these follow.
@@ -636,8 +736,17 @@ local ORANGE, ORANGE_DARK = hex("E5602B"), hex("B84519") -- family C panels
 local BOLT = hex("C3C8CE")
 local DYNAMITE_RED, CREAM = hex("C23B2A"), P.Cream
 
--- Coordinates: the tool's long axis runs along Y with the grip end at -Y and the working end at +Y (a held tool
--- points forward along its own +Y). Origin = the "Handle" part. Studs. First-person draws tools at FPScale.
+-- TOOL AXIS CONVENTION (every model in this file follows it; docs/ART_STANDARD.md repeats it):
+--   * Origin (0,0,0) = the invisible root part named "Handle" (a 0.4 cube). It is NEVER an oriented cylinder:
+--     a cylinder carries its own axis rotation, and the welds of every other part would then be wrong.
+--   * +Y = forward along the tool: the working end (blade / chisel / bit) is at +Y, the grip is at -Y.
+--   * +X = width (blade width, cross-grip). +Z = thickness (the flat face of a blade faces +/-Z).
+--   * Roblox cylinders run along their own X axis, so Kit.cyl rotates them (Y: roll 90 about Z; Z: yaw 90 about Y).
+--   * Every other part is welded to "Handle" at its authored offset (BuildTool) or posed from the same offsets
+--     (BuildPreview, BuildWelded viewmodel). There is exactly one source of truth: the Parts list below.
+--   * Each spec also carries Checks (names of the shaft / socket / grip / working-end parts) used by
+--     tests/tool_assembly_test.luau to prove the assembly is connected and correctly oriented.
+-- Studs. First-person uses a separate viewmodel built from these same parts (see Viewmodel / ViewmodelMath).
 local builders = {}
 
 local function add(list, ...)
@@ -677,10 +786,11 @@ end
 -- Tier 1: weathered, chunky, obviously a starter. Rust-orange blade, plain wood, T-grip.
 function builders.rusty(_)
 	return {
+		Checks = { Shaft = "Shaft", Socket = { "Ferrule" }, Grip = { "GripBar" }, WorkingEnd = { "BladeTip" } },
 		Grip = CFrame.new(0, -1.2, 0),
 		FPScale = 0.5,
 		Parts = {
-			Kit.cyl("Handle", "Y", 4.4, 0.55, V(0, 0, 0), WOOD, Enum.Material.Wood),
+			Kit.cyl("Shaft", "Y", 4.4, 0.55, V(0, 0, 0), WOOD, Enum.Material.Wood),
 			Kit.cyl("GripBar", "X", 1.5, 0.5, V(0, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
 			Kit.ball("GripCapL", 0.66, V(-0.78, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
 			Kit.ball("GripCapR", 0.66, V(0.78, -2.3, 0), WOOD_DARK, Enum.Material.Wood),
@@ -699,7 +809,7 @@ end
 -- Tier 2: clean steel, teal collar + wraps, closed D-grip, bevelled two-tone blade. Same size, clearly "bought".
 function builders.digging(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 4.4, 0.55, V(0, 0, 0), LACQUER, Enum.Material.Wood),
+		Kit.cyl("Shaft", "Y", 4.4, 0.55, V(0, 0, 0), LACQUER, Enum.Material.Wood),
 		Kit.cyl("WrapA", "Y", 0.45, 0.68, V(0, 0.9, 0), P.Teal),
 		Kit.cyl("WrapB", "Y", 0.3, 0.66, V(0, 0.2, 0), P.Teal),
 		Kit.cyl("Socket", "Y", 0.9, 0.82, V(0, 2.0, 0), STEEL_DARK, Enum.Material.Metal),
@@ -709,14 +819,15 @@ function builders.digging(_)
 	}
 	dGrip(parts, -2.2, 1.6, 0.5, WOOD_DARK, Enum.Material.Wood)
 	spadeBlade(parts, 2.95, 1.9, 1.0, 0.3, STEEL, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
-	return { Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
+	return { Checks = { Shaft = "Shaft", Socket = { "Socket" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "BladeTip" } },
+		Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
 end
 
 -- Tier 3: same wooden family and D-grip, but a thicker shaft, a bigger scooped blade with turned-up side lips, and
 -- strapped socket. Bigger scoop without being much longer.
 function builders.heavy(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 4.4, 0.68, V(0, 0, 0), LACQUER, Enum.Material.Wood),
+		Kit.cyl("Shaft", "Y", 4.4, 0.68, V(0, 0, 0), LACQUER, Enum.Material.Wood),
 		Kit.cyl("Socket", "Y", 1.1, 1.0, V(0, 2.0, 0), STEEL_DARK, Enum.Material.Metal),
 		Kit.cyl("StrapA", "Y", 0.18, 1.1, V(0, 1.7, 0), STEEL_LIGHT, Enum.Material.Metal),
 		Kit.cyl("StrapB", "Y", 0.18, 1.1, V(0, 2.3, 0), STEEL_LIGHT, Enum.Material.Metal),
@@ -727,8 +838,9 @@ function builders.heavy(_)
 		Kit.block("LipR", V(0.24, 1.3, 0.62), V(1.15, 3.2, 0.12), STEEL_DARK, Enum.Material.Metal),
 	}
 	dGrip(parts, -2.2, 1.8, 0.6, WOOD_DARK, Enum.Material.Wood)
-	spadeBlade(parts, 3.1, 2.4, 1.1, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
-	return { Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
+	spadeBlade(parts, 3.0, 2.4, 1.0, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, STEEL_DARK, Enum.Material.Metal)
+	return { Checks = { Shaft = "Shaft", Socket = { "Socket" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "BladeTip" } },
+		Grip = CFrame.new(0, -1.2, 0), FPScale = 0.5, Parts = parts }
 end
 
 ------------------------------------------------------------------------------------------------------------------
@@ -740,7 +852,7 @@ end
 -- housing, welded ribs, and small side lugs that hint at its wider cut.
 function builders.power(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 4.4, 0.6, V(0, 0, 0), AMBER),
+		Kit.cyl("Shaft", "Y", 4.4, 0.6, V(0, 0, 0), AMBER),
 		Kit.cyl("HandSleeve", "Y", 1.1, 0.74, V(0, -1.4, 0), RUBBER),
 		Kit.block("Housing", V(1.3, 1.1, 1.0), V(0, 2.0, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("BandA", V(1.42, 0.18, 1.12), V(0, 1.6, 0), GUNMETAL_LIGHT, Enum.Material.Metal),
@@ -755,16 +867,18 @@ function builders.power(_)
 	}
 	dGrip(parts, -2.2, 1.7, 0.55, RUBBER)
 	spadeBlade(parts, 3.2, 2.0, 1.0, 0.34, GUNMETAL_LIGHT, STEEL_LIGHT, GUNMETAL, Enum.Material.Metal)
-	return { Grip = CFrame.new(0, -1.4, 0), FPScale = 0.5, Parts = parts }
+	return { Checks = { Shaft = "Shaft", Socket = { "Housing" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "BladeTip" } },
+		Grip = CFrame.new(0, -1.4, 0), FPScale = 0.5, Parts = parts }
 end
 
 -- Tier 5: a chisel tool. Amber housing on a steel core, rubber cross-grip, steel chisel with a separate bolted edge.
 function builders.jackhammer(_)
 	return {
+		Checks = { Shaft = "Shaft", Socket = { "Collar", "ChiselBar" }, Grip = { "GripBar" }, WorkingEnd = { "ChiselHead", "EdgePlate" } },
 		Grip = CFrame.new(0, -2.4, 0),
 		FPScale = 0.46,
 		Parts = {
-			Kit.cyl("Handle", "Y", 3.0, 0.9, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+			Kit.cyl("Shaft", "Y", 3.0, 0.9, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
 			Kit.cyl("GripBar", "X", 2.4, 0.6, V(0, -2.4, 0), RUBBER),
 			Kit.ball("GripCapL", 0.82, V(-1.25, -2.4, 0), RUBBER),
 			Kit.ball("GripCapR", 0.82, V(1.25, -2.4, 0), RUBBER),
@@ -787,7 +901,8 @@ end
 -- carbide inserts. The head is a static stepped cone (no spiral, nothing that implies it spins).
 function builders.drill(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 3.2, 0.85, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.cyl("Shaft", "Y", 3.2, 0.85, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.block("Neck", V(0.7, 0.9, 0.7), V(0, -1.75, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("Body", V(1.4, 1.8, 1.2), V(0, 0.3, 0), AMBER),
 		Kit.block("StripeA", V(1.5, 0.2, 1.26), V(0, 0.95, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("StripeB", V(1.5, 0.2, 1.26), V(0, -0.35, 0), GUNMETAL, Enum.Material.Metal),
@@ -804,8 +919,9 @@ function builders.drill(_)
 		Kit.block("InsertE", V(0.3, 0.5, 0.3), V(0.64, 2.15, 0), BOLT, Enum.Material.Metal),
 		Kit.block("InsertW", V(0.3, 0.5, 0.3), V(-0.64, 2.15, 0), BOLT, Enum.Material.Metal),
 	}
-	dGrip(parts, -2.0, 1.7, 0.55, RUBBER)
-	return { Grip = CFrame.new(0, -1.9, 0), FPScale = 0.46, Parts = parts }
+	dGrip(parts, -2.1, 1.7, 0.55, RUBBER)
+	return { Checks = { Shaft = "Shaft", Socket = { "Body", "Collar" }, Grip = { "GripTop", "GripBottom" }, WorkingEnd = { "Tip" } },
+		Grip = CFrame.new(0, -1.9, 0), FPScale = 0.46, Parts = parts }
 end
 
 ------------------------------------------------------------------------------------------------------------------
@@ -816,7 +932,7 @@ end
 -- Tier 7: heavy housing with ribbed side panels, a two-grip assembly and a wide bolted cutting head + edge plate.
 function builders.industrial(_)
 	local parts = {
-		Kit.cyl("Handle", "Y", 3.4, 1.0, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
+		Kit.cyl("Shaft", "Y", 3.4, 1.0, V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("Housing", V(1.9, 2.6, 1.5), V(0, 0, 0), GUNMETAL, Enum.Material.Metal),
 		Kit.block("PanelL", V(0.14, 2.0, 1.3), V(-1.0, 0, 0), ORANGE),
 		Kit.block("PanelR", V(0.14, 2.0, 1.3), V(1.0, 0, 0), ORANGE),
@@ -852,7 +968,8 @@ function builders.industrial(_)
 		Kit.ball("EdgeBoltC", 0.26, V(0.28, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
 		Kit.ball("EdgeBoltD", 0.26, V(0.85, 3.25, 0.26), GUNMETAL, Enum.Material.Metal),
 	}
-	return { Grip = CFrame.new(0, -2.2, 0), FPScale = 0.4, Parts = parts }
+	return { Checks = { Shaft = "Shaft", Socket = { "Housing", "Socket" }, Grip = { "GripBar" }, WorkingEnd = { "EdgePlate", "ToothM" } },
+		Grip = CFrame.new(0, -2.2, 0), FPScale = 0.4, Parts = parts }
 end
 
 -- Tier 8 (consumable): a bundle of three charges held with steel bands and a stencilled label; one fuse.
@@ -860,7 +977,7 @@ function builders.dynamite(_)
 	local parts = {}
 	local centres = { V(0, 0, 0), V(0.86, 0, 0), V(0.43, 0, 0.75) }
 	for i, c in ipairs(centres) do
-		table.insert(parts, Kit.cyl(i == 1 and "Handle" or ("Stick" .. i), "Y", 3.0, 0.85, c, DYNAMITE_RED))
+		table.insert(parts, Kit.cyl("Stick" .. i, "Y", 3.0, 0.85, c, DYNAMITE_RED))
 		table.insert(parts, Kit.cyl("Label" .. i, "Y", 1.0, 0.89, c, CREAM))
 		table.insert(parts, Kit.cyl("BandLo" .. i, "Y", 0.22, 0.92, c + V(0, -1.05, 0), BOLT, Enum.Material.Metal))
 		table.insert(parts, Kit.cyl("BandHi" .. i, "Y", 0.22, 0.92, c + V(0, 1.05, 0), BOLT, Enum.Material.Metal))
@@ -871,13 +988,27 @@ function builders.dynamite(_)
 	return { Grip = CFrame.new(0, 0, 0), FPScale = 0.5, Parts = parts }
 end
 
+-- Spec = { Parts, Grip, FPScale, Checks }. Parts[1] is ALWAYS the invisible root cube "Handle" at the origin.
 function ToolModels.GetSpec(appearanceId: string)
 	local ap = Appearances.List[appearanceId] or Appearances.List.shovel_rusty
 	local builder = builders[ap.Builder] or builders.rusty
-	return builder(ap)
+	local spec = builder(ap)
+	local root = Kit.block("Handle", V(0.4, 0.4, 0.4), V(0, 0, 0), METAL)
+	root.Transparency = 1
+	table.insert(spec.Parts, 1, root)
+	return spec
 end
 
--- The held Tool (server). Part named "Handle" is the root; everything else is welded to it.
+local function harden(p: Part)
+	p.CanCollide = false -- decorative: never collides
+	p.CanQuery = false -- ...and never intercepts a mining/targeting ray
+	p.CanTouch = false
+	p.Massless = true
+end
+
+-- The held Tool (server). Root "Handle" is an invisible cube; EVERY other part (shaft included) is welded to it at
+-- its authored offset, so the tool is one rigid assembly whichever way the character animates its hand.
+-- Tool.Grip is only a position along the shaft where the hand holds it (no rotation: hand +Y = tool +Y).
 function ToolModels.BuildTool(appearanceId: string): Tool
 	local spec = ToolModels.GetSpec(appearanceId)
 	local tool = Instance.new("Tool")
@@ -886,27 +1017,22 @@ function ToolModels.BuildTool(appearanceId: string): Tool
 	tool.ManualActivationOnly = true
 	tool.RequiresHandle = true
 	tool.Grip = spec.Grip
-	tool:SetAttribute("ToolFPScale", spec.FPScale)
+	tool:SetAttribute("AppearanceId", appearanceId)
 
-	local handle
-	for _, ps in ipairs(spec.Parts) do
-		if ps.Name == "Handle" then
-			handle = Kit.make(ps)
-			handle.Massless = true
-			handle.Parent = tool
-		end
-	end
-	for _, ps in ipairs(spec.Parts) do
-		if ps.Name ~= "Handle" then
-			local p = Kit.make(ps)
-			p.Massless = true
-			p.Parent = tool
-			local w = Instance.new("Weld")
-			w.Part0 = handle
-			w.Part1 = p
-			w.C0 = ps.Offset
-			w.Parent = p
-		end
+	local handle = Kit.make(spec.Parts[1])
+	harden(handle)
+	handle.Parent = tool
+	for i = 2, #spec.Parts do
+		local ps = spec.Parts[i]
+		local p = Kit.make(ps)
+		harden(p)
+		p.Parent = tool
+		local w = Instance.new("Weld")
+		w.Name = "Weld_" .. ps.Name
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = ps.Offset
+		w.Parent = p
 	end
 	return tool
 end
@@ -917,32 +1043,27 @@ function ToolModels.BuildPreview(appearanceId: string): Model
 	return Kit.BuildModel(spec.Parts, "ToolPreview")
 end
 
--- A physics-ready copy for thrown items (dynamite): the "Handle" collides, everything else is welded and non-colliding.
+-- A physics-ready copy for thrown items (dynamite): every part collides as one welded body around the invisible root.
 function ToolModels.BuildProjectile(appearanceId: string): Model
 	local spec = ToolModels.GetSpec(appearanceId)
 	local model = Instance.new("Model")
 	model.Name = "Projectile"
-	local handle
-	for _, ps in ipairs(spec.Parts) do
+	local handle = Kit.make(spec.Parts[1])
+	handle.CanCollide = false
+	handle.CanTouch = false
+	handle.Parent = model
+	model.PrimaryPart = handle
+	for i = 2, #spec.Parts do
+		local ps = spec.Parts[i]
 		local p = Kit.make(ps)
-		if ps.Name == "Handle" then
-			handle = p
-			p.CanCollide = true
-			p.Parent = model
-			model.PrimaryPart = p
-		end
-	end
-	for _, ps in ipairs(spec.Parts) do
-		if ps.Name ~= "Handle" then
-			local p = Kit.make(ps)
-			p.Massless = true
-			p.Parent = model
-			local w = Instance.new("Weld")
-			w.Part0 = handle
-			w.Part1 = p
-			w.C0 = ps.Offset
-			w.Parent = p
-		end
+		p.CanCollide = true
+		p.CanTouch = false
+		p.Parent = model
+		local w = Instance.new("Weld")
+		w.Part0 = handle
+		w.Part1 = p
+		w.C0 = ps.Offset
+		w.Parent = p
 	end
 	return model
 end
@@ -951,7 +1072,7 @@ return ToolModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="10">
         <Properties>
           <string name="Name">TreasureModels</string>
           <string name="Source"><![CDATA[-- Polished chunky models for notable artifacts. Treasures without a Model id keep the generic coin/ring/gem/block
@@ -1071,7 +1192,7 @@ return TreasureModels
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="11">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[local Util = {}
@@ -1121,17 +1242,79 @@ return Util
 ]]></string>
         </Properties>
       </Item>
+      <Item class="ModuleScript" referent="12">
+        <Properties>
+          <string name="Name">ViewmodelMath</string>
+          <string name="Source"><![CDATA[-- First-person viewmodel placement, pure maths (testable). Everything is in CAMERA space (-Z forward, +X right,
+-- +Y up). The viewmodel is the tool's own spec (Kit.BuildWelded) drawn at `Scale`, placed in the lower-right of the
+-- view with the working end pointing forward/down-left, so the central aiming area is empty at rest.
+local ViewmodelMath = {}
+
+ViewmodelMath.Scale = 0.5 -- tools are drawn at half their world size in first person
+ViewmodelMath.RestPosition = Vector3.new(1.05, -1.2, -2.0) -- where the tool's origin (mid-shaft) sits
+ViewmodelMath.AxisDirection = Vector3.new(-0.14, -0.42, -1.0) -- where the tool's +Y (working end) points at rest
+ViewmodelMath.Roll = math.rad(55) -- roll about the tool axis so the broad blade face is seen at an angle
+ViewmodelMath.SwingPivot = Vector3.new(1.15, -1.1, -1.4) -- roughly where the hand is
+
+-- Held artifact (carry): low and central so the view above and around it stays clear.
+ViewmodelMath.ArtifactScale = 0.5
+ViewmodelMath.ArtifactRest = CFrame.new(0, -1.05, -2.1)
+
+-- Camera-space CFrame of the tool origin at rest.
+function ViewmodelMath.Rest(): CFrame
+	local u = ViewmodelMath.AxisDirection.Unit
+	-- lookAt makes -Z point along u; the extra -90 degree pitch maps the tool's +Y onto that -Z.
+	return CFrame.new(ViewmodelMath.RestPosition) * CFrame.lookAt(Vector3.zero, u)
+		* CFrame.Angles(math.rad(-90), 0, 0) * CFrame.Angles(0, ViewmodelMath.Roll, 0)
+end
+
+local function ease(x: number): number
+	return x * x * (3 - 2 * x)
+end
+
+local function lerp(a: number, b: number, t: number): number
+	return a + (b - a) * t
+end
+
+-- Swing offset (camera space) for normalised time t in [0, 1]: a short pull-back, a forward thrust that tips the
+-- blade slightly down, and a recovery. It is applied to the WHOLE assembly (one CFrame), never to single parts.
+-- The thrust deliberately travels along the camera's forward axis and downward, NOT across the centre of the view,
+-- so the blade never sweeps over the crosshair.
+function ViewmodelMath.Swing(t: number): CFrame
+	local angle, push
+	if t <= 0 then
+		return CFrame.identity
+	elseif t < 0.3 then
+		local a = ease(t / 0.3)
+		angle, push = math.rad(14) * a, 0.25 * a
+	elseif t < 0.5 then
+		local a = ease((t - 0.3) / 0.2)
+		angle, push = lerp(math.rad(14), -math.rad(9), a), lerp(0.25, -0.5, a)
+	elseif t < 1 then
+		local a = ease((t - 0.5) / 0.5)
+		angle, push = lerp(-math.rad(9), 0, a), lerp(-0.5, 0, a)
+	else
+		return CFrame.identity
+	end
+	local pivot = ViewmodelMath.SwingPivot
+	return CFrame.new(0, 0, push) * CFrame.new(pivot) * CFrame.Angles(angle, 0, 0) * CFrame.new(-pivot)
+end
+
+return ViewmodelMath
+]]></string>
+        </Properties>
+      </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="11">
+  <Item class="ServerScriptService" referent="13">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="12">
+    <Item class="Folder" referent="14">
       <Properties>
         <string name="Name">Server</string>
       </Properties>
-      <Item class="Script" referent="13">
+      <Item class="Script" referent="15">
         <Properties>
           <string name="Name">Main</string>
           <token name="RunContext">0</token>
@@ -1153,6 +1336,8 @@ local RateLimiter = require(Services.RateLimiter)
 local MetricsService = require(Services.MetricsService)
 local ArtifactService = require(Services.ArtifactService)
 local DynamiteService = require(Services.DynamiteService)
+local SettingsService = require(Services.SettingsService)
+local ElevatorService = require(Services.ElevatorService)
 
 WorldBuilder.Build()
 SiteService.Generate(Config.Site.Seed)
@@ -1165,6 +1350,8 @@ for name, init in pairs({
 	Metrics = MetricsService.Init,
 	Artifacts = ArtifactService.Init,
 	Dynamite = DynamiteService.Init,
+	Settings = SettingsService.Init,
+	Elevator = ElevatorService.Init,
 }) do
 	local ok, err = pcall(init)
 	if not ok then
@@ -1186,11 +1373,11 @@ print(("[%s] Server ready."):format(Config.GameName))
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="14">
+      <Item class="Folder" referent="16">
         <Properties>
           <string name="Name">Services</string>
         </Properties>
-        <Item class="ModuleScript" referent="15">
+        <Item class="ModuleScript" referent="17">
           <Properties>
             <string name="Name">AnalyticsService</string>
             <string name="Source"><![CDATA[-- Thin abstraction so real analytics (AnalyticsService:LogEconomyEvent, custom funnels...) can be swapped in later.
@@ -1208,7 +1395,7 @@ return AnalyticsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="16">
+        <Item class="ModuleScript" referent="18">
           <Properties>
             <string name="Name">ArtifactRecords</string>
             <string name="Source"><![CDATA[-- Pure state machine for important-artifact ownership. No Roblox APIs, so it is unit-tested outside Studio
@@ -1321,7 +1508,7 @@ return ArtifactRecords
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="17">
+        <Item class="ModuleScript" referent="19">
           <Properties>
             <string name="Name">ArtifactService</string>
             <string name="Source"><![CDATA[-- Important artifacts: found -> physically placed in the world -> picked up -> carried -> deposited at camp.
@@ -1494,7 +1681,7 @@ local function buildCarryTool(rec): Tool
 	tool.ToolTip = def.Name
 	tool.Grip = Config.Artifacts.CarryGrip
 	tool:SetAttribute("ArtifactId", rec.Id)
-	tool:SetAttribute("ToolFPScale", 1)
+	tool:SetAttribute("TreasureId", rec.TreasureId)
 
 	local handle = Instance.new("Part")
 	handle.Name = "Handle"
@@ -1800,7 +1987,7 @@ return ArtifactService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="18">
+        <Item class="ModuleScript" referent="20">
           <Properties>
             <string name="Name">CarryRegistry</string>
             <string name="Source"><![CDATA[-- The single source of truth for "is this player carrying an important artifact?". Required by every system that
@@ -1827,7 +2014,7 @@ return CarryRegistry
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="19">
+        <Item class="ModuleScript" referent="21">
           <Properties>
             <string name="Name">DataMigrations</string>
             <string name="Source"><![CDATA[-- Pure data migrations (no Roblox APIs) so they can be unit-tested outside Studio: see tests/migration_test.luau.
@@ -1926,7 +2113,7 @@ return DataMigrations
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="20">
+        <Item class="ModuleScript" referent="22">
           <Properties>
             <string name="Name">DataService</string>
             <string name="Source"><![CDATA[-- Persistent player data. Versioned schema + migrations, dirty-flag autosave (no write spam),
@@ -1940,6 +2127,7 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
 local DataService = {}
 
@@ -1962,7 +2150,7 @@ local function defaultData()
 		},
 		Cosmetics = {},
 		EquippedCosmetics = {},
-		Settings = {},
+		Settings = SettingsSpec.Defaults(),
 	}
 end
 
@@ -1970,6 +2158,7 @@ local function migrate(data)
 	DataMigrations.Migrate(data, Config.Data.CurrentVersion, Defs)
 	Util.Reconcile(data, defaultData())
 	DataMigrations.Sanitize(data, Defs, Config.Starting.ToolId, Config.Starting.BackpackId)
+	data.Settings = SettingsSpec.Sanitize(data.Settings) -- clamp whatever was saved
 end
 
 -- GetDataStore throws in an unpublished place, so it must never run unprotected.
@@ -2119,7 +2308,7 @@ return DataService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="21">
+        <Item class="ModuleScript" referent="23">
           <Properties>
             <string name="Name">DigService</string>
             <string name="Source"><![CDATA[-- Validates and resolves dig hits. The client only says "I hit cell (x,y,z)"; the server decides
@@ -2244,7 +2433,7 @@ return DigService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="22">
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">DynamiteService</string>
             <string name="Source"><![CDATA[-- Dynamite: a throwable, single-use item (Defs.Consumables.dynamite). The client only sends an aim direction; the
@@ -2397,7 +2586,7 @@ return DynamiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="23">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">EconomyService</string>
             <string name="Source"><![CDATA[-- Selling, buying, and the return-to-camp convenience. All prices and ownership checks are server-side.
@@ -2620,7 +2809,166 @@ return EconomyService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="24">
+        <Item class="ModuleScript" referent="26">
+          <Properties>
+            <string name="Name">ElevatorService</string>
+            <string name="Source"><![CDATA[-- Runs the mine elevator built by WorldElevator. Server-authoritative: players only press prompts; the server picks the
+-- stop, drives the servo, queues a single pending request, and keeps a watchdog so the car can never get stuck.
+-- Allowed while carrying an important artifact (it is the way out). Stops: SURFACE, SOIL, CLAY, STONE, RUINS.
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local WorldElevator = require(script.Parent.WorldElevator)
+
+local ElevatorService = {}
+
+local DWELL = 1.0 -- seconds the car waits at a stop before serving a queued request
+local ARRIVE = 0.3 -- studs from the target counted as arrived
+local WATCHDOG = 25 -- seconds before a trip is declared stuck and the car is reset
+
+local car: Part?
+local lift: PrismaticConstraint?
+local trackY = 0
+local current = 1
+local target = 1
+local moving = false
+local pending: number? = nil
+local arrivedAt = 0
+local startedAt = 0
+local connections: { RBXScriptConnection } = {}
+local heartbeat: RBXScriptConnection? = nil
+
+local function positionFor(stop: number): number
+	return (WorldElevator.StopTops[stop] - WorldElevator.CarThickness / 2) - trackY
+end
+
+local function setTarget(stop: number)
+	if not lift then
+		return
+	end
+	target = stop
+	moving = true
+	startedAt = os.clock()
+	lift.TargetPosition = positionFor(stop)
+end
+
+-- Requests a stop. If the car is busy the LAST request is remembered and served after it arrives.
+function ElevatorService.Request(stop: number)
+	if stop < 1 or stop > #WorldElevator.StopTops then
+		return
+	end
+	if moving then
+		pending = stop
+		return
+	end
+	if stop ~= current then
+		setTarget(stop)
+	end
+end
+
+local function playerNear(player: Player, instance: Instance, maxDist: number): boolean
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hrp or not hum or hum.Health <= 0 then
+		return false
+	end
+	local pos = instance:IsA("BasePart") and instance.Position or (instance.Parent :: BasePart).Position
+	return ((hrp :: BasePart).Position - pos).Magnitude <= maxDist
+end
+
+local function onPrompt(prompt: ProximityPrompt, player: Player)
+	-- Prompt.Triggered is already range-checked by Roblox, but verify on the server as well.
+	if not playerNear(player, prompt, prompt.MaxActivationDistance + 4) then
+		return
+	end
+	local kind = prompt:GetAttribute("Kind")
+	if kind == "Call" then
+		ElevatorService.Request(tonumber(prompt:GetAttribute("StopIndex")) or 1)
+	elseif kind == "Surface" then
+		ElevatorService.Request(1)
+	elseif kind == "Up" then
+		ElevatorService.Request(math.max((moving and target or current) - 1, 1))
+	elseif kind == "Down" then
+		ElevatorService.Request(math.min((moving and target or current) + 1, #WorldElevator.StopTops))
+	end
+end
+
+-- Finds the elevator in the freshly built world and (re)binds to it. Safe to call again after the world is rebuilt.
+function ElevatorService.Bind()
+	for _, c in ipairs(connections) do
+		c:Disconnect()
+	end
+	table.clear(connections)
+	if heartbeat then
+		heartbeat:Disconnect()
+		heartbeat = nil
+	end
+	car, lift = nil, nil
+	moving, pending, current, target = false, nil, 1, 1
+
+	local world = Workspace:FindFirstChild("World")
+	local folder = world and world:FindFirstChild("Elevator")
+	if not folder then
+		return
+	end
+	car = folder:FindFirstChild("Car") :: Part?
+	lift = folder:FindFirstChild("Lift", true) :: PrismaticConstraint?
+	trackY = folder:GetAttribute("TrackY") or 0
+	if not car or not lift then
+		warn("[ElevatorService] elevator parts missing")
+		return
+	end
+	car:SetNetworkOwner(nil) -- the server drives the car; clients only ride it
+
+	for _, d in ipairs(folder:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then
+			table.insert(connections, d.Triggered:Connect(function(player)
+				onPrompt(d, player)
+			end))
+		end
+	end
+
+	heartbeat = RunService.Heartbeat:Connect(function()
+		if not car or not lift then
+			return
+		end
+		if moving then
+			local arrived = math.abs(lift.CurrentPosition - positionFor(target)) < ARRIVE
+			if arrived then
+				moving = false
+				current = target
+				arrivedAt = os.clock()
+			elseif os.clock() - startedAt > WATCHDOG then
+				-- stuck: put the car exactly at the target and carry on
+				warn("[ElevatorService] trip timed out; resetting car")
+				local cf = car.CFrame
+				car.Anchored = true
+				car.CFrame = CFrame.new(cf.X, WorldElevator.StopTops[target] - WorldElevator.CarThickness / 2, cf.Z)
+				car.Anchored = false
+				moving = false
+				current = target
+				arrivedAt = os.clock()
+			end
+		elseif pending and os.clock() - arrivedAt >= DWELL then
+			local nextStop = pending
+			pending = nil
+			if nextStop ~= current then
+				setTarget(nextStop)
+			end
+		end
+	end)
+end
+
+function ElevatorService.Init()
+	ElevatorService.Bind()
+end
+
+return ElevatorService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="27">
           <Properties>
             <string name="Name">EquipmentService</string>
             <string name="Source"><![CDATA[-- Gives each player the shovel their profile says they own/equipped, built from ToolDefinitions.
@@ -2723,7 +3071,7 @@ return EquipmentService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="25">
+        <Item class="ModuleScript" referent="28">
           <Properties>
             <string name="Name">InventoryService</string>
             <string name="Source"><![CDATA[-- Backpack: simple counted capacity. Contents live in profile.BackpackItems = { [treasureId] = count }.
@@ -2790,7 +3138,7 @@ return InventoryService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="26">
+        <Item class="ModuleScript" referent="29">
           <Properties>
             <string name="Name">LootService</string>
             <string name="Source"><![CDATA[-- Turns a destroyed cell's pre-rolled treasure into a reward for the digger. The server alone
@@ -2874,7 +3222,7 @@ return LootService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="27">
+        <Item class="ModuleScript" referent="30">
           <Properties>
             <string name="Name">MetricsService</string>
             <string name="Source"><![CDATA[-- Balance telemetry for tuning prices: per-player blocks cleared and cash earned per minute, printed to the
@@ -2965,7 +3313,7 @@ return MetricsService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="28">
+        <Item class="ModuleScript" referent="31">
           <Properties>
             <string name="Name">RateLimiter</string>
             <string name="Source"><![CDATA[-- Sliding-window per-player, per-remote rate limiting. Limits come from Config.RateLimits.
@@ -3014,7 +3362,43 @@ return RateLimiter
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="29">
+        <Item class="ModuleScript" referent="32">
+          <Properties>
+            <string name="Name">SettingsService</string>
+            <string name="Source"><![CDATA[-- Player settings persistence. The client sends its whole settings table; the server never trusts it: every value is
+-- clamped/validated by SettingsSpec and only known keys are stored, in the existing profile (data.Settings), which the
+-- DataService already saves. Settings survive death/respawn (they never live on the character) and rejoining.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
+
+local DataService = require(script.Parent.DataService)
+local RateLimiter = require(script.Parent.RateLimiter)
+
+local SettingsService = {}
+
+function SettingsService.Init()
+	Remotes.Get("UpdateSettings").OnServerEvent:Connect(function(player: Player, payload: any)
+		if type(payload) ~= "table" or not RateLimiter.Check(player, "UpdateSettings") then
+			return
+		end
+		local data = DataService.Get(player)
+		if not data then
+			return
+		end
+		data.Settings = SettingsSpec.Sanitize(payload)
+		DataService.MarkDirty(player)
+	end)
+	Players.PlayerRemoving:Connect(RateLimiter.Forget)
+end
+
+return SettingsService
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="33">
           <Properties>
             <string name="Name">SiteService</string>
             <string name="Source"><![CDATA[-- Owns the excavation grid. Cell state lives in flat arrays; Part instances exist only for
@@ -3064,7 +3448,8 @@ function SiteService.IsExitWall(x: number, z: number): boolean
 		return false
 	end
 	local x0 = Grid.OriginX + x * Grid.CellSize
-	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + ex.Width / 2 + 1e-3
+	-- only the LANDING half (left of the shaft centre); the car half of the grid face is covered by an iron plate
+	return x0 >= ex.CenterX - ex.Width / 2 - 1e-3 and x0 + Grid.CellSize <= ex.CenterX + 1e-3
 end
 
 function SiteService.Generate(seed: number?)
@@ -3248,7 +3633,7 @@ return SiteService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">StateService</string>
             <string name="Source"><![CDATA[-- Pushes a compact snapshot of the player's state to their client (debounced to once per frame).
@@ -3258,6 +3643,7 @@ local DataService = require(script.Parent.DataService)
 local InventoryService = require(script.Parent.InventoryService)
 local CarryRegistry = require(script.Parent.CarryRegistry)
 local Defs = require(ReplicatedStorage.Shared.Defs)
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 
 local StateService = {}
 local pending: { [Player]: boolean } = {}
@@ -3274,6 +3660,7 @@ function StateService.Snapshot(player: Player)
 		Cash = data.Cash,
 		Reputation = data.Reputation,
 		Consumables = data.Consumables,
+		Settings = SettingsSpec.Sanitize(data.Settings),
 		Skins = data.EquippedCosmetics,
 		Count = InventoryService.Count(data),
 		Capacity = InventoryService.Capacity(data),
@@ -3306,11 +3693,12 @@ return StateService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">WorldBuilder</string>
-            <string name="Source"><![CDATA[-- Builds the graybox world (lighting, ground, Base Camp, Sell Zone, Shop) from code, idempotently:
--- anything it made before is destroyed first, so nothing is ever duplicated.
+            <string name="Source"><![CDATA[-- Builds the whole world from code, IDEMPOTENTLY: everything lives under Workspace.World, which is destroyed and rebuilt
+-- on every Build(), so running it again never duplicates assets. Lighting objects are looked up by name before creation.
+-- Structure here (ground slabs, bedrock, map boundary); detail lives in WorldLandscape, WorldCamp and WorldElevator.
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -3318,17 +3706,696 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage.Shared.Config)
 local Grid = require(ReplicatedStorage.Shared.Grid)
 
-local P = Config.Palette
+local Kit = require(script.Parent.WorldKit)
+local WorldLandscape = require(script.Parent.WorldLandscape)
+local WorldCamp = require(script.Parent.WorldCamp)
+local WorldElevator = require(script.Parent.WorldElevator)
+
+local C = Kit.Color
 local WorldBuilder = {}
 
-WorldBuilder.SellZoneCenter = Config.Camp.Position + Config.Camp.SellZoneOffset
-WorldBuilder.SpawnCFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 4, 16))
--- Artifact receiving table (beside the sell/appraisal zone) and the lost & found pad (fallback drop point).
-WorldBuilder.ReceivingCenter = Config.Camp.Position + Vector3.new(-27, 3.5, -7) -- where a depositing player must be near
-WorldBuilder.ReceivingDisplayPosition = Config.Camp.Position + Vector3.new(-27, 5.2, -7)
-WorldBuilder.LostFoundPosition = Config.Camp.Position + Vector3.new(-27, 2.2, -13)
+-- positions other services rely on (unchanged values)
+WorldBuilder.SellZoneCenter = WorldCamp.SellZoneCenter
+WorldBuilder.SpawnCFrame = WorldCamp.SpawnCFrame
+WorldBuilder.ReceivingCenter = WorldCamp.ReceivingCenter
+WorldBuilder.ReceivingDisplayPosition = WorldCamp.ReceivingDisplayPosition
+WorldBuilder.LostFoundPosition = WorldCamp.LostFoundPosition
+WorldBuilder.Elevator = { StopTops = WorldElevator.StopTops, StopNames = WorldElevator.StopNames }
 
-local function part(parent: Instance, name: string, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?): Part
+local function lighting()
+	Lighting.ClockTime = 15.5
+	Lighting.Brightness = 2.4
+	Lighting.Ambient = Color3.fromHex("8A7A68")
+	Lighting.OutdoorAmbient = Color3.fromHex("9C8B77")
+	Lighting.ColorShift_Top = Color3.fromHex("FFE2B0")
+	Lighting.EnvironmentDiffuseScale = 0.5
+	Lighting.EnvironmentSpecularScale = 0.2
+	local atm = Lighting:FindFirstChild("DigAtmosphere") :: Atmosphere?
+	if not atm then
+		atm = Instance.new("Atmosphere")
+		atm.Name = "DigAtmosphere"
+		atm.Parent = Lighting
+	end
+	atm.Density = 0.28
+	atm.Offset = 0.1
+	atm.Color = Color3.fromHex("F2D9B0")
+	atm.Decay = Color3.fromHex("C9985F")
+	atm.Haze = 1.4
+	atm.Glare = 0
+end
+
+function WorldBuilder.Build()
+	local old = Workspace:FindFirstChild("World")
+	if old then
+		old:Destroy()
+	end
+	local world = Instance.new("Folder")
+	world.Name = "World"
+	world.Parent = Workspace
+	lighting()
+
+	-- Ground: slabs around the dig footprint, thick enough that you never see void beside the shaft.
+	local half = Config.Site.SizeX * Config.Site.CellSize / 2
+	local halfZ = Config.Site.SizeZ * Config.Site.CellSize / 2
+	local ext = 170
+	local thickness = Config.Site.Depth * Config.Site.CellSize + 12
+	local cy = Grid.SurfaceY - thickness / 2
+	local ground = Instance.new("Folder")
+	ground.Name = "Ground"
+	ground.Parent = world
+	local function slab(name: string, x0: number, x1: number, z0: number, z1: number)
+		Kit.box(ground, name, Vector3.new(x1 - x0, thickness, z1 - z0), Vector3.new((x0 + x1) / 2, cy, (z0 + z1) / 2), C.Sand, Enum.Material.Sand)
+	end
+	slab("North", -ext, ext, -ext, -halfZ)
+	slab("West", -ext, -half, -halfZ, halfZ)
+	slab("East", half, ext, -halfZ, halfZ)
+	local ex = Config.Exit
+	local exMinX, exMaxX, exMaxZ = ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2, halfZ + ex.Run
+	if ex.Enabled then
+		-- the south slab is carved around the elevator shaft
+		slab("SouthWest", -ext, exMinX, halfZ, ext)
+		slab("SouthEast", exMaxX, ext, halfZ, ext)
+		slab("SouthFront", exMinX, exMaxX, exMaxZ, ext)
+	else
+		slab("South", -ext, ext, halfZ, ext)
+	end
+
+	-- Bedrock under the shaft, invisible boundary walls (unchanged)
+	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
+	Kit.box(world, "Bedrock", Vector3.new(half * 2, 8, halfZ * 2), Vector3.new(0, floorY - 4, 0), C.Iron, Enum.Material.Slate)
+	for i, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+		local wall = Kit.box(world, "Boundary" .. i,
+			Vector3.new(d[1] ~= 0 and 2 or ext * 2, 120, d[2] ~= 0 and 2 or ext * 2),
+			Vector3.new(d[1] * ext, 50, d[2] * ext), C.Iron)
+		wall.Transparency = 1
+	end
+
+	WorldLandscape.Build(world)
+	WorldCamp.Build(world, ex)
+	if ex.Enabled then
+		WorldElevator.Build(world, exMinX, exMaxX, halfZ, exMaxZ)
+	end
+	return world
+end
+
+return WorldBuilder
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="36">
+          <Properties>
+            <string name="Name">WorldCamp</string>
+            <string name="Source"><![CDATA[-- Base Camp, routes, excavation edge and the three stations. Ground treatments are distinct but related warm tones:
+--   camp = compacted warm sand, routes = slightly darker worn earth, excavation edge = restrained gravel + disturbed soil.
+-- Functional geometry is preserved: the camp floor top stays at y = 0.5, the spawn / sell radius / shop / receiving
+-- positions and prompt names are unchanged. Only their visible construction changed.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+local Appearances = require(ReplicatedStorage.Shared.Appearances)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+
+local Kit = require(script.Parent.WorldKit)
+local C = Kit.Color
+local V = Vector3.new
+local box, part, deco, sign = Kit.box, Kit.part, Kit.deco, Kit.sign
+
+local WorldCamp = {}
+
+-- Exposed to WorldBuilder / services
+WorldCamp.SellZoneCenter = Config.Camp.Position + Config.Camp.SellZoneOffset
+WorldCamp.SpawnCFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 4.5, 16))
+WorldCamp.ReceivingCenter = Config.Camp.Position + Vector3.new(-27, 3.5, -7)
+WorldCamp.ReceivingDisplayPosition = Config.Camp.Position + Vector3.new(-27, 5.2, -7)
+WorldCamp.LostFoundPosition = Config.Camp.Position + Vector3.new(-27, 2.2, -13)
+
+local function cylinder(parent: Instance, name: string, length: number, diameter: number, pos: Vector3, color: Color3, material: Enum.Material?, flat: boolean?): Part
+	-- Roblox cylinders run along X. `flat` lays the disc on the ground (axis up).
+	local cf = CFrame.new(pos) * (flat and CFrame.Angles(0, 0, math.rad(90)) or CFrame.identity)
+	local p = part(parent, name, V(length, diameter, diameter), cf, color, material)
+	p.Shape = Enum.PartType.Cylinder
+	return p
+end
+
+local function rope(parent: Instance, a: Vector3, b: Vector3)
+	local len = (b - a).Magnitude
+	local p = part(parent, "Rope", V(0.14, 0.14, len), CFrame.lookAt((a + b) / 2, b), C.Rope, Enum.Material.Fabric)
+	deco(p)
+end
+
+-- Ground ------------------------------------------------------------------------------------------------------------
+local function buildGround(camp: Folder, ex: { Enabled: boolean, CenterX: number, Width: number, Run: number })
+	local c = Config.Camp
+	local ground = Instance.new("Folder")
+	ground.Name = "GroundTreatment"
+	ground.Parent = camp
+
+	-- camp: compacted warm sand, with a slightly wider apron so it sits in the desert instead of on it
+	box(camp, "CampApron", V(c.Size.X + 6, 0.3, c.Size.Z + 6), c.Position + V(0, 0.15, 0), C.CampEdge, Enum.Material.Sand)
+	box(camp, "CampFloor", V(c.Size.X, 0.5, c.Size.Z), c.Position + V(0, 0.25, 0), C.Camp, Enum.Material.Sand)
+
+	-- routes: worn earth from the back of camp to the mine entrance, with short branches to the stations
+	local zBack = c.Position.Z + c.Size.Z / 2
+	box(ground, "RouteMain", V(12, 0.1, zBack - 56), V(0, 0.55, (zBack + 56) / 2), C.Route, Enum.Material.Ground)
+	box(ground, "RouteShop", V(18, 0.1, 5), V(15, 0.55, 82), C.Route, Enum.Material.Ground)
+	box(ground, "RouteSell", V(18, 0.1, 5), V(-15, 0.55, 82), C.Route, Enum.Material.Ground)
+
+	-- excavation edge: gravel and disturbed soil in four broad strips just outside the grid (not across the shaft)
+	local half = Config.Site.SizeX * Config.Site.CellSize / 2
+	local rim = 8
+	local function strip(name: string, x0: number, x1: number, z0: number, z1: number)
+		box(ground, name, V(x1 - x0, 0.12, z1 - z0), V((x0 + x1) / 2, 0.06, (z0 + z1) / 2), C.Gravel, Enum.Material.Pebble)
+	end
+	strip("RimNorth", -half - rim, half + rim, -half - rim, -half)
+	strip("RimWest", -half - rim, -half, -half, half)
+	strip("RimEast", half, half + rim, -half, half)
+	if ex.Enabled then
+		strip("RimSouthA", -half - rim, ex.CenterX - ex.Width / 2, half, half + rim)
+		strip("RimSouthB", ex.CenterX + ex.Width / 2, half + rim, half, half + rim)
+	else
+		strip("RimSouth", -half - rim, half + rim, half, half + rim)
+	end
+	-- disturbed-soil patches (broad, low contrast, deterministic)
+	local patches = { { -40, -52, 9, 5 }, { 8, -53, 12, 4 }, { 44, -51, 8, 6 }, { -52, -10, 5, 10 }, { -51, 28, 4, 8 },
+		{ 52, -30, 4, 9 }, { 51, 14, 5, 11 }, { -46, 52, 10, 4 }, { 46, 52, 8, 4 } }
+	for i, p in ipairs(patches) do
+		box(ground, "Disturbed" .. i, V(p[3], 0.14, p[4]), V(p[1], 0.07, p[2]), C.Disturbed, Enum.Material.Ground)
+	end
+end
+
+-- Rope-and-post fence around the dig, with gaps at the entrance and the elevator --------------------------------------
+local function buildFence(camp: Folder, ex: { Enabled: boolean, CenterX: number, Width: number })
+	local fence = Instance.new("Folder")
+	fence.Name = "Fence"
+	fence.Parent = camp
+	local lim = 55
+	local zS = 54.5
+	local function inGap(x: number, z: number): boolean
+		if z > 40 and math.abs(x) <= 10 then
+			return true -- the way in
+		end
+		if ex.Enabled and z > 40 and x >= ex.CenterX - ex.Width / 2 - 2 and x <= ex.CenterX + ex.Width / 2 + 2 then
+			return true -- the elevator
+		end
+		return false
+	end
+	-- ordered loop of fence points: north (W->E), east (N->S), south (E->W), west (S->N)
+	local points: { Vector3 } = {}
+	local step = 8
+	for x = -lim, lim, step do table.insert(points, V(x, 0, -lim)) end
+	for z = -lim + step, zS, step do table.insert(points, V(lim, 0, z)) end
+	for x = lim, -lim, -step do table.insert(points, V(x, 0, zS)) end
+	for z = zS - step, -lim + step, -step do table.insert(points, V(-lim, 0, z)) end
+	for i, p in ipairs(points) do
+		if not inGap(p.X, p.Z) then
+			local post = box(fence, "Post", V(0.7, 3.4, 0.7), V(p.X, 1.7, p.Z), C.TimberDark, Enum.Material.Wood)
+			post.CanCollide = true
+			if i % 2 == 0 then
+				box(fence, "LanternCap", V(0.7, 0.2, 0.7), V(p.X, 3.5, p.Z), C.Iron, Enum.Material.Metal)
+				deco(box(fence, "LanternGlow", V(0.5, 0.55, 0.5), V(p.X, 3.85, p.Z), Color3.fromHex("FFD27A"), Enum.Material.Neon))
+			end
+			local nxt = points[(i % #points) + 1]
+			if nxt and not inGap(nxt.X, nxt.Z) and (nxt - p).Magnitude < step * 1.5 then
+				rope(fence, V(p.X, 2.7, p.Z), V(nxt.X, 2.7, nxt.Z))
+			end
+		end
+	end
+end
+
+-- Entrance: boardwalk onto the dig surface and a tall gate (clear 12-stud opening, bottom of the lintel 8+ studs up) ----
+local function buildEntrance(camp: Folder)
+	local e = Instance.new("Folder")
+	e.Name = "Entrance"
+	e.Parent = camp
+	box(e, "Boardwalk", V(12, 0.4, 10), V(0, 0.2, 53), C.TimberLight, Enum.Material.WoodPlanks)
+	for _, sx in ipairs({ -6.3, 6.3 }) do
+		for _, z in ipairs({ 49.5, 53, 56.5 }) do
+			box(e, "RailPost", V(0.6, 3, 0.6), V(sx, 1.5, z), C.TimberDark, Enum.Material.Wood)
+		end
+		rope(e, V(sx, 2.5, 49.5), V(sx, 2.5, 56.5))
+	end
+	for _, sx in ipairs({ -7.4, 7.4 }) do
+		box(e, "GatePost", V(1, 9.5, 1), V(sx, 5.25, 58.5), C.Timber, Enum.Material.Wood)
+		box(e, "GateBand", V(1.15, 0.4, 1.15), V(sx, 3, 58.5), C.Iron, Enum.Material.Metal)
+	end
+	box(e, "GateLintel", V(16.6, 0.9, 0.9), V(0, 10.1, 58.5), C.TimberDark, Enum.Material.Wood)
+	for _, sx in ipairs({ -3, 3 }) do
+		deco(box(e, "SignChain", V(0.08, 0.8, 0.08), V(sx, 9.35, 58.5), C.Iron, Enum.Material.Metal))
+	end
+	local board = box(e, "EntranceSign", V(8, 1.9, 0.3), V(0, 8.0, 58.5), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "DIG SITE", C.TimberDark, C.Trim)
+end
+
+-- Equipment shop: timber frame, muted teal canopy, framed counter, orderly rack of REAL tool models -------------------
+local function buildShop(camp: Folder)
+	local s = Instance.new("Folder")
+	s.Name = "EquipmentShop"
+	s.Parent = camp
+	local o = Config.Camp.Position + Config.Camp.ShopOffset -- (14, 0, 74)
+	local base = V(o.X, 0.5, o.Z)
+	for _, sx in ipairs({ -6, 6 }) do
+		for _, sz in ipairs({ -3.3, 3.3 }) do
+			box(s, "Post", V(0.9, 11, 0.9), base + V(sx, 5.5, sz), C.Timber, Enum.Material.Wood)
+		end
+	end
+	-- back wall + rack
+	box(s, "BackWall", V(11.4, 7.5, 0.35), base + V(0, 4.25, -3.4), Color3.fromHex("CDB48A"), Enum.Material.Fabric)
+	box(s, "RackBeam", V(11.2, 0.5, 0.5), base + V(0, 7.6, -3.0), C.TimberDark, Enum.Material.Wood)
+	local rackApps = { "shovel_rusty", "shovel_digging", "shovel_heavy" }
+	for i, appId in ipairs(rackApps) do
+		local x = (i - 2) * 3.6
+		deco(box(s, "Hook", V(0.2, 0.5, 0.2), base + V(x, 7.1, -2.9), C.Iron, Enum.Material.Metal))
+		local model = ToolModels.BuildPreview(Appearances.List[appId] and appId or "shovel_rusty")
+		model.Name = "RackTool" .. i
+		model:ScaleTo(0.6)
+		model:PivotTo(CFrame.new(base + V(x, 4.85, -2.7)) * CFrame.Angles(math.pi, 0, 0)) -- blade down, hanging by the grip
+		model.Parent = s
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.CanCollide, d.CanQuery, d.CanTouch = false, false, false
+			end
+		end
+	end
+	-- framed counter
+	box(s, "CounterBody", V(11, 3.2, 2.2), base + V(0, 1.6, 2.4), C.TimberDark, Enum.Material.Wood)
+	for _, sx in ipairs({ -3.6, 0, 3.6 }) do
+		box(s, "CounterPanel", V(3.2, 2.3, 0.15), base + V(sx, 1.6, 3.55), C.TimberLight, Enum.Material.WoodPlanks)
+	end
+	box(s, "CounterTop", V(11.8, 0.4, 3.0), base + V(0, 3.4, 2.4), C.TimberLight, Enum.Material.WoodPlanks)
+	box(s, "LanternBase", V(0.8, 0.9, 0.8), base + V(5.0, 4.05, 2.4), C.Iron, Enum.Material.Metal)
+	deco(box(s, "LanternGlow", V(0.5, 0.6, 0.5), base + V(5.0, 4.8, 2.4), Color3.fromHex("FFD27A"), Enum.Material.Neon))
+	-- canopy: muted teal, tipped forward, cream trim, timber beams
+	for _, sz in ipairs({ -3.3, 3.3 }) do
+		box(s, "CanopyBeam", V(12.6, 0.6, 0.6), base + V(0, 10.2, sz), C.TimberDark, Enum.Material.Wood)
+	end
+	part(s, "Canopy", V(13.8, 0.35, 9), CFrame.new(base + V(0, 11.2, -0.2)) * CFrame.Angles(math.rad(8), 0, 0), C.CanvasTeal, Enum.Material.Fabric)
+	part(s, "CanopyTrim", V(13.8, 0.5, 0.45), CFrame.new(base + V(0, 10.55, 4.25)) * CFrame.Angles(math.rad(8), 0, 0), C.Trim, Enum.Material.Fabric)
+	local board = box(s, "ShopSign", V(7, 1.8, 0.3), base + V(0, 9.0, 3.7), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "EQUIPMENT", C.TimberDark, C.Trim)
+	-- the existing shop prompt, now on the counter
+	local anchor = box(s, "ShopAnchor", V(2, 1, 2), base + V(0, 4.6, 2.4), C.CanvasTeal)
+	anchor.Transparency = 1
+	deco(anchor)
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "ShopPrompt"
+	prompt.ObjectText = "Equipment Shop"
+	prompt.ActionText = "Browse"
+	prompt.HoldDuration = 0
+	prompt.MaxActivationDistance = 14
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = anchor
+end
+
+-- Appraisal workstation: counter with a balance scale and ledger under a cream canopy, behind a restrained sell boundary ---
+local function buildAppraisal(camp: Folder)
+	local s = Instance.new("Folder")
+	s.Name = "AppraisalStation"
+	s.Parent = camp
+	local sz = WorldCamp.SellZoneCenter -- (-14, 0, 78): the sell logic radius is unchanged
+	local base = V(sz.X, 0.5, 66)
+
+	for _, sx in ipairs({ -5.5, 5.5 }) do
+		for _, z in ipairs({ -2.6, 2.6 }) do
+			box(s, "Post", V(0.8, 9, 0.8), base + V(sx, 4.5, z), C.Timber, Enum.Material.Wood)
+		end
+	end
+	box(s, "BackWall", V(11, 6, 0.3), base + V(0, 3.5, -2.7), C.TimberDark, Enum.Material.WoodPlanks)
+	box(s, "CounterBody", V(10, 3.0, 2.0), base + V(0, 1.5, 1.2), C.TimberDark, Enum.Material.Wood)
+	box(s, "CounterTop", V(10.8, 0.4, 2.8), base + V(0, 3.2, 1.2), C.TimberLight, Enum.Material.WoodPlanks)
+	for _, sx in ipairs({ -3.2, 0, 3.2 }) do
+		box(s, "CounterPanel", V(2.8, 2.1, 0.15), base + V(sx, 1.5, 2.25), C.TimberLight, Enum.Material.WoodPlanks)
+	end
+	-- balance scale
+	local sx0 = -2.2
+	box(s, "ScaleBase", V(1.4, 0.3, 1.0), base + V(sx0, 3.55, 1.2), C.Iron, Enum.Material.Metal)
+	box(s, "ScalePost", V(0.25, 1.7, 0.25), base + V(sx0, 4.55, 1.2), C.Iron, Enum.Material.Metal)
+	box(s, "ScaleBeam", V(3.4, 0.2, 0.3), base + V(sx0, 5.45, 1.2), C.Iron, Enum.Material.Metal)
+	for _, side in ipairs({ -1.6, 1.6 }) do
+		deco(box(s, "ScaleString", V(0.05, 0.9, 0.05), base + V(sx0 + side, 4.95, 1.2), C.Iron, Enum.Material.Metal))
+		cylinder(s, "ScalePan", 0.15, 1.1, base + V(sx0 + side, 4.45, 1.2), C.Gold, Enum.Material.Metal, true)
+	end
+	-- ledger
+	box(s, "Ledger", V(1.3, 0.2, 0.95), base + V(2.4, 3.5, 1.2), C.TimberDark, Enum.Material.Wood)
+	box(s, "LedgerPages", V(1.1, 0.14, 0.75), base + V(2.4, 3.65, 1.2), C.Trim, Enum.Material.Fabric)
+	-- cream canopy + sign
+	for _, z in ipairs({ -2.6, 2.6 }) do
+		box(s, "CanopyBeam", V(11.8, 0.5, 0.5), base + V(0, 8.7, z), C.TimberDark, Enum.Material.Wood)
+	end
+	part(s, "Canopy", V(12.8, 0.35, 7.6), CFrame.new(base + V(0, 9.5, -0.1)) * CFrame.Angles(math.rad(7), 0, 0), C.CanvasCream, Enum.Material.Fabric)
+	part(s, "CanopyTrim", V(12.8, 0.45, 0.4), CFrame.new(base + V(0, 8.95, 3.6)) * CFrame.Angles(math.rad(7), 0, 0), C.Timber, Enum.Material.Fabric)
+	local board = box(s, "SellSign", V(6, 1.6, 0.3), base + V(0, 7.6, 3.0), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "SELL FINDS", C.TimberDark, C.Trim)
+
+	-- clearly marked sell area: a low tonal disc and a dashed boundary (the logic radius is Config.Camp.SellZoneRadius)
+	local r = Config.Camp.SellZoneRadius
+	cylinder(s, "SellDisc", 0.06, (r - 0.3) * 2, V(sz.X, 0.53, sz.Z), Color3.fromHex("CBA470"), Enum.Material.Sand, true)
+	local dashes = 28
+	for i = 0, dashes - 1 do
+		local theta = i / dashes * math.pi * 2
+		local pos = V(sz.X + math.cos(theta) * (r - 0.4), 0.55, sz.Z + math.sin(theta) * (r - 0.4))
+		part(s, "SellDash", V(1.5, 0.05, 0.35), CFrame.new(pos) * CFrame.Angles(0, -(theta + math.pi / 2), 0), C.Gold, Enum.Material.SmoothPlastic)
+	end
+end
+
+-- Artifact receiving table: distinct from selling (cream cloth on a timber frame, plaque, deposit prompt) ----------------
+local function buildReceiving(camp: Folder)
+	local folder = Instance.new("Folder")
+	folder.Name = "ReceivingTable"
+	folder.Parent = camp
+	local c = WorldCamp.ReceivingCenter
+	local base = V(c.X, 0.5, c.Z)
+	for _, sx in ipairs({ -2.5, 2.5 }) do
+		for _, sz in ipairs({ -1.5, 1.5 }) do
+			box(folder, "Leg", V(0.7, 2.6, 0.7), base + V(sx, 1.3, sz), C.Timber, Enum.Material.Wood)
+		end
+	end
+	box(folder, "RailFront", V(5.7, 0.4, 0.4), base + V(0, 2.5, 1.5), C.TimberDark, Enum.Material.Wood)
+	box(folder, "RailBack", V(5.7, 0.4, 0.4), base + V(0, 2.5, -1.5), C.TimberDark, Enum.Material.Wood)
+	box(folder, "RailL", V(0.4, 0.4, 3.0), base + V(-2.5, 2.5, 0), C.TimberDark, Enum.Material.Wood)
+	box(folder, "RailR", V(0.4, 0.4, 3.0), base + V(2.5, 2.5, 0), C.TimberDark, Enum.Material.Wood)
+	box(folder, "TableTop", V(6.2, 0.4, 4.0), base + V(0, 2.8, 0), C.TimberLight, Enum.Material.Wood)
+	box(folder, "ClothPad", V(5.6, 0.35, 3.4), base + V(0, 3.18, 0), C.Trim, Enum.Material.Fabric)
+	box(folder, "ClothDrape", V(5.6, 1.0, 0.15), base + V(0, 2.6, 2.05), C.Trim, Enum.Material.Fabric)
+	local plaque = box(folder, "Plaque", V(3.2, 0.8, 0.2), base + V(0, 2.6, 2.2), C.TimberDark, Enum.Material.Wood)
+	sign(plaque, Enum.NormalId.Back, "ARTIFACT RECEIVING", C.TimberDark, C.Gold)
+	-- a timber arch behind the table marks it from a distance
+	for _, sx in ipairs({ -3.4, 3.4 }) do
+		box(folder, "ArchPost", V(0.6, 7, 0.6), base + V(sx, 3.5, -2.3), C.Timber, Enum.Material.Wood)
+	end
+	box(folder, "ArchBeam", V(7.6, 0.6, 0.6), base + V(0, 7, -2.3), C.TimberDark, Enum.Material.Wood)
+	local board = box(folder, "ArtifactsSign", V(4.6, 1.3, 0.25), base + V(0, 6.0, -2.3), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "ARTIFACTS", C.TimberDark, C.Trim)
+
+	local anchor = box(folder, "DepositAnchor", V(2, 1, 2), base + V(0, 4.0, 0), C.CanvasTeal)
+	anchor.Transparency = 1
+	deco(anchor)
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "DepositPrompt"
+	prompt.ObjectText = "Receiving Table"
+	prompt.ActionText = "Deposit artifact"
+	prompt.HoldDuration = 0.3
+	prompt.MaxActivationDistance = 12
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = anchor
+
+	-- lost & found pad: fallback drop point (death/disconnect)
+	local lf = WorldCamp.LostFoundPosition
+	local pad = box(folder, "LostFoundPad", V(4, 0.3, 4), V(c.X, 0.65, lf.Z), Color3.fromHex("CDBE98"), Enum.Material.Fabric)
+	sign(pad, Enum.NormalId.Top, "LOST & FOUND", Color3.fromHex("CDBE98"), C.TimberDark)
+end
+
+function WorldCamp.Build(world: Folder, ex)
+	local camp = Instance.new("Folder")
+	camp.Name = "BaseCamp"
+	camp.Parent = world
+	buildGround(camp, ex)
+
+	-- spawn: a thin invisible pad (the visible surface is the camp floor / route, not a gold platform)
+	local spawn = Instance.new("SpawnLocation")
+	spawn.Name = "CampSpawn"
+	spawn.Anchored = true
+	spawn.Size = Vector3.new(10, 0.2, 10)
+	spawn.CFrame = CFrame.new(Config.Camp.Position + Vector3.new(0, 0.6, 16))
+	spawn.Neutral = true
+	spawn.Duration = 0
+	spawn.Transparency = 1
+	spawn.TopSurface = Enum.SurfaceType.Smooth
+	spawn.Parent = camp
+
+	buildFence(camp, ex)
+	buildEntrance(camp)
+	buildShop(camp)
+	buildAppraisal(camp)
+	buildReceiving(camp)
+end
+
+return WorldCamp
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="37">
+          <Properties>
+            <string name="Name">WorldElevator</string>
+            <string name="Source"><![CDATA[-- The mine elevator. Outside the destructible grid on the camp edge, full depth, framed in timber and iron above
+-- ground. Two columns inside the shaft:
+--   * RIGHT column (x midX..maxX): the car's travel column. Open from the surface to the bottom; the grid face is
+--     covered by an iron plate, so it can't be dug into (nothing digs into an open shaft).
+--   * LEFT column  (x minX..midX): timber landings in every layer (soil, clay, stone, ruins), scaffold posts and a ladder
+--     kept as a fallback. The grid cells facing this column are instanced from the start, so players dig sideways into
+--     it from any depth and step onto the landing, then onto the car.
+-- The car is an unanchored platform on a vertical PrismaticConstraint servo owned by the server (ElevatorService), so
+-- passengers (and artifacts they carry) ride it with normal physics. Stops sit on the landing tops.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+local Grid = require(ReplicatedStorage.Shared.Grid)
+
+local Kit = require(script.Parent.WorldKit)
+local C = Kit.Color
+local V = Vector3.new
+local box, part, deco, sign, weld = Kit.box, Kit.part, Kit.deco, Kit.sign, Kit.weld
+
+local WorldElevator = {}
+
+-- Platform TOP heights, surface first. Landing tops are cell-row boundaries so the grid row above each is diggable.
+WorldElevator.StopTops = { 0.5, -8, -24, -36, -48 }
+WorldElevator.StopNames = { "SURFACE", "SOIL", "CLAY", "STONE", "RUINS" }
+WorldElevator.CarThickness = 0.8
+
+local function prompt(parent: Instance, name: string, action: string, object: string, attrs: { [string]: any }, distance: number?)
+	local p = Instance.new("ProximityPrompt")
+	p.Name = name
+	p.ActionText = action
+	p.ObjectText = object
+	p.HoldDuration = 0
+	p.MaxActivationDistance = distance or 8
+	p.RequiresLineOfSight = false
+	for k, v in pairs(attrs) do
+		p:SetAttribute(k, v)
+	end
+	p.Parent = parent
+	return p
+end
+
+function WorldElevator.Build(world: Folder, minX: number, maxX: number, minZ: number, maxZ: number)
+	local folder = Instance.new("Folder")
+	folder.Name = "Elevator"
+	folder.Parent = world
+	local midX = (minX + maxX) / 2
+	local run = maxZ - minZ
+	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
+	local carX = (midX + maxX) / 2 -- centre of the car column
+	local carDepth = run - 0.5 -- clear of the iron plate on the grid face, flush with the camp floor edge at the top stop
+	local carZ = minZ + 0.5 + carDepth / 2
+
+	-- shaft floor + the iron plate that closes the grid face behind the car column
+	box(folder, "ShaftFloor", V(maxX - minX, 12, run), V((minX + maxX) / 2, floorY - 6, (minZ + maxZ) / 2), C.Iron, Enum.Material.Slate)
+	local plateH = Grid.SurfaceY - floorY
+	box(folder, "IronPlate", V(maxX - midX, plateH, 0.4), V(carX, floorY + plateH / 2, minZ + 0.2), C.Iron, Enum.Material.Metal)
+	for y = floorY + 4, Grid.SurfaceY - 2, 8 do
+		box(folder, "PlateBand", V(maxX - midX, 0.5, 0.6), V(carX, y, minZ + 0.45), C.TimberDark, Enum.Material.Wood)
+	end
+	-- guide rail on the east wall
+	box(folder, "GuideRail", V(0.3, plateH + 4, 0.8), V(maxX - 0.15, floorY + (plateH + 4) / 2, carZ), C.IronLight, Enum.Material.Metal)
+
+	-- LEFT column: ladder (fallback), landings, scaffold, signs ---------------------------------------------------------
+	local ladderX = (minX + midX) / 2
+	local top = Grid.SurfaceY + 4
+	local truss = Instance.new("TrussPart")
+	truss.Name = "Ladder"
+	truss.Anchored = true
+	truss.Size = V(2, top - floorY, 2)
+	truss.CFrame = CFrame.new(ladderX, (top + floorY) / 2, maxZ - 1)
+	truss.Color = C.TimberDark
+	truss.Material = Enum.Material.Wood
+	truss.Parent = folder
+
+	local landingTops = { -8, -24, -36, -48 }
+	local lowerTops = { -8, -24, -36, -48, floorY }
+	local landingW = midX - minX
+	for i, y in ipairs(landingTops) do
+		box(folder, "Landing" .. i, V(landingW, 1, run - 2), V(ladderX, y - 0.5, minZ + (run - 2) / 2), C.TimberLight, Enum.Material.WoodPlanks)
+		local nextY = lowerTops[i + 1]
+		local drop = (y - 1) - nextY
+		for _, px in ipairs({ minX + 0.8, midX - 1.2 }) do
+			for _, pz in ipairs({ minZ + 1, minZ + run - 3 }) do
+				box(folder, "Post", V(1, drop, 1), V(px, nextY + drop / 2, pz), C.TimberDark, Enum.Material.Wood)
+			end
+		end
+		for _, pz in ipairs({ minZ + 1, minZ + run - 3 }) do
+			box(folder, "Beam", V(landingW, 0.6, 0.6), V(ladderX, y - 1.3, pz), C.TimberDark, Enum.Material.Wood)
+		end
+		local board = box(folder, "ExitSign" .. i, V(4, 1.5, 0.2), V(ladderX - 2, y + 2.6, maxZ - 0.1), C.Iron, Enum.Material.Metal)
+		sign(board, Enum.NormalId.Front, "EXIT TO CAMP", C.Iron, C.Gold)
+	end
+
+	-- THE CAR ---------------------------------------------------------------------------------------------------------
+	local topY = WorldElevator.StopTops[1]
+	local car = Instance.new("Part")
+	car.Name = "Car"
+	car.Size = V(maxX - midX - 0.6, WorldElevator.CarThickness, carDepth) -- clear of the guide rail and the landings
+	car.Position = V(carX, topY - WorldElevator.CarThickness / 2, carZ)
+	car.Anchored = false
+	car.Material = Enum.Material.WoodPlanks
+	car.Color = C.TimberLight
+	car.TopSurface = Enum.SurfaceType.Smooth
+	car.BottomSurface = Enum.SurfaceType.Smooth
+	car.CustomPhysicalProperties = PhysicalProperties.new(2, 0.6, 0, 1, 1) -- heavy and grippy: passengers ride it
+	car.Parent = folder
+	local function carPart(name: string, size: Vector3, offset: Vector3, color: Color3, material: Enum.Material, solid: boolean?)
+		local p = part(folder, name, size, car.CFrame * CFrame.new(offset), color, material)
+		p.Anchored = false
+		p.Massless = true
+		if not solid then
+			deco(p)
+		end
+		weld(car, p)
+		return p
+	end
+	local halfW, halfD = car.Size.X / 2, car.Size.Z / 2
+	carPart("CarEdgeN", V(car.Size.X, 0.3, 0.3), V(0, 0.55, -halfD + 0.15), C.Iron, Enum.Material.Metal)
+	carPart("CarEdgeE", V(0.3, 0.3, car.Size.Z), V(halfW - 0.15, 0.55, 0), C.Iron, Enum.Material.Metal)
+	carPart("CarEdgeS", V(car.Size.X, 0.3, 0.3), V(0, 0.55, halfD - 0.15), C.Iron, Enum.Material.Metal)
+	-- railing on the landing side with a wide gap for boarding
+	for _, z in ipairs({ -halfD + 0.5, -halfD + 2.2, halfD - 2.2, halfD - 0.5 }) do
+		carPart("RailPost", V(0.3, 2.6, 0.3), V(-halfW + 0.2, 1.7, z), C.Iron, Enum.Material.Metal, true)
+	end
+	carPart("RailA", V(0.25, 0.25, 1.8), V(-halfW + 0.2, 2.8, -halfD + 1.35), C.IronLight, Enum.Material.Metal, true)
+	carPart("RailB", V(0.25, 0.25, 1.8), V(-halfW + 0.2, 2.8, halfD - 1.35), C.IronLight, Enum.Material.Metal, true)
+	-- control post with one prompt per action
+	carPart("ControlPost", V(0.6, 4.2, 0.6), V(halfW - 0.8, 2.5, 0), C.TimberDark, Enum.Material.Wood, true)
+	local actions = { { "Surface", "Go to surface", 3.1 }, { "Up", "Ride up", 2.3 }, { "Down", "Ride down", 1.5 } }
+	for _, a in ipairs(actions) do
+		local panel = carPart("Panel" .. a[1], V(0.9, 0.55, 0.25), V(halfW - 1.5, a[3] + 0.2, 0), C.Iron, Enum.Material.Metal)
+		prompt(panel, "RidePrompt", a[2], "Mine elevator", { Kind = a[1] }, 7)
+	end
+
+	-- vertical servo: the car can only move along Y, to the stop the server asks for
+	local track = part(folder, "Track", V(1, 1, 1), CFrame.new(carX, floorY, carZ), C.Iron, Enum.Material.Metal)
+	track.Transparency = 1
+	deco(track)
+	local a0 = Instance.new("Attachment")
+	a0.Name = "TrackAttach"
+	a0.Orientation = V(0, 0, 90) -- the constraint's slide axis (X) points up
+	a0.Parent = track
+	local a1 = Instance.new("Attachment")
+	a1.Name = "CarAttach"
+	a1.Orientation = V(0, 0, 90)
+	a1.Parent = car
+	local lift = Instance.new("PrismaticConstraint")
+	lift.Name = "Lift"
+	lift.Attachment0 = a0
+	lift.Attachment1 = a1
+	lift.LimitsEnabled = true
+	lift.LowerLimit = 0
+	lift.UpperLimit = (topY - WorldElevator.CarThickness / 2) - floorY + 0.5
+	lift.ActuatorType = Enum.ActuatorType.Servo
+	lift.ServoMaxForce = 1e7
+	lift.LinearResponsiveness = 20
+	lift.Speed = 14
+	lift.TargetPosition = (topY - WorldElevator.CarThickness / 2) - floorY
+	lift.Parent = track
+	folder:SetAttribute("TrackY", floorY)
+
+	-- call posts at every stop (the surface one is on the camp floor in front of the entrance) ---------------------------
+	for i, stopTop in ipairs(WorldElevator.StopTops) do
+		local px, pz, py
+		if i == 1 then
+			px, pz, py = midX - 0.8, maxZ + 1.5, stopTop
+		else
+			px, pz, py = midX - 0.6, minZ + 1.5, stopTop
+		end
+		box(folder, "CallPost" .. i, V(0.6, 3.2, 0.6), V(px, py + 1.6, pz), C.TimberDark, Enum.Material.Wood)
+		local plate = box(folder, "CallPlate" .. i, V(1.0, 0.7, 0.25), V(px, py + 2.6, pz), C.Iron, Enum.Material.Metal)
+		prompt(plate, "CallPrompt", "Call elevator", WorldElevator.StopNames[i], { Kind = "Call", StopIndex = i }, 9)
+	end
+
+	-- TOWER FRAME above ground: a timber/iron gantry that stands on solid ground in FRONT of the shaft mouth and beside it.
+	-- Its posts are outside the car's footprint and outside the destructible grid, so nothing ever collides with the car.
+	local towerH = 24
+	local gx0, gx1 = minX - 0.4, maxX + 0.6 -- west / east posts (east one stands on the ground slab beside the shaft)
+	local gz0, gz1 = maxZ + 0.8, maxZ + 4.8 -- front-of-shaft row and the row behind it, on the camp side
+	-- entrance deck: continues the camp floor level under the gantry, so boarding is a flat walk-on
+	box(folder, "EntranceDeck", V(gx1 - gx0 + 2, 0.5, gz1 - gz0 + 3), V((gx0 + gx1) / 2, 0.27, (maxZ + gz1 + 1.5) / 2), C.TimberLight, Enum.Material.WoodPlanks)
+	for _, x in ipairs({ gx0, gx1 }) do
+		for _, z in ipairs({ gz0, gz1 }) do
+			box(folder, "TowerPost", V(1.2, towerH, 1.2), V(x, towerH / 2, z), C.Timber, Enum.Material.Wood)
+			for y = 5, towerH - 3, 7 do
+				box(folder, "TowerBand", V(1.4, 0.5, 1.4), V(x, y, z), C.Iron, Enum.Material.Metal)
+			end
+		end
+	end
+	local function brace(a: Vector3, b: Vector3)
+		local len = (b - a).Magnitude
+		deco(part(folder, "Brace", V(0.5, 0.5, len), CFrame.lookAt((a + b) / 2, b), C.TimberDark, Enum.Material.Wood))
+	end
+	-- X-bracing on the two SIDE faces only: the south (camp) side and the shaft mouth stay fully open as the entrance
+	for _, x in ipairs({ gx0, gx1 }) do
+		brace(V(x, 2, gz0), V(x, 21, gz1))
+		brace(V(x, 21, gz0), V(x, 2, gz1))
+	end
+	-- crown beams + an iron machinery housing (static)
+	for _, z in ipairs({ gz0, gz1 }) do
+		box(folder, "CrownBeam", V(gx1 - gx0 + 1.2, 1.0, 1.0), V((gx0 + gx1) / 2, towerH + 0.4, z), C.TimberDark, Enum.Material.Wood)
+	end
+	for _, x in ipairs({ gx0, gx1 }) do
+		box(folder, "CrownCross", V(1.0, 1.0, gz1 - gz0 + 1.2), V(x, towerH + 0.4, (gz0 + gz1) / 2), C.TimberDark, Enum.Material.Wood)
+	end
+	box(folder, "MachineHousing", V(5, 3, 3.6), V(carX, towerH + 2.4, (gz0 + gz1) / 2), C.Iron, Enum.Material.Metal)
+	-- entrance: lintel across the front row, with a clear sign
+	box(folder, "EntranceLintel", V(gx1 - gx0 + 1.2, 0.9, 0.9), V((gx0 + gx1) / 2, 10.2, gz0), C.TimberDark, Enum.Material.Wood)
+	box(folder, "EntranceBand", V(gx1 - gx0 + 1.4, 0.4, 1.1), V((gx0 + gx1) / 2, 9.7, gz0), C.Iron, Enum.Material.Metal)
+	local board = box(folder, "ElevatorSign", V(8, 2.2, 0.3), V((gx0 + gx1) / 2, 13.4, gz0 + 0.55), C.TimberDark, Enum.Material.Wood)
+	sign(board, Enum.NormalId.Back, "ELEVATOR", C.TimberDark, C.Trim)
+	local sub = box(folder, "ElevatorSubSign", V(6, 1.2, 0.3), V((gx0 + gx1) / 2, 11.5, gz0 + 0.55), C.Iron, Enum.Material.Metal)
+	sign(sub, Enum.NormalId.Back, "TO THE MINE", C.Iron, C.Gold)
+
+	return folder
+end
+
+return WorldElevator
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="38">
+          <Properties>
+            <string name="Name">WorldKit</string>
+            <string name="Source"><![CDATA[-- Shared helpers and the world colour palette. Chunky, readable, minimal texture: broad shapes and subtle tonal changes.
+local WorldKit = {}
+
+local function hex(s: string): Color3
+	return Color3.fromHex(s)
+end
+
+WorldKit.Color = {
+	-- ground (distinct but related warm sands / earths)
+	Sand = hex("DDBE8A"), -- open desert
+	Camp = hex("D6B07A"), -- compacted warm sand
+	CampEdge = hex("CFA86F"),
+	Route = hex("B98B59"), -- slightly darker worn earth
+	Gravel = hex("A68A66"),
+	GravelDark = hex("8A6E50"),
+	Disturbed = hex("9A6A44"),
+	-- construction
+	Timber = hex("7B5233"),
+	TimberDark = hex("5E3F27"),
+	TimberLight = hex("A0733F"),
+	Iron = hex("2F343B"),
+	IronLight = hex("4A525C"),
+	Rope = hex("CDB88A"),
+	-- canvas
+	CanvasCream = hex("E6D8B4"),
+	CanvasTeal = hex("3E8E87"),
+	Trim = hex("EFE2C3"),
+	Gold = hex("D9A441"),
+	-- landforms
+	RockDark = hex("9C523A"),
+	Rock = hex("B8643F"),
+	RockTan = hex("C98F5A"),
+	RockCap = hex("D8B678"),
+	Scrub = hex("8B7B47"),
+	Stone = hex("8F877B"),
+}
+
+function WorldKit.part(parent: Instance, name: string, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?): Part
 	local p = Instance.new("Part")
 	p.Name = name
 	p.Anchored = true
@@ -3342,28 +4409,20 @@ local function part(parent: Instance, name: string, size: Vector3, cf: CFrame, c
 	return p
 end
 
-local function sign(parent: Part, text: string, color: Color3, studsAbove: number, size: UDim2)
-	local gui = Instance.new("BillboardGui")
-	gui.Name = "Sign"
-	gui.Size = size
-	gui.StudsOffset = Vector3.new(0, studsAbove, 0)
-	gui.AlwaysOnTop = true
-	gui.MaxDistance = 400
-	gui.Parent = parent
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.fromScale(1, 1)
-	label.BackgroundTransparency = 1
-	label.Text = text
-	label.TextColor3 = color
-	label.TextStrokeTransparency = 0
-	label.TextStrokeColor3 = P.Dark
-	label.Font = Enum.Font.FredokaOne
-	label.TextScaled = true
-	label.Parent = gui
+function WorldKit.box(parent: Instance, name: string, size: Vector3, pos: Vector3, color: Color3, material: Enum.Material?): Part
+	return WorldKit.part(parent, name, size, CFrame.new(pos), color, material)
+end
+
+-- A non-solid decoration (never blocks movement or rays).
+function WorldKit.deco(p: Part): Part
+	p.CanCollide = false
+	p.CanQuery = false
+	p.CanTouch = false
+	return p
 end
 
 -- A sign that cannot be seen through walls (SurfaceGui, not an always-on-top billboard).
-local function surfaceSign(parent: Part, face: Enum.NormalId, text: string, bg: Color3, fg: Color3)
+function WorldKit.sign(parent: Part, face: Enum.NormalId, text: string, bg: Color3, fg: Color3)
 	local gui = Instance.new("SurfaceGui")
 	gui.Face = face
 	gui.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
@@ -3387,271 +4446,168 @@ local function surfaceSign(parent: Part, face: Enum.NormalId, text: string, bg: 
 	label.Parent = frame
 end
 
--- Padded artifact receiving table: timber frame, cream cloth, plaque, deposit prompt.
-function WorldBuilder.BuildReceivingStation(camp: Folder)
+-- Weld a decoration to a root part (keeps movable assemblies, like the elevator car, rigid).
+function WorldKit.weld(root: Part, p: Part)
+	local w = Instance.new("WeldConstraint")
+	w.Part0 = root
+	w.Part1 = p
+	w.Parent = p
+end
+
+return WorldKit
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="39">
+          <Properties>
+            <string name="Name">WorldLandscape</string>
+            <string name="Source"><![CDATA[-- Surroundings: broad, low landforms and a few layered rocky outcrops OUTSIDE the mine, shaped as large coherent masses
+-- (stepped sandstone terraces) rather than scattered rocks. Everything here is outside the grid, the elevator route
+-- and the playable approaches; the map boundary (invisible walls at +-ext) is unchanged. A far ground plane and
+-- distant mesas continue the horizon beyond the boundary so it never reads as a flat edge.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = require(ReplicatedStorage.Shared.Config)
+local Kit = require(script.Parent.WorldKit)
+
+local C = Kit.Color
+local V = Vector3.new
+
+local WorldLandscape = {}
+
+-- A stepped mesa: `tiers` boxes, each smaller than the one below, in darker->lighter rock bands with a sand cap.
+-- cx, cz = centre; w, d = footprint of the lowest tier; heights = per-tier heights.
+local function mesa(parent: Instance, name: string, cx: number, cz: number, w: number, d: number, heights: { number }, solid: boolean)
 	local folder = Instance.new("Folder")
-	folder.Name = "ReceivingTable"
-	folder.Parent = camp
-	local c = WorldBuilder.ReceivingCenter
-	local base = Vector3.new(c.X, 0.5, c.Z) -- camp floor top
-	local TIMBER, TIMBER_DARK = Color3.fromHex("8B5E34"), Color3.fromHex("6B4A2E")
-
-	for _, sx in ipairs({ -2.5, 2.5 }) do
-		for _, sz in ipairs({ -1.5, 1.5 }) do
-			part(folder, "Leg", Vector3.new(0.7, 2.6, 0.7), CFrame.new(base + Vector3.new(sx, 1.3, sz)), TIMBER, Enum.Material.Wood)
+	folder.Name = name
+	folder.Parent = parent
+	local y = 0
+	local colors = { C.RockDark, C.Rock, C.RockTan }
+	for i, h in ipairs(heights) do
+		local shrink = 0.74 ^ (i - 1)
+		local ox = (i - 1) * 0.06 * w * (i % 2 == 0 and 1 or -1) -- gentle asymmetry, deterministic
+		local p = Kit.box(folder, ("Tier%d"):format(i), V(w * shrink, h, d * shrink), V(cx + ox, y + h / 2 - 1, cz),
+			colors[math.min(i, #colors)], Enum.Material.Sandstone)
+		if not solid then
+			Kit.deco(p)
 		end
+		-- a thin contrasting band where tiers meet reads as strata
+		local band = Kit.box(folder, "Band", V(w * shrink + 0.6, 0.7, d * shrink + 0.6), V(cx + ox, y + h - 0.35, cz), C.RockDark, Enum.Material.Sandstone)
+		if not solid then
+			Kit.deco(band)
+		end
+		y += h
 	end
-	part(folder, "RailFront", Vector3.new(5.7, 0.4, 0.4), CFrame.new(base + Vector3.new(0, 2.5, 1.5)), TIMBER_DARK, Enum.Material.Wood)
-	part(folder, "RailBack", Vector3.new(5.7, 0.4, 0.4), CFrame.new(base + Vector3.new(0, 2.5, -1.5)), TIMBER_DARK, Enum.Material.Wood)
-	part(folder, "RailL", Vector3.new(0.4, 0.4, 3.0), CFrame.new(base + Vector3.new(-2.5, 2.5, 0)), TIMBER_DARK, Enum.Material.Wood)
-	part(folder, "RailR", Vector3.new(0.4, 0.4, 3.0), CFrame.new(base + Vector3.new(2.5, 2.5, 0)), TIMBER_DARK, Enum.Material.Wood)
-	part(folder, "TableTop", Vector3.new(6.2, 0.4, 4.0), CFrame.new(base + Vector3.new(0, 2.8, 0)), TIMBER, Enum.Material.Wood)
-	part(folder, "ClothPad", Vector3.new(5.6, 0.35, 3.4), CFrame.new(base + Vector3.new(0, 3.18, 0)), P.Cream, Enum.Material.Fabric)
-	part(folder, "ClothDrape", Vector3.new(5.6, 1.0, 0.15), CFrame.new(base + Vector3.new(0, 2.6, 2.05)), P.Cream, Enum.Material.Fabric)
-	local plaque = part(folder, "Plaque", Vector3.new(3.2, 0.8, 0.2), CFrame.new(base + Vector3.new(0, 2.6, 2.2)), P.Dark)
-	surfaceSign(plaque, Enum.NormalId.Back, "ARTIFACT RECEIVING", P.Dark, P.Gold)
-
-	local anchor = part(folder, "DepositAnchor", Vector3.new(2, 1, 2), CFrame.new(base + Vector3.new(0, 4.0, 0)), P.Teal)
-	anchor.Transparency = 1
-	anchor.CanCollide = false
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = "DepositPrompt"
-	prompt.ObjectText = "Receiving Table"
-	prompt.ActionText = "Deposit artifact"
-	prompt.HoldDuration = 0.3
-	prompt.MaxActivationDistance = 12
-	prompt.RequiresLineOfSight = false
-	prompt.Parent = anchor
-
-	-- Lost & found pad: where an artifact lands if nowhere safer exists (death/disconnect fallback)
-	local pad = part(folder, "LostFoundPad", Vector3.new(4, 0.3, 4), CFrame.new(Vector3.new(c.X, 0.65, WorldBuilder.LostFoundPosition.Z)), Color3.fromHex("CDBE98"))
-	surfaceSign(pad, Enum.NormalId.Top, "LOST & FOUND", Color3.fromHex("CDBE98"), P.Dark)
+	local top = heights[#heights]
+	local shrink = 0.74 ^ #heights
+	local cap = Kit.box(folder, "Cap", V(w * shrink, 1.2, d * shrink), V(cx, y + 0.1, cz), C.RockCap, Enum.Material.Sand)
+	if not solid then
+		Kit.deco(cap)
+	end
+	_ = top
 end
 
--- Fixed ladder exit: a shaft OUTSIDE the destructible grid on the camp edge, full depth, with scaffold-supported
--- landings in every layer. The grid cells on its north wall are instanced up front (see SiteService), so players
--- dig sideways into it from any depth.
-function WorldBuilder.BuildExit(world: Folder, minX: number, maxX: number, minZ: number, maxZ: number)
+-- A broad low dune: two overlapping terraces of sand.
+local function dune(parent: Instance, name: string, cx: number, cz: number, w: number, d: number, h: number)
 	local folder = Instance.new("Folder")
-	folder.Name = "ExitShaft"
-	folder.Parent = world
-	local width, run = maxX - minX, maxZ - minZ
-	local cx = (minX + maxX) / 2
-	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
-	local TIMBER, TIMBER_DARK = Color3.fromHex("8B5E34"), Color3.fromHex("6B4A2E")
-
-	part(folder, "ShaftFloor", Vector3.new(width, 12, run), CFrame.new(cx, floorY - 6, (minZ + maxZ) / 2), P.Dark, Enum.Material.Slate)
-
-	-- Ladder: climbable truss on the south wall, floor to just above ground. Works while holding tools/artifacts.
-	local top = Grid.SurfaceY + 4
-	local truss = Instance.new("TrussPart")
-	truss.Name = "Ladder"
-	truss.Anchored = true
-	truss.Size = Vector3.new(2, top - floorY, 2)
-	truss.CFrame = CFrame.new(cx, (top + floorY) / 2, maxZ - 1)
-	truss.Color = TIMBER_DARK
-	truss.Material = Enum.Material.Wood
-	truss.Parent = folder
-
-	-- Landings: tops sit on a cell-row boundary so the grid row right above each platform is diggable. One per layer.
-	local landingTops = { -8, -24, -36, -48 } -- soil, clay, stone, ruins
-	local lowerTops = { -8, -24, -36, -48, floorY }
-	for i, y in ipairs(landingTops) do
-		part(folder, "Landing" .. i, Vector3.new(width, 1, run - 2), CFrame.new(cx, y - 0.5, minZ + (run - 2) / 2), TIMBER, Enum.Material.WoodPlanks)
-		-- scaffold: corner posts down to the next landing/floor + cross beams
-		local nextY = lowerTops[i + 1]
-		local drop = (y - 1) - nextY
-		for _, px in ipairs({ minX + 1, maxX - 1 }) do
-			for _, pz in ipairs({ minZ + 1, minZ + run - 3 }) do
-				part(folder, "Post", Vector3.new(1, drop, 1), CFrame.new(px, nextY + drop / 2, pz), TIMBER_DARK, Enum.Material.Wood)
-			end
-		end
-		for _, pz in ipairs({ minZ + 1, minZ + run - 3 }) do
-			part(folder, "Beam", Vector3.new(width, 0.6, 0.6), CFrame.new(cx, y - 1.3, pz), TIMBER_DARK, Enum.Material.Wood)
-		end
-		-- EXIT sign beside the ladder, on the south wall facing north (SurfaceGui: invisible through walls)
-		local board = part(folder, "ExitSign" .. i, Vector3.new(4, 1.6, 0.2), CFrame.new(cx + 3.5, y + 2.6, maxZ - 0.1), P.Dark)
-		surfaceSign(board, Enum.NormalId.Front, "EXIT TO CAMP >>", P.Dark, P.Gold)
-	end
-	local floorBoard = part(folder, "ExitSignFloor", Vector3.new(4, 1.6, 0.2), CFrame.new(cx + 3.5, floorY + 2.6, maxZ - 0.1), P.Dark)
-	surfaceSign(floorBoard, Enum.NormalId.Front, "EXIT TO CAMP >>", P.Dark, P.Gold)
-
-	-- Camp-side marker so the shaft can be found from the surface
-	local post1 = part(folder, "MarkerPostL", Vector3.new(0.6, 6, 0.6), CFrame.new(cx - 3, 3, maxZ + 2), TIMBER_DARK, Enum.Material.Wood)
-	part(folder, "MarkerPostR", Vector3.new(0.6, 6, 0.6), CFrame.new(cx + 3, 3, maxZ + 2), TIMBER_DARK, Enum.Material.Wood)
-	local marker = part(folder, "MarkerSign", Vector3.new(7, 2, 0.3), CFrame.new(cx, 5, maxZ + 2), P.Dark)
-	surfaceSign(marker, Enum.NormalId.Back, "MINE LADDER", P.Dark, P.Cream)
-	post1.Name = "MarkerPost"
+	folder.Name = name
+	folder.Parent = parent
+	Kit.box(folder, "Base", V(w, h, d), V(cx, h / 2 - 0.5, cz), C.Sand, Enum.Material.Sand)
+	Kit.box(folder, "Crest", V(w * 0.6, h, d * 0.62), V(cx + w * 0.05, h * 1.5 - 0.5, cz), Color3.fromHex("E3C592"), Enum.Material.Sand)
 end
 
-function WorldBuilder.Build()
-	local old = Workspace:FindFirstChild("World")
-	if old then
-		old:Destroy()
-	end
-	local world = Instance.new("Folder")
-	world.Name = "World"
-	world.Parent = Workspace
-
-	-- Lighting: warm afternoon
-	Lighting.ClockTime = 15.5
-	Lighting.Brightness = 2.4
-	Lighting.Ambient = Color3.fromHex("8A7A68")
-	Lighting.OutdoorAmbient = Color3.fromHex("9C8B77")
-	Lighting.ColorShift_Top = Color3.fromHex("FFE2B0")
-	Lighting.EnvironmentDiffuseScale = 0.5
-	Lighting.EnvironmentSpecularScale = 0.2
-	if not Lighting:FindFirstChild("DigAtmosphere") then
-		local atm = Instance.new("Atmosphere")
-		atm.Name = "DigAtmosphere"
-		atm.Density = 0.25
-		atm.Color = Color3.fromHex("F0D9B5")
-		atm.Decay = Color3.fromHex("C9985F")
-		atm.Haze = 1.2
-		atm.Parent = Lighting
-	end
-
-	-- Ground: four slabs around the dig footprint, thick enough that you never see void beside the shaft.
-	local half = Config.Site.SizeX * Config.Site.CellSize / 2
-	local halfZ = Config.Site.SizeZ * Config.Site.CellSize / 2
-	local ext = 170
-	local thickness = Config.Site.Depth * Config.Site.CellSize + 12
-	local cy = Grid.SurfaceY - thickness / 2
-	local ground = Instance.new("Folder")
-	ground.Name = "Ground"
-	ground.Parent = world
-	local function slab(name: string, x0: number, x1: number, z0: number, z1: number)
-		part(ground, name, Vector3.new(x1 - x0, thickness, z1 - z0),
-			CFrame.new((x0 + x1) / 2, cy, (z0 + z1) / 2), P.Sandstone, Enum.Material.Sand)
-	end
-	slab("North", -ext, ext, -ext, -halfZ)
-	local ex = Config.Exit
-	local exMinX, exMaxX = ex.CenterX - ex.Width / 2, ex.CenterX + ex.Width / 2
-	local exMaxZ = halfZ + ex.Run
-	if ex.Enabled then
-		slab("SouthWest", -ext, exMinX, halfZ, ext)
-		slab("SouthEast", exMaxX, ext, halfZ, ext)
-		slab("SouthFront", exMinX, exMaxX, exMaxZ, ext)
-	else
-		slab("South", -ext, ext, halfZ, ext)
-	end
-	slab("West", -ext, -half, -halfZ, halfZ)
-	slab("East", half, ext, -halfZ, halfZ)
-
-	-- Bedrock under the shaft
-	local floorY = Grid.SurfaceY - Config.Site.Depth * Config.Site.CellSize
-	part(world, "Bedrock", Vector3.new(half * 2, 8, halfZ * 2), CFrame.new(0, floorY - 4, 0), P.Dark, Enum.Material.Slate)
-
-	-- Invisible boundary walls so nobody wanders off the map
-	for i, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
-		local wall = part(world, "Boundary" .. i,
-			Vector3.new(d[1] ~= 0 and 2 or ext * 2, 120, d[2] ~= 0 and 2 or ext * 2),
-			CFrame.new(d[1] * ext, 50, d[2] * ext), P.Dark)
-		wall.Transparency = 1
-	end
-
-	-- Rim posts around the pit so the site reads from afar
-	for i = 0, 7 do
-		-- RimPost2 stood at (0, 72): dead centre of the straight spawn -> dig site route, so it is not built.
-		if i == 2 then
-			continue
+-- Sparse dry scrub and small rocks, concentrated at the base of a landform.
+local function scrub(parent: Instance, rng: Random, cx: number, cz: number, spreadX: number, spreadZ: number, count: number)
+	for i = 1, count do
+		local x = cx + (rng:NextNumber() - 0.5) * spreadX
+		local z = cz + (rng:NextNumber() - 0.5) * spreadZ
+		if rng:NextNumber() < 0.6 then
+			local s = 1.4 + rng:NextNumber() * 1.2
+			local bush = Kit.box(parent, "Scrub", V(s * 1.4, s * 0.8, s * 1.4), V(x, s * 0.3, z), C.Scrub, Enum.Material.Grass)
+			Kit.deco(bush)
+			local tuft = Kit.box(parent, "ScrubTuft", V(0.3, s * 1.2, 0.3), V(x, s * 0.8, z), Color3.fromHex("A5945A"), Enum.Material.Grass)
+			Kit.deco(tuft)
+		else
+			local r = 0.8 + rng:NextNumber() * 1.4
+			Kit.box(parent, "Rock", V(r * 1.6, r, r * 1.3), V(x, r * 0.4, z), C.Stone, Enum.Material.Slate)
 		end
-		local ang = i / 8 * math.pi * 2
-		local r = math.max(half, halfZ) * 1.5
-		part(world, "RimPost" .. i, Vector3.new(2, Config.Site.BorderHeight, 2),
-			CFrame.new(math.cos(ang) * r, Config.Site.BorderHeight / 2, math.sin(ang) * r), P.Clay)
 	end
-
-	-- Base Camp
-	local camp = Instance.new("Folder")
-	camp.Name = "BaseCamp"
-	camp.Parent = world
-	local c = Config.Camp
-	part(camp, "CampFloor", Vector3.new(c.Size.X, 0.5, c.Size.Z), CFrame.new(c.Position + Vector3.new(0, 0.25, 0)), P.Cream)
-
-	local spawn = Instance.new("SpawnLocation")
-	spawn.Name = "CampSpawn"
-	spawn.Anchored = true
-	spawn.Size = Vector3.new(10, 1, 10)
-	spawn.CFrame = CFrame.new(c.Position + Vector3.new(0, 0.5, 16))
-	spawn.Neutral = true
-	spawn.Duration = 0
-	spawn.Color = P.Gold
-	spawn.Material = Enum.Material.SmoothPlastic
-	spawn.TopSurface = Enum.SurfaceType.Smooth
-	spawn.Parent = camp
-	WorldBuilder.SpawnCFrame = CFrame.new(spawn.Position + Vector3.new(0, 4, 0))
-
-	-- Sell Zone
-	local sz = WorldBuilder.SellZoneCenter
-	local pad = part(camp, "SellZone", Vector3.new(c.SellZoneRadius * 2, 0.4, c.SellZoneRadius * 2),
-		CFrame.new(sz + Vector3.new(0, 0.7, 0)), P.Gold)
-	pad.Shape = Enum.PartType.Cylinder
-	pad.CFrame = CFrame.new(sz + Vector3.new(0, 0.7, 0)) * CFrame.Angles(0, 0, math.rad(90))
-	pad.Size = Vector3.new(0.4, c.SellZoneRadius * 2, c.SellZoneRadius * 2)
-	local post = part(camp, "SellPost", Vector3.new(1.5, 14, 1.5), CFrame.new(sz + Vector3.new(0, 7.5, 0)), P.Dark)
-	sign(post, "SELL ZONE", P.Gold, 6, UDim2.fromOffset(240, 60))
-
-	-- Shop stall
-	local sp = c.Position + c.ShopOffset
-	part(camp, "ShopCounter", Vector3.new(12, 4, 4), CFrame.new(sp + Vector3.new(0, 2.5, 0)), P.Clay)
-	part(camp, "ShopBack", Vector3.new(12, 10, 1), CFrame.new(sp + Vector3.new(0, 5.5, -3)), P.Dark)
-	part(camp, "ShopRoof", Vector3.new(14, 1, 7), CFrame.new(sp + Vector3.new(0, 11, -1)), P.Danger)
-	local anchor = part(camp, "ShopAnchor", Vector3.new(2, 2, 2), CFrame.new(sp + Vector3.new(0, 5.5, 0)), P.Teal)
-	anchor.Transparency = 1
-	anchor.CanCollide = false
-	sign(anchor, "EQUIPMENT SHOP", P.Teal, 5, UDim2.fromOffset(260, 56))
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = "ShopPrompt"
-	prompt.ObjectText = "Equipment Shop"
-	prompt.ActionText = "Browse"
-	prompt.HoldDuration = 0
-	prompt.MaxActivationDistance = 14
-	prompt.RequiresLineOfSight = false
-	prompt.Parent = anchor
-
-	WorldBuilder.BuildReceivingStation(camp)
-	if ex.Enabled then
-		WorldBuilder.BuildExit(world, exMinX, exMaxX, halfZ, exMaxZ)
-	end
-
-	-- Dig-site welcome sign
-	local board = part(camp, "SiteBoard", Vector3.new(14, 6, 1), CFrame.new(Vector3.new(0, 6, halfZ + 8)), P.Dark)
-	sign(board, "DIG HERE  ▼", P.Cream, 0, UDim2.fromOffset(280, 70))
-
-	return world
 end
 
-return WorldBuilder
+function WorldLandscape.Build(world: Folder)
+	local land = Instance.new("Folder")
+	land.Name = "Landscape"
+	land.Parent = world
+	local ext = 170 -- map boundary (the invisible walls are built by WorldBuilder at +-ext)
+
+	-- Distant ground + mesas beyond the boundary: decoration only (non-solid, not raycast).
+	Kit.deco(Kit.box(land, "FarGround", V(1400, 2, 1400), V(0, -1.1, 0), C.Sand, Enum.Material.Sand))
+	local far = Instance.new("Folder")
+	far.Name = "FarMesas"
+	far.Parent = land
+	mesa(far, "FarNW", -300, -330, 190, 120, { 26, 22, 16 }, false)
+	mesa(far, "FarN", 70, -360, 240, 130, { 30, 24, 18 }, false)
+	mesa(far, "FarNE", 330, -250, 170, 140, { 24, 20, 14 }, false)
+	mesa(far, "FarE", 380, 40, 150, 160, { 18, 16, 10 }, false)
+	mesa(far, "FarW", -380, 20, 160, 150, { 20, 16, 12 }, false)
+	mesa(far, "FarSE", 300, 300, 150, 100, { 12, 10 }, false)
+	mesa(far, "FarSW", -310, 290, 150, 100, { 12, 10 }, false)
+
+	-- Near landforms (solid, inside the boundary). The south-centre is deliberately left open: that is the way in.
+	mesa(land, "NorthMesaWest", -70, -138, 100, 56, { 16, 13, 9 }, true)
+	mesa(land, "NorthMesaEast", 52, -146, 120, 62, { 18, 14, 10 }, true)
+	mesa(land, "NorthRidgeFar", 142, -122, 54, 52, { 24, 18, 12 }, true)
+	mesa(land, "WestOutcrop", -142, -34, 62, 96, { 14, 11, 8 }, true)
+	mesa(land, "EastOutcrop", 142, -2, 62, 92, { 14, 11, 8 }, true)
+	dune(land, "WestDune", -146, 70, 46, 60, 5)
+	dune(land, "EastDune", 146, 76, 46, 60, 5)
+	dune(land, "SouthWestDune", -118, 140, 64, 40, 5)
+	dune(land, "SouthEastDune", 118, 140, 64, 40, 5)
+
+	-- Sparse vegetation and small rocks, only near the bases of landforms (never near spawn or the mine).
+	local plants = Instance.new("Folder")
+	plants.Name = "Vegetation"
+	plants.Parent = land
+	local rng = Random.new(Config.Site.Seed)
+	scrub(plants, rng, -70, -104, 70, 14, 5)
+	scrub(plants, rng, 52, -112, 80, 14, 5)
+	scrub(plants, rng, -110, -34, 12, 70, 4)
+	scrub(plants, rng, 110, -2, 12, 70, 4)
+	scrub(plants, rng, -126, 78, 12, 40, 3)
+	scrub(plants, rng, 126, 84, 12, 40, 3)
+	_ = ext
+end
+
+return WorldLandscape
 ]]></string>
           </Properties>
         </Item>
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="32">
+  <Item class="StarterPlayer" referent="40">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="33">
+    <Item class="StarterPlayerScripts" referent="41">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="34">
+      <Item class="Folder" referent="42">
         <Properties>
           <string name="Name">Client</string>
         </Properties>
-        <Item class="Folder" referent="35">
+        <Item class="Folder" referent="43">
           <Properties>
             <string name="Name">Controllers</string>
           </Properties>
-          <Item class="ModuleScript" referent="36">
+          <Item class="ModuleScript" referent="44">
             <Properties>
               <string name="Name">AudioController</string>
               <string name="Source"><![CDATA[-- All sound ids live in this one table so real audio can be swapped in without touching gameplay code.
 -- The defaults are Roblox's built-in client sounds (placeholders). Set Id = "" to silence one.
 local SoundService = game:GetService("SoundService")
 local Debris = game:GetService("Debris")
+local Settings = require(script.Parent.Settings)
 
 local Audio = {}
 
@@ -3673,7 +4629,7 @@ function Audio.Play(name: string, pitchMul: number?, volumeMul: number?)
 	end
 	local s = Instance.new("Sound")
 	s.SoundId = def.Id
-	s.Volume = def.Volume * (volumeMul or 1)
+	s.Volume = def.Volume * (volumeMul or 1) * Settings.Get("MasterVolume")
 	s.PlaybackSpeed = def.Pitch * (pitchMul or 1)
 	s.Parent = SoundService
 	s:Play()
@@ -3684,11 +4640,54 @@ return Audio
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="37">
+          <Item class="ModuleScript" referent="45">
+            <Properties>
+              <string name="Name">Bindings</string>
+              <string name="Source"><![CDATA[-- The ONE place gameplay keys are defined. Controllers read these; the Controls page of the menu displays them, so
+-- what the menu shows is always what is actually bound.
+local UserInputService = game:GetService("UserInputService")
+
+local Bindings = {}
+
+Bindings.FreeCursor = Enum.KeyCode.LeftAlt -- toggle mining mode <-> free cursor (first person)
+Bindings.CameraToggle = Enum.KeyCode.V -- first <-> third person
+Bindings.ReturnToCamp = Enum.KeyCode.R
+Bindings.PlaceArtifact = Enum.KeyCode.X
+Bindings.ThrowDynamite = Enum.KeyCode.G
+Bindings.Menu = Enum.KeyCode.P
+
+function Bindings.Name(keyCode: Enum.KeyCode): string
+	local ok, name = pcall(function()
+		return UserInputService:GetStringForKeyCode(keyCode)
+	end)
+	if ok and name and name ~= "" then
+		return name
+	end
+	return keyCode.Name
+end
+
+return Bindings
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="46">
             <Properties>
               <string name="Name">CameraController</string>
-              <string name="Source"><![CDATA[-- Desktop camera: Roblox's built-in first-person (LockFirstPerson) + a temporary V toggle to compare with
--- third person. Also owns the crosshair and the "free cursor" key. Does nothing on touch devices.
+              <string name="Source"><![CDATA[-- Desktop camera.
+--
+-- FIRST PERSON uses our own camera (CameraType = Scriptable) because Roblox's built-in camera offers no per-game
+-- mouse-sensitivity multiplier: the only built-in control is the player's global Roblox setting, which a game must not
+-- overwrite. All mouse-look in first person is computed HERE, once:
+--
+--     yaw/pitch change (radians) = mouse delta (pixels) x BASE x RobloxSensitivity x Settings.MouseSensitivity
+--
+--   * delta comes from UserInputService:GetMouseDelta() (pixels moved since the last frame), so the turn angle depends
+--     only on how far the mouse moved - NOT on the frame rate. There is no dt term, smoothing, acceleration or inertia.
+--   * the character is turned to the camera yaw each frame; the default camera scripts are idle (Scriptable).
+--   * camera shake (Humanoid.CameraOffset) is added on top and is completely independent of look sensitivity.
+--   * BASE is an ESTIMATE of the built-in camera's feel, not a measured value. See BASE_DEGREES_PER_PIXEL.
+-- THIRD PERSON (V) uses Roblox's normal camera untouched.
+-- The free cursor / menus (InputMode) stop mouse-look and release the cursor.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -3697,41 +4696,48 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
-local UI = require(script.Parent.UIController)
+local Settings = require(script.Parent.Settings)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
 
 local CameraController = {}
 
-local TOGGLE_KEY = Enum.KeyCode.V -- temporary comparison toggle
-local FREE_CURSOR_KEY = Enum.KeyCode.LeftAlt -- press to toggle MINING mode <-> FREE-CURSOR mode (first person)
-local START_FIRST_PERSON = true
+-- Degrees of turn per pixel of mouse movement at sensitivity setting 1.0 and Roblox sensitivity 1.0.
+-- PROVISIONAL: chosen so the default setting (0.30) gives about 0.075 degrees/pixel (roughly 120 degrees per 5 cm of
+-- mouse travel at 800 DPI). Not measured against Roblox's built-in camera; adjust here after playtesting.
+local BASE_DEGREES_PER_PIXEL = 0.25
+local PITCH_LIMIT = math.rad(85)
+local FIRST_PERSON_FOV = 70
 local THIRD_PERSON_DISTANCE = 12
-local SHOVEL_FADE = 0.85 -- LocalTransparencyModifier applied while the shovel covers the crosshair / mining face
-local SHOVEL_FP_SCALE = 0.5 -- the held shovel is drawn this fraction of its size in first person (local only)
-local CLEARANCE_RADIUS = 0.06 -- of viewport height: how far around the crosshair must stay clear
+local START_FIRST_PERSON = true
 
 local desktop = not UserInputService.TouchEnabled
 local wantFirst = START_FIRST_PERSON
+local active = false -- our camera is currently driving
+local yaw, pitch = 0, 0
+local bodyParts: { BasePart } = {}
+local bodyCharacter: Model? = nil
 
 local crossGui: ScreenGui
 local cross: Frame
-local crossStroke: UIStroke
 local hint: TextLabel
 local crossState = "none"
-
-local toolParams = RaycastParams.new()
-toolParams.FilterType = Enum.RaycastFilterType.Include
-local lastTool: Instance? = nil
-local fade = 0
 
 function CameraController.IsDesktop(): boolean
 	return desktop
 end
 
+-- Whether the player WANTS first person (V toggle), even while dead/respawning.
 function CameraController.IsFirstPerson(): boolean
 	return desktop and wantFirst
+end
+
+-- Whether our first-person camera is actually driving right now (viewmodel and crosshair follow this).
+function CameraController.IsActive(): boolean
+	return active
 end
 
 -- "hit" (in reach), "far" (valid block out of reach) or "none"
@@ -3739,39 +4745,24 @@ function CameraController.SetCrosshairState(state: string)
 	crossState = state
 end
 
-local function applyMode()
-	if not desktop then
-		return
+local function robloxSensitivity(): number
+	local ok, v = pcall(function()
+		return UserSettings():GetService("UserGameSettings").MouseSensitivity
+	end)
+	if ok and type(v) == "number" and v > 0 then
+		return v
 	end
-	if wantFirst then
-		player.CameraMode = Enum.CameraMode.LockFirstPerson
-	else
-		player.CameraMode = Enum.CameraMode.Classic
-		-- Pull the camera back out of first person, then give the player their normal zoom range again.
-		player.CameraMinZoomDistance = THIRD_PERSON_DISTANCE
-		task.delay(0.15, function()
-			player.CameraMinZoomDistance = 0.5
-		end)
-	end
+	return 1
 end
 
-local function updateHint()
-	if not hint then
-		return
-	end
-	if not wantFirst then
-		hint.Text = "THIRD PERSON  -  V: switch view  -  R: return to camp"
-	elseif UI.IsCursorFree() then
-		hint.Text = "FREE CURSOR  -  ALT: back to mining  -  V: switch view"
-	else
-		hint.Text = "MINING  -  ALT: free cursor  -  V: switch view  -  R: return to camp"
-	end
+-- Radians of turn per pixel with the current settings (exposed for the settings display and tests).
+function CameraController.RadiansPerPixel(): number
+	return math.rad(BASE_DEGREES_PER_PIXEL) * robloxSensitivity() * Settings.Get("MouseSensitivity")
 end
 
--- Pauses camera rotation (mouse-look, right-drag, wheel zoom) by sinking those inputs ahead of the default
--- camera scripts. Only used while a menu / free-cursor mode owns the pointer.
+-- Third person: when a menu/free-cursor owns the pointer, sink the default camera's mouse input.
 local frozen = false
-local function setCameraFrozen(freeze: boolean)
+local function setThirdPersonFrozen(freeze: boolean)
 	if freeze == frozen then
 		return
 	end
@@ -3786,15 +4777,129 @@ local function setCameraFrozen(freeze: boolean)
 	end
 end
 
+local function refreshBodyParts(char: Model)
+	if bodyCharacter == char then
+		return
+	end
+	bodyCharacter = char
+	table.clear(bodyParts)
+	for _, d in ipairs(char:GetDescendants()) do
+		if d:IsA("BasePart") and not d:FindFirstAncestorWhichIsA("Tool") then
+			table.insert(bodyParts, d)
+		end
+	end
+	char.DescendantAdded:Connect(function(d)
+		if d:IsA("BasePart") and not d:FindFirstAncestorWhichIsA("Tool") then
+			table.insert(bodyParts, d)
+		end
+	end)
+end
+
+local function setBodyHidden(hidden: boolean)
+	for _, p in ipairs(bodyParts) do
+		if p.Parent then
+			p.LocalTransparencyModifier = hidden and 1 or 0
+		end
+	end
+end
+
+local function enter(cam: Camera, humanoid: Humanoid)
+	local look = cam.CFrame.LookVector
+	yaw = math.atan2(-look.X, -look.Z)
+	pitch = math.clamp(math.asin(math.clamp(look.Y, -1, 1)), -PITCH_LIMIT, PITCH_LIMIT)
+	player.CameraMode = Enum.CameraMode.Classic
+	humanoid.AutoRotate = false
+	cam.CameraType = Enum.CameraType.Scriptable
+	cam.FieldOfView = FIRST_PERSON_FOV
+	active = true
+	setThirdPersonFrozen(false)
+end
+
+local function leave(cam: Camera, humanoid: Humanoid?)
+	active = false
+	setBodyHidden(false)
+	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	if humanoid then
+		humanoid.AutoRotate = true
+	end
+	cam.CameraType = Enum.CameraType.Custom
+	-- pull the camera out of first person, then give the player their normal zoom range back
+	player.CameraMode = Enum.CameraMode.Classic
+	player.CameraMinZoomDistance = THIRD_PERSON_DISTANCE
+	task.delay(0.15, function()
+		player.CameraMinZoomDistance = 0.5
+	end)
+end
+
+local function step()
+	local cam = Workspace.CurrentCamera
+	local char = player.Character
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	local head = char and char:FindFirstChild("Head")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local want = desktop and wantFirst and humanoid ~= nil and head ~= nil and hrp ~= nil
+		and (humanoid :: Humanoid).Health > 0
+
+	if want and not active then
+		enter(cam, humanoid :: Humanoid)
+	elseif not want and active then
+		leave(cam, humanoid)
+	end
+
+	if not active then
+		if desktop then
+			setThirdPersonFrozen(InputMode.IsCursorFree())
+		end
+		return
+	end
+
+	refreshBodyParts(char :: Model)
+	if cam.CameraType ~= Enum.CameraType.Scriptable then
+		cam.CameraType = Enum.CameraType.Scriptable -- something (e.g. a respawn) reset it
+	end
+
+	local locked = not InputMode.IsCursorFree()
+	UserInputService.MouseBehavior = locked and Enum.MouseBehavior.LockCenter or Enum.MouseBehavior.Default
+	if locked then
+		local delta = UserInputService:GetMouseDelta()
+		local k = CameraController.RadiansPerPixel()
+		local invert = Settings.Get("InvertY") and -1 or 1
+		yaw -= delta.X * k
+		pitch = math.clamp(pitch - delta.Y * k * invert, -PITCH_LIMIT, PITCH_LIMIT)
+	end
+
+	-- the character always faces the camera yaw (movement is camera-relative)
+	local root = hrp :: BasePart
+	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	local eye = (head :: BasePart).Position + Vector3.new(0, 0.2, 0) + (humanoid :: Humanoid).CameraOffset
+	cam.CFrame = CFrame.new(eye) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(pitch, 0, 0)
+	setBodyHidden(true)
+end
+
+local function updateHint()
+	if not hint then
+		return
+	end
+	local V, R, A = Bindings.Name(Bindings.CameraToggle), Bindings.Name(Bindings.ReturnToCamp), Bindings.Name(Bindings.FreeCursor)
+	local M = Bindings.Name(Bindings.Menu)
+	if not wantFirst then
+		hint.Text = ("THIRD PERSON  -  %s: switch view  -  %s: return to camp  -  %s: menu"):format(V, R, M)
+	elseif InputMode.IsFreeCursor() then
+		hint.Text = ("FREE CURSOR  -  %s: back to mining  -  %s: switch view  -  %s: menu"):format(A, V, M)
+	else
+		hint.Text = ("MINING  -  %s: free cursor  -  %s: switch view  -  %s: return to camp  -  %s: menu"):format(A, V, R, M)
+	end
+end
+
 function CameraController.Toggle()
-	if desktop then
+	if desktop and not InputMode.IsMenuOpen() then
 		wantFirst = not wantFirst
 		if not wantFirst then
-			UI.SetCursorFree(false) -- third person always has a free pointer; leave the mode flag clean
+			InputMode.SetFreeCursor(false)
 		end
-		applyMode()
 		updateHint()
-		setCameraFrozen(wantFirst and UI.IsMenuOpen())
 	end
 end
 
@@ -3819,17 +4924,17 @@ local function buildHud()
 	local c = Instance.new("UICorner")
 	c.CornerRadius = UDim.new(1, 0)
 	c.Parent = cross
-	crossStroke = Instance.new("UIStroke")
-	crossStroke.Color = P.Dark
-	crossStroke.Thickness = 1.5
-	crossStroke.Parent = cross
+	local s = Instance.new("UIStroke")
+	s.Color = P.Dark
+	s.Thickness = 1.5
+	s.Parent = cross
 
 	hint = Instance.new("TextLabel")
 	hint.Name = "ViewHint"
 	hint.BackgroundTransparency = 1
 	hint.AnchorPoint = Vector2.new(0.5, 1)
 	hint.Position = UDim2.new(0.5, 0, 1, -8)
-	hint.Size = UDim2.fromOffset(520, 20)
+	hint.Size = UDim2.fromOffset(760, 20)
 	hint.Font = Enum.Font.FredokaOne
 	hint.TextSize = 14
 	hint.TextColor3 = P.Cream
@@ -3839,109 +4944,33 @@ local function buildHud()
 	hint.Parent = crossGui
 end
 
--- Local-only first-person shovel shrink. Scales every part, weld offset and the grip about the hand so the
--- model keeps its proportions. Tracked per tool instance in a local attribute, and undone in third person.
-local function setToolScale(tool: Instance, scale: number)
-	local current = tool:GetAttribute("FPScale") or 1
-	if math.abs(current - scale) < 1e-3 then
-		return
-	end
-	local ratio = scale / current
-	for _, d in ipairs(tool:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.Size *= ratio
-		elseif d:IsA("Weld") then
-			local c0 = d.C0
-			d.C0 = CFrame.new(c0.Position * ratio) * (c0 - c0.Position)
-		end
-	end
-	if tool:IsA("Tool") then
-		local g = tool.Grip
-		tool.Grip = CFrame.new(g.Position * ratio) * (g - g.Position)
-		local base = tool:FindFirstChild("BaseGripValue")
-		if base and base:IsA("CFrameValue") then
-			base.Value = tool.Grip
-		end
-	end
-	tool:SetAttribute("FPScale", scale)
-end
-
-local CLEARANCE_OFFSETS = {
-	Vector2.new(0, 0), Vector2.new(1, 0), Vector2.new(-1, 0), Vector2.new(0, 1), Vector2.new(0, -1),
-}
-
--- Shrinks the held shovel in first person and fades it only while it sits over the crosshair or the
--- area right around it (the face being mined). Five rays per frame; no art changes.
-local function updateToolClearance(dt: number)
-	local char = player.Character
-	local tool = char and char:FindFirstChildOfClass("Tool") -- the shovel OR a carried artifact
-	if not tool then
-		return
-	end
-	local first = CameraController.IsFirstPerson()
-	local fp = tool:GetAttribute("ToolFPScale") or SHOVEL_FP_SCALE
-	setToolScale(tool, first and fp or 1)
-
-	local target = 0
-	if first and not UI.IsMenuOpen() then
-		if tool ~= lastTool then
-			lastTool = tool
-			toolParams.FilterDescendantsInstances = { tool }
-		end
-		local cam = Workspace.CurrentCamera
-		local c = cam.ViewportSize / 2
-		local r = cam.ViewportSize.Y * CLEARANCE_RADIUS
-		for _, o in ipairs(CLEARANCE_OFFSETS) do
-			local ray = cam:ViewportPointToRay(c.X + o.X * r, c.Y + o.Y * r)
-			if Workspace:Raycast(ray.Origin, ray.Direction * 40, toolParams) then
-				target = SHOVEL_FADE
-				break
-			end
-		end
-	end
-	fade += (target - fade) * math.min(1, dt * 14)
-	local value = (first and fade > 0.01) and fade or 0
-	for _, d in ipairs(tool:GetDescendants()) do
-		if d:IsA("BasePart") and d.LocalTransparencyModifier ~= value then
-			d.LocalTransparencyModifier = value
-		end
-	end
-end
-
 function CameraController.Init()
 	buildHud()
 	if not desktop then
 		return
 	end
-	applyMode()
 	updateHint()
-	player.CharacterAdded:Connect(applyMode)
-
-	UI.OnMenuChanged(function()
-		updateHint()
-		setCameraFrozen(wantFirst and UI.IsMenuOpen())
-	end)
+	InputMode.OnChanged(updateHint)
 
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if UserInputService:GetFocusedTextBox() then
+		if UserInputService:GetFocusedTextBox() or InputMode.IsMenuOpen() then
 			return
 		end
-		if input.KeyCode == FREE_CURSOR_KEY and wantFirst then
-			-- Alt toggles; DigController drops held input on the change, so mining needs a fresh click.
-			UI.SetCursorFree(not UI.IsCursorFree())
-		elseif not processed and input.KeyCode == TOGGLE_KEY then
+		if input.KeyCode == Bindings.FreeCursor and wantFirst then
+			-- Alt toggles; the dig controller drops held input on the change, so mining needs a fresh click.
+			InputMode.SetFreeCursor(not InputMode.IsFreeCursor())
+		elseif not processed and input.KeyCode == Bindings.CameraToggle then
 			CameraController.Toggle()
 		end
 	end)
 
-	RunService.RenderStepped:Connect(function(dt)
-		local show = CameraController.IsFirstPerson() and not UI.IsMenuOpen()
-			and player.Character ~= nil
-		cross.Visible = show
-		if show then
+	-- Runs right after Roblox's own camera step, so ours has the last word each frame.
+	RunService:BindToRenderStep("DigCamera", Enum.RenderPriority.Camera.Value + 1, function()
+		step()
+		cross.Visible = active and not InputMode.IsCursorFree() and player.Character ~= nil
+		if cross.Visible then
 			cross.BackgroundColor3 = crossState == "hit" and P.Gold or (crossState == "far" and P.Danger or P.Cream)
 		end
-		updateToolClearance(dt)
 	end)
 end
 
@@ -3949,7 +4978,7 @@ return CameraController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="38">
+          <Item class="ModuleScript" referent="47">
             <Properties>
               <string name="Name">DigController</string>
               <string name="Source"><![CDATA[-- Input + targeting for digging.
@@ -3973,8 +5002,10 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local Effects = require(script.Parent.EffectsController)
-local UI = require(script.Parent.UIController)
+local InputMode = require(script.Parent.InputMode)
 local CameraController = require(script.Parent.CameraController)
+local Viewmodel = require(script.Parent.ViewmodelController)
+local UI = require(script.Parent.UIController)
 
 local P = Config.Palette
 local player = Players.LocalPlayer
@@ -4099,6 +5130,10 @@ local function acquireTarget(): Target?
 end
 
 local function swing(interval: number)
+	if CameraController.IsActive() then
+		Viewmodel.Swing(math.min(interval, 0.5)) -- one animation on the whole first-person assembly
+		return
+	end
 	local char = player.Character
 	local tool = char and char:FindFirstChild("Shovel")
 	if not tool or not tool:IsA("Tool") then
@@ -4154,7 +5189,7 @@ end
 
 local function isBlocked(): boolean
 	-- A carried important artifact disables ALL mining (the server enforces this independently).
-	return UI.IsMenuOpen() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
+	return InputMode.IsCursorFree() or UserInputService:GetFocusedTextBox() ~= nil or State.Data.Carrying ~= nil
 end
 
 local function onStep()
@@ -4231,7 +5266,7 @@ function DigController.Init()
 	end
 
 	-- Anything that steals the cursor/keyboard drops held mining.
-	UI.OnMenuChanged(DigController.ClearInput)
+	InputMode.OnChanged(DigController.ClearInput)
 	UserInputService.WindowFocusReleased:Connect(DigController.ClearInput)
 	UserInputService.TextBoxFocused:Connect(DigController.ClearInput)
 	GuiService.MenuOpened:Connect(DigController.ClearInput)
@@ -4306,14 +5341,14 @@ function DigController.Init()
 	end)
 
 	-- After the camera has updated, so the centre ray uses this frame's final camera.
-	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 1, onStep)
+	RunService:BindToRenderStep("DigTarget", Enum.RenderPriority.Camera.Value + 2, onStep)
 end
 
 return DigController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="39">
+          <Item class="ModuleScript" referent="48">
             <Properties>
               <string name="Name">EffectsController</string>
               <string name="Source"><![CDATA[-- Everything cosmetic about digging: block shake, cracks, flying dirt chunks (pooled, no physics),
@@ -4331,6 +5366,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Audio = require(script.Parent.AudioController)
 local UI = require(script.Parent.UIController)
 local CameraController = require(script.Parent.CameraController)
+local Settings = require(script.Parent.Settings)
 local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
 local player = Players.LocalPlayer
@@ -4479,8 +5515,11 @@ end
 
 -- Camera kick -------------------------------------------------------------------------------
 local kick = 0
-local function cameraKick(amount: number)
-	if CameraController.IsFirstPerson() and not FEEL.CameraKickInFirstPerson then
+local function cameraKick(amount: number, always: boolean?)
+	if not Settings.Get("CameraShake") then
+		return -- the player turned camera shake off
+	end
+	if not always and CameraController.IsFirstPerson() and not FEEL.CameraKickInFirstPerson then
 		return
 	end
 	kick = math.max(kick, amount)
@@ -4715,7 +5754,7 @@ local function onExplosion(pos: Vector3, blocks: number)
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if hrp then
 		local dist = ((hrp :: BasePart).Position - pos).Magnitude
-		cameraKick(math.clamp(0.9 - dist / 90, 0, 0.9))
+		cameraKick(math.clamp(0.9 - dist / 90, 0, 0.9), true)
 	end
 end
 
@@ -4738,7 +5777,83 @@ return Effects
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="40">
+          <Item class="ModuleScript" referent="49">
+            <Properties>
+              <string name="Name">InputMode</string>
+              <string name="Source"><![CDATA[-- Single owner of "who has the cursor". Every menu goes through here; nothing else sets cursor state, so menus
+-- cannot fight each other.
+--   Mining mode      : cursor locked, mouse-look and mining active.
+--   Free-cursor mode : toggled with Alt. Cursor free, no mouse-look, no mining. Shortcuts still work.
+--   Menu open        : the shop or the pause/settings menu (or Roblox's own Escape menu). Cursor free, no mouse-look,
+--                      no mining, and gameplay shortcuts are disabled.
+-- Closing a menu returns to whichever of mining / free-cursor was active before it, because free-cursor is tracked
+-- separately from menus. Listeners (the dig controller) use OnChanged to drop held input; mining only resumes
+-- on a fresh press.
+local GuiService = game:GetService("GuiService")
+
+local InputMode = {}
+
+local menus: { [string]: boolean } = {}
+local freeCursor = false
+local listeners: { () -> () } = {}
+
+local function notify()
+	for _, cb in ipairs(listeners) do
+		task.spawn(cb)
+	end
+end
+
+function InputMode.OnChanged(cb: () -> ())
+	table.insert(listeners, cb)
+end
+
+function InputMode.OpenMenu(name: string)
+	if not menus[name] then
+		menus[name] = true
+		notify()
+	end
+end
+
+function InputMode.CloseMenu(name: string)
+	if menus[name] then
+		menus[name] = nil
+		notify()
+	end
+end
+
+function InputMode.IsMenuOpen(): boolean
+	if GuiService.MenuIsOpen then
+		return true -- Roblox's own Escape menu is never overridden
+	end
+	return next(menus) ~= nil
+end
+
+function InputMode.IsFreeCursor(): boolean
+	return freeCursor
+end
+
+function InputMode.SetFreeCursor(free: boolean)
+	if freeCursor ~= free then
+		freeCursor = free
+		notify()
+	end
+end
+
+-- True whenever the cursor must be free and the world must not react (menu OR toggled free-cursor).
+function InputMode.IsCursorFree(): boolean
+	return freeCursor or InputMode.IsMenuOpen()
+end
+
+function InputMode.Init()
+	GuiService.MenuOpened:Connect(notify)
+	GuiService.MenuClosed:Connect(notify)
+end
+
+return InputMode
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="50">
             <Properties>
               <string name="Name">InteractionController</string>
               <string name="Source"><![CDATA[-- Contextual interactions (ProximityPrompts work on keyboard, gamepad and touch).
@@ -4820,7 +5935,376 @@ return InteractionController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="41">
+          <Item class="ModuleScript" referent="51">
+            <Properties>
+              <string name="Name">PauseMenu</string>
+              <string name="Source"><![CDATA[-- In-game menu: Resume / Settings / Controls. A multiplayer menu: nothing is paused or frozen on the server, no
+-- invulnerability, carry state and return-to-camp restrictions are untouched. It only claims the cursor through
+-- InputMode (so it can never fight the shop or the free-cursor toggle) and releases it again on close.
+-- Roblox's own Escape menu is left alone.
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage.Shared.Config)
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
+
+local Settings = require(script.Parent.Settings)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
+local Audio = require(script.Parent.AudioController)
+local K = require(script.Parent.UIKit)
+
+local P = Config.Palette
+local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
+
+local PauseMenu = {}
+
+local PANEL = Color3.fromHex("1F2328")
+local PANEL_LIGHT = Color3.fromHex("2A3037")
+local LINE = Color3.fromHex("3A414A")
+local AMBER = Color3.fromHex("D9A441")
+local TEAL = P.Teal
+local MUTED = Color3.fromHex("A8A394")
+
+local root: Frame
+local pages: { [string]: Frame } = {}
+local open = false
+local syncers: { () -> () } = {}
+
+local function showPage(name: string)
+	for n, f in pairs(pages) do
+		f.Visible = (n == name)
+	end
+end
+
+-- Buttons ------------------------------------------------------------------------------------------------------
+local function flatButton(parent: Instance, text: string, size: UDim2, pos: UDim2, accent: Color3?): TextButton
+	local b = mk("TextButton", { Size = size, Position = pos, BackgroundColor3 = PANEL_LIGHT, Text = text, TextSize = 20,
+		Font = K.Font, TextColor3 = P.Cream, AutoButtonColor = true }, parent)
+	corner(b, 8)
+	stroke(b, accent or LINE, 2)
+	return b
+end
+
+-- Slider with a numeric field. The field takes exact values (fine adjustment); the slider snaps to the spec's step.
+local function makeSlider(parent: Instance, y: number, key: string, title: string, fmt: string, hint: string?)
+	local def = SettingsSpec.Defs[key]
+	label(parent, title, 18, P.Cream, { Size = UDim2.fromOffset(200, 22), Position = UDim2.fromOffset(0, y),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local hit = mk("Frame", { Size = UDim2.fromOffset(250, 26), Position = UDim2.fromOffset(0, y + 26), BackgroundTransparency = 1, Active = true }, parent)
+	local track = mk("Frame", { Size = UDim2.new(1, 0, 0, 6), Position = UDim2.fromOffset(0, 10), BackgroundColor3 = LINE }, hit)
+	corner(track, 3)
+	local fill = mk("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = TEAL }, track)
+	corner(fill, 3)
+	local knob = mk("Frame", { Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5),
+		BackgroundColor3 = P.Cream }, track)
+	corner(knob, 8)
+
+	local field = mk("TextBox", { Size = UDim2.fromOffset(70, 28), Position = UDim2.fromOffset(264, y + 25), BackgroundColor3 = PANEL_LIGHT,
+		TextColor3 = P.Cream, Font = K.Font, TextSize = 18, ClearTextOnFocus = false, Text = "" }, parent)
+	corner(field, 6)
+	stroke(field, LINE, 2)
+
+	local function sync()
+		local v = Settings.Get(key)
+		local alpha = (v - def.Min) / (def.Max - def.Min)
+		fill.Size = UDim2.fromScale(alpha, 1)
+		knob.Position = UDim2.fromScale(alpha, 0.5)
+		if not field:IsFocused() then
+			field.Text = fmt:format(v)
+		end
+	end
+	table.insert(syncers, sync)
+
+	local dragging = false
+	local function setFromX(x: number)
+		local alpha = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+		Settings.Set(key, def.Min + alpha * (def.Max - def.Min))
+	end
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			setFromX(input.Position.X)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			setFromX(input.Position.X)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	field.FocusLost:Connect(function()
+		local n = tonumber(field.Text)
+		if n then
+			Settings.Set(key, n)
+		end
+		sync() -- always re-show the (clamped) real value
+	end)
+
+	if hint then
+		label(parent, hint, 13, MUTED, { Size = UDim2.fromOffset(330, 16), Position = UDim2.fromOffset(0, y + 54),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	end
+	return sync
+end
+
+local function makeToggle(parent: Instance, y: number, key: string, title: string)
+	label(parent, title, 18, P.Cream, { Size = UDim2.fromOffset(230, 28), Position = UDim2.fromOffset(0, y),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local b = flatButton(parent, "", UDim2.fromOffset(84, 28), UDim2.fromOffset(250, y), nil)
+	b.TextSize = 16
+	local function sync()
+		local on = Settings.Get(key)
+		b.Text = on and "ON" or "OFF"
+		b.TextColor3 = on and TEAL or MUTED
+	end
+	table.insert(syncers, sync)
+	b.Activated:Connect(function()
+		Audio.Play("UI")
+		Settings.Set(key, not Settings.Get(key))
+	end)
+end
+
+-- Pages ----------------------------------------------------------------------------------------------------------
+local function buildMain(parent: Instance)
+	local page = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, parent)
+	pages.Main = page
+	local items = { { "Resume", function() PauseMenu.Close() end }, { "Settings", function() showPage("Settings") end },
+		{ "Controls", function() showPage("Controls") end } }
+	for i, it in ipairs(items) do
+		local b = flatButton(page, it[1], UDim2.fromOffset(300, 50), UDim2.fromOffset(20, 10 + (i - 1) * 62), i == 1 and AMBER or nil)
+		b.Activated:Connect(function()
+			Audio.Play("UI")
+			it[2]()
+		end)
+	end
+	label(page, "The game keeps running for everyone else.", 14, MUTED, { Size = UDim2.fromOffset(300, 20),
+		Position = UDim2.fromOffset(20, 206), TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+end
+
+local function subHeader(page: Instance, title: string)
+	label(page, title, 22, AMBER, { Size = UDim2.fromOffset(200, 28), Position = UDim2.fromOffset(20, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local back = flatButton(page, "Back", UDim2.fromOffset(80, 28), UDim2.fromOffset(260, 0), nil)
+	back.TextSize = 16
+	back.Activated:Connect(function()
+		Audio.Play("UI")
+		showPage("Main")
+	end)
+end
+
+local function buildSettings(parent: Instance)
+	local page = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, parent)
+	pages.Settings = page
+	subHeader(page, "Settings")
+	local body = mk("Frame", { Size = UDim2.fromOffset(340, 270), Position = UDim2.fromOffset(20, 40), BackgroundTransparency = 1 }, page)
+	makeSlider(body, 0, "MouseSensitivity", "Mouse sensitivity", "%.2f",
+		"Also follows your Roblox sensitivity setting.")
+	local reset = flatButton(body, "Reset to default", UDim2.fromOffset(120, 24), UDim2.fromOffset(214, 74), nil)
+	reset.TextSize = 14
+	reset.Activated:Connect(function()
+		Audio.Play("UI")
+		Settings.Reset("MouseSensitivity")
+	end)
+	makeSlider(body, 100, "MasterVolume", "Master volume", "%.2f")
+	makeToggle(body, 180, "CameraShake", "Camera shake")
+	makeToggle(body, 216, "InvertY", "Invert vertical look")
+end
+
+local function buildControls(parent: Instance)
+	local page = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, parent)
+	pages.Controls = page
+	subHeader(page, "Controls")
+	local rows = {
+		{ "Mine / dig", "Left mouse (hold)" },
+		{ "Mining <> free cursor", Bindings.Name(Bindings.FreeCursor) },
+		{ "Switch camera view", Bindings.Name(Bindings.CameraToggle) },
+		{ "Return to camp", Bindings.Name(Bindings.ReturnToCamp) },
+		{ "Place artifact", Bindings.Name(Bindings.PlaceArtifact) },
+		{ "Throw dynamite", Bindings.Name(Bindings.ThrowDynamite) },
+		{ "Interact", "E" },
+		{ "This menu", Bindings.Name(Bindings.Menu) },
+		{ "Roblox menu", "Esc" },
+	}
+	for i, r in ipairs(rows) do
+		local y = 40 + (i - 1) * 27
+		label(page, r[1], 16, P.Cream, { Size = UDim2.fromOffset(190, 24), Position = UDim2.fromOffset(20, y),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+		label(page, r[2], 16, AMBER, { Size = UDim2.fromOffset(150, 24), Position = UDim2.fromOffset(212, y),
+			TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	end
+end
+
+-- Public -----------------------------------------------------------------------------------------------------------
+function PauseMenu.IsOpen(): boolean
+	return open
+end
+
+function PauseMenu.Open()
+	if open or InputMode.IsMenuOpen() then
+		return -- never open on top of the shop / Roblox menu
+	end
+	open = true
+	root.Visible = true
+	showPage("Main")
+	for _, s in ipairs(syncers) do
+		s()
+	end
+	InputMode.OpenMenu("Pause")
+end
+
+function PauseMenu.Close()
+	if not open then
+		return
+	end
+	open = false
+	root.Visible = false
+	InputMode.CloseMenu("Pause")
+end
+
+function PauseMenu.Toggle()
+	if open then
+		PauseMenu.Close()
+	else
+		PauseMenu.Open()
+	end
+end
+
+-- A gear icon built from plain frames (no font glyph dependency).
+function PauseMenu.BuildGearButton(gui: ScreenGui): TextButton
+	local b = mk("TextButton", { Name = "GearButton", Text = "", Size = UDim2.fromOffset(44, 44), Position = UDim2.new(1, -232, 0, 12),
+		BackgroundColor3 = PANEL, BackgroundTransparency = 0.1, AutoButtonColor = true }, gui)
+	corner(b, 10)
+	stroke(b, LINE, 2)
+	local icon = mk("Frame", { Size = UDim2.fromOffset(26, 26), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundTransparency = 1 }, b)
+	for i = 0, 7 do
+		local ang = math.rad(i * 45)
+		mk("Frame", { Size = UDim2.fromOffset(5, 8), AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = P.Cream,
+			Position = UDim2.new(0.5, math.sin(ang) * 10, 0.5, -math.cos(ang) * 10), Rotation = i * 45 }, icon)
+	end
+	local ring = mk("Frame", { Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = P.Cream }, icon)
+	corner(ring, 9)
+	local hole = mk("Frame", { Size = UDim2.fromOffset(8, 8), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = PANEL }, ring)
+	corner(hole, 4)
+	b.Activated:Connect(function()
+		Audio.Play("UI")
+		PauseMenu.Toggle()
+	end)
+	return b
+end
+
+function PauseMenu.Build(gui: ScreenGui)
+	root = mk("Frame", { Name = "PauseMenu", Size = UDim2.fromOffset(380, 340), AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = PANEL, BackgroundTransparency = 0.04, Visible = false, Active = true }, gui)
+	corner(root, 12)
+	stroke(root, LINE, 2)
+	label(root, "MENU", 20, MUTED, { Size = UDim2.fromOffset(200, 24), Position = UDim2.fromOffset(20, 8),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -44), Position = UDim2.fromOffset(0, 40), BackgroundTransparency = 1 }, root)
+	buildMain(body)
+	buildSettings(body)
+	buildControls(body)
+	showPage("Main")
+	Settings.OnChanged(function()
+		for _, s in ipairs(syncers) do
+			s()
+		end
+	end)
+	for _, s in ipairs(syncers) do
+		s()
+	end
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if input.KeyCode == Bindings.Menu and not UserInputService:GetFocusedTextBox() then
+			PauseMenu.Toggle()
+		end
+	end)
+end
+
+return PauseMenu
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="52">
+            <Properties>
+              <string name="Name">Settings</string>
+              <string name="Source"><![CDATA[-- Client copy of the player's settings. Loaded from the server profile once, applied immediately on change, and saved
+-- back (debounced) through the existing player-data architecture (data.Settings). Values are clamped by SettingsSpec.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+local Settings = {}
+
+local values = SettingsSpec.Defaults()
+local loaded = false
+local listeners: { (string, any) -> () } = {}
+local saveToken = 0
+
+local function save()
+	saveToken += 1
+	local token = saveToken
+	task.delay(0.6, function()
+		if token == saveToken then
+			Remotes.Get("UpdateSettings"):FireServer(values)
+		end
+	end)
+end
+
+function Settings.Get(key: string): any
+	return values[key]
+end
+
+function Settings.OnChanged(cb: (string, any) -> ())
+	table.insert(listeners, cb)
+end
+
+local function apply(key: string, value: any)
+	local clean = SettingsSpec.Clamp(key, value)
+	if clean == nil or values[key] == clean then
+		return false
+	end
+	values[key] = clean
+	for _, cb in ipairs(listeners) do
+		task.spawn(cb, key, clean)
+	end
+	return true
+end
+
+-- Applies immediately, then schedules a save.
+function Settings.Set(key: string, value: any)
+	if apply(key, value) then
+		save()
+	end
+end
+
+function Settings.Reset(key: string)
+	Settings.Set(key, SettingsSpec.Defs[key].Default)
+end
+
+-- First server snapshot: adopt the saved values (without echoing them back as a save).
+function Settings.Load(fromServer: any)
+	if loaded then
+		return
+	end
+	loaded = true
+	local clean = SettingsSpec.Sanitize(fromServer)
+	for _, key in ipairs(SettingsSpec.Order) do
+		apply(key, clean[key])
+	end
+end
+
+return Settings
+]]></string>
+            </Properties>
+          </Item>
+          <Item class="ModuleScript" referent="53">
             <Properties>
               <string name="Name">ShopPreview</string>
               <string name="Source"><![CDATA[-- Rotating 3D preview of the ACTUAL tool model (ToolModels.BuildPreview, the same spec the held tool is built from).
@@ -4936,7 +6420,7 @@ return ShopPreview
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="42">
+          <Item class="ModuleScript" referent="54">
             <Properties>
               <string name="Name">ShopUI</string>
               <string name="Source"><![CDATA[-- The Equipment Shop: left tabs (Tools / Backpacks / Utility / Cosmetics), a rotating 3D preview of the ACTUAL
@@ -5364,9 +6848,6 @@ function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
 		Visible = false }, gui)
 	corner(root, 16)
 	stroke(root, Color3.fromHex("C9A46B"), 4)
-	-- Modal button: while the shop is visible the cursor is released, even in first person.
-	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
-		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, root)
 
 	label(root, "EQUIPMENT SHOP", 30, P.Cream, { Size = UDim2.fromOffset(300, 40), Position = UDim2.fromOffset(16, 8),
 		TextXAlignment = Enum.TextXAlignment.Left })
@@ -5465,7 +6946,7 @@ return ShopUI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="43">
+          <Item class="ModuleScript" referent="55">
             <Properties>
               <string name="Name">State</string>
               <string name="Source"><![CDATA[-- Client-side mirror of the server's PlayerState snapshot. Read-only for the client.
@@ -5478,7 +6959,7 @@ local State = {
 	Data = {
 		Cash = 0, Reputation = 0, Count = 0, Capacity = 1, BackpackValue = 0,
 		ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId,
-		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any,
+		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any, Settings = {} :: any,
 	},
 	Loaded = false,
 }
@@ -5510,7 +6991,7 @@ return State
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="44">
+          <Item class="ModuleScript" referent="56">
             <Properties>
               <string name="Name">ThrowController</string>
               <string name="Source"><![CDATA[-- Dynamite throwing input: G on desktop, a THROW button on touch. The client only sends an aim direction; the
@@ -5524,6 +7005,8 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local State = require(script.Parent.State)
 local UI = require(script.Parent.UIController)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
 local Audio = require(script.Parent.AudioController)
 
 local P = Config.Palette
@@ -5533,7 +7016,7 @@ local ThrowController = {}
 local function canThrow(): boolean
 	local d = State.Data
 	return (d.Consumables and (d.Consumables.dynamite or 0) > 0 or false) and d.Carrying == nil
-		and not UI.IsMenuOpen() and UserInputService:GetFocusedTextBox() == nil
+		and not InputMode.IsCursorFree() and UserInputService:GetFocusedTextBox() == nil
 end
 
 local function throw()
@@ -5549,7 +7032,7 @@ end
 
 function ThrowController.Init()
 	UserInputService.InputBegan:Connect(function(input, processed)
-		if not processed and input.KeyCode == Enum.KeyCode.G then
+		if not processed and input.KeyCode == Bindings.ThrowDynamite and not InputMode.IsMenuOpen() then
 			throw()
 		end
 	end)
@@ -5584,7 +7067,7 @@ return ThrowController
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="45">
+          <Item class="ModuleScript" referent="57">
             <Properties>
               <string name="Name">UIController</string>
               <string name="Source"><![CDATA[-- HUD + menu state. All UI is built from code (no manual UI objects). Scale-based + UIScale for phones and desktop.
@@ -5606,6 +7089,9 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local State = require(script.Parent.State)
 local Audio = require(script.Parent.AudioController)
 local ShopUI = require(script.Parent.ShopUI)
+local PauseMenu = require(script.Parent.PauseMenu)
+local InputMode = require(script.Parent.InputMode)
+local Bindings = require(script.Parent.Bindings)
 local K = require(script.Parent.UIKit)
 
 local P = Config.Palette
@@ -5618,15 +7104,6 @@ local CARRY_BLOCKED_TEXT = "Carry your artifact back to camp, or place it down f
 
 local gui: ScreenGui
 local refs: { [string]: any } = {}
-local cursorFree = false -- toggled free-cursor mode (first person)
-local menuCallbacks: { () -> () } = {}
-
-local function menuChanged()
-	for _, cb in ipairs(menuCallbacks) do
-		task.spawn(cb)
-	end
-end
-
 local shownCash, targetCash = 0, 0
 local returnReadyAt = 0
 
@@ -5692,44 +7169,23 @@ local function updateObjective(d)
 end
 
 -- Menu state ----------------------------------------------------------------------------------------
--- True while any interactive menu wants the cursor (shop, or toggled free-cursor mode).
-function UI.IsMenuOpen(): boolean
-	return ShopUI.IsOpen() or cursorFree
-end
-
+-- All cursor ownership lives in InputMode. These wrappers keep the old call sites (shop prompt, auto-close) simple.
 function UI.IsShopOpen(): boolean
 	return ShopUI.IsOpen()
 end
 
-function UI.IsCursorFree(): boolean
-	return cursorFree
-end
-
-function UI.OnMenuChanged(cb: () -> ())
-	table.insert(menuCallbacks, cb)
-end
-
--- First-person locks the mouse; a visible Modal button is Roblox's supported way to release it.
-function UI.SetCursorFree(free: boolean)
-	if cursorFree == free then
+function UI.OpenShop()
+	if InputMode.IsMenuOpen() then
 		return
 	end
-	cursorFree = free
-	if refs.cursorFree then
-		refs.cursorFree.Visible = free
-	end
-	menuChanged()
-end
-
-function UI.OpenShop()
 	ShopUI.Open()
-	menuChanged()
+	InputMode.OpenMenu("Shop")
 	Audio.Play("UI")
 end
 
 function UI.CloseShop()
 	if ShopUI.IsOpen() then
-		ShopUI.Close() -- its onClose callback announces the menu change
+		ShopUI.Close() -- its closed-callback releases the cursor through InputMode
 	end
 end
 
@@ -5889,12 +7345,12 @@ local function build()
 
 	-- Bottom-left stack: explanation, place artifact, return to camp
 	local base = TOUCH and 230 or 70
-	refs.returnBtn = button(gui, TOUCH and "TO CAMP" or "TO CAMP [R]", UDim2.fromOffset(170, 46), UDim2.new(0, 12, 1, -base), P.Cream)
+	refs.returnBtn = button(gui, TOUCH and "TO CAMP" or ("TO CAMP [" .. Bindings.Name(Bindings.ReturnToCamp) .. "]"), UDim2.fromOffset(170, 46), UDim2.new(0, 12, 1, -base), P.Cream)
 	refs.returnBtn.Activated:Connect(UI.RequestReturnToCamp)
 	if not Config.ReturnToCamp.Enabled then
 		refs.returnBtn.Visible = false
 	end
-	refs.placeBtn = button(gui, TOUCH and "PLACE ARTIFACT" or "PLACE ARTIFACT [X]", UDim2.fromOffset(220, 46),
+	refs.placeBtn = button(gui, TOUCH and "PLACE ARTIFACT" or ("PLACE ARTIFACT [" .. Bindings.Name(Bindings.PlaceArtifact) .. "]"), UDim2.fromOffset(220, 46),
 		UDim2.new(0, 12, 1, -(base + 54)), Color3.fromHex("5BA7E8"))
 	refs.placeBtn.TextSize = 18
 	refs.placeBtn.Visible = false
@@ -5908,10 +7364,12 @@ local function build()
 	refs.dynBadge.Visible = false
 	refs.dynText = label(refs.dynBadge, "", 17, P.Cream, { Size = UDim2.fromScale(1, 1), TextStrokeTransparency = 1 })
 
-	-- Shop
-	ShopUI.Build(gui, menuChanged)
-	refs.cursorFree = mk("TextButton", { Name = "CursorFree", Text = "", BackgroundTransparency = 1, Modal = true,
-		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5), Visible = false }, gui)
+	-- Shop + menu (both claim the cursor through InputMode only)
+	ShopUI.Build(gui, function()
+		InputMode.CloseMenu("Shop")
+	end)
+	PauseMenu.Build(gui)
+	PauseMenu.BuildGearButton(gui)
 end
 
 function UI.GetGui(): ScreenGui
@@ -5942,7 +7400,7 @@ function UI.Init()
 		-- dynamite badge
 		local dyn = d.Consumables and d.Consumables.dynamite or 0
 		refs.dynBadge.Visible = dyn > 0 and not TOUCH
-		refs.dynText.Text = ("DYNAMITE x%d   [G] throw"):format(dyn)
+		refs.dynText.Text = ("DYNAMITE x%d   [%s] throw"):format(dyn, Bindings.Name(Bindings.ThrowDynamite))
 		updateObjective(d)
 		if ShopUI.IsOpen() then
 			ShopUI.Render()
@@ -5979,9 +7437,12 @@ function UI.Init()
 		if processed or UserInputService:GetFocusedTextBox() then
 			return
 		end
-		if input.KeyCode == Enum.KeyCode.R and not ShopUI.IsOpen() then
+		if InputMode.IsMenuOpen() then
+			return -- gameplay shortcuts are off while any menu is open
+		end
+		if input.KeyCode == Bindings.ReturnToCamp then
 			UI.RequestReturnToCamp()
-		elseif input.KeyCode == Enum.KeyCode.X and not TOUCH then
+		elseif input.KeyCode == Bindings.PlaceArtifact and not TOUCH then
 			UI.RequestPlaceArtifact()
 		end
 	end)
@@ -6013,7 +7474,7 @@ function UI.Init()
 			end
 		end
 		-- return-to-camp button: unavailable (with explanation) while carrying, else the cooldown readout
-		local idle = TOUCH and "TO CAMP" or "TO CAMP [R]"
+		local idle = TOUCH and "TO CAMP" or ("TO CAMP [" .. Bindings.Name(Bindings.ReturnToCamp) .. "]")
 		local left = returnReadyAt - os.clock()
 		if State.Data.Carrying then
 			refs.returnBtn.Text = "TO CAMP - CARRYING"
@@ -6039,7 +7500,7 @@ return UI
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="46">
+          <Item class="ModuleScript" referent="58">
             <Properties>
               <string name="Name">UIKit</string>
               <string name="Source"><![CDATA[-- Small constructors shared by the HUD and the shop (all UI is built from code).
@@ -6106,8 +7567,151 @@ return UIKit
 ]]></string>
             </Properties>
           </Item>
+          <Item class="ModuleScript" referent="59">
+            <Properties>
+              <string name="Name">ViewmodelController</string>
+              <string name="Source"><![CDATA[-- First-person viewmodel: the tool (or carried artifact) drawn in the lower right of the view from the SAME part spec as
+-- the held tool and the shop preview. It is one welded assembly (Kit.BuildWelded) and is posed with a single
+-- PivotTo(camera * swing * rest) per frame; no individual part is ever moved. Parts never collide and are never
+-- raycast. The real Tool in the character is hidden locally while this is shown, so there are no duplicates, and
+-- other players still see the real held tool.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Defs = require(ReplicatedStorage.Shared.Defs)
+local Kit = require(ReplicatedStorage.Shared.ModelKit)
+local ToolModels = require(ReplicatedStorage.Shared.ToolModels)
+local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
+local ViewmodelMath = require(ReplicatedStorage.Shared.ViewmodelMath)
+
+local CameraController = require(script.Parent.CameraController)
+
+local player = Players.LocalPlayer
+local ViewmodelController = {}
+
+local model: Model? = nil
+local modelKey: string? = nil
+local isArtifact = false
+local swingStart, swingDuration = 0, 0.4
+local hiddenFor: any = {}
+
+local function heldTool(): Tool?
+	local char = player.Character
+	return char and char:FindFirstChildOfClass("Tool") or nil
+end
+
+local function keyFor(tool: Tool): string?
+	if tool.Name == "Shovel" then
+		local a = tool:GetAttribute("AppearanceId")
+		return a and ("tool:" .. a) or nil
+	elseif tool.Name == "CarriedArtifact" then
+		local t = tool:GetAttribute("TreasureId")
+		return t and ("artifact:" .. t) or nil
+	end
+	return nil
+end
+
+local function destroyModel()
+	if model then
+		model:Destroy()
+	end
+	model, modelKey = nil, nil
+end
+
+local function build(key: string)
+	destroyModel()
+	if key:sub(1, 5) == "tool:" then
+		local spec = ToolModels.GetSpec(key:sub(6))
+		model = Kit.BuildWelded(Kit.Transform(spec.Parts, ViewmodelMath.Scale), "ToolViewmodel")
+		isArtifact = false
+	else
+		local id = key:sub(10)
+		local def = Defs.Treasure[id]
+		if not def then
+			return
+		end
+		model = Kit.BuildWelded(Kit.Transform(TreasureModels.Specs(id, def), ViewmodelMath.ArtifactScale), "ArtifactViewmodel")
+		isArtifact = true
+	end
+	modelKey = key
+	if model then
+		model.Parent = Workspace.CurrentCamera
+	end
+end
+
+-- The real held tool is hidden for the local player only (LocalTransparencyModifier is client-side).
+local function setRealToolHidden(tool: Tool, hidden: boolean)
+	if (hiddenFor[tool] == true) == hidden then
+		return
+	end
+	hiddenFor[tool] = hidden or nil
+	for _, d in ipairs(tool:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.LocalTransparencyModifier = hidden and 1 or 0
+		end
+	end
+end
+
+-- Called by the dig controller on each swing. One normalised animation applied to the whole assembly.
+function ViewmodelController.Swing(duration: number)
+	swingStart = os.clock()
+	swingDuration = math.max(duration, 0.1)
+end
+
+local function update()
+	local char = player.Character
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	local tool = heldTool()
+	local show = CameraController.IsActive() and humanoid ~= nil and humanoid.Health > 0 and tool ~= nil
+
+	if tool and not show then
+		setRealToolHidden(tool, false)
+	end
+	if not show or not tool then
+		if model then
+			destroyModel()
+		end
+		return
+	end
+	setRealToolHidden(tool, true)
+
+	local key = keyFor(tool)
+	if not key then
+		destroyModel()
+		return
+	end
+	if key ~= modelKey or not model or model.Parent == nil then
+		build(key)
+	end
+	if not model then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	if isArtifact then
+		model:PivotTo(cam.CFrame * ViewmodelMath.ArtifactRest)
+	else
+		local t = (os.clock() - swingStart) / swingDuration
+		model:PivotTo(cam.CFrame * ViewmodelMath.Swing(t) * ViewmodelMath.Rest())
+	end
+end
+
+function ViewmodelController.Init()
+	-- after the camera has been placed for this frame
+	RunService:BindToRenderStep("DigViewmodel", Enum.RenderPriority.Camera.Value + 3, update)
+	player.CharacterRemoving:Connect(function()
+		destroyModel()
+		table.clear(hiddenFor)
+	end)
+end
+
+return ViewmodelController
+]]></string>
+            </Properties>
+          </Item>
         </Item>
-        <Item class="LocalScript" referent="47">
+        <Item class="LocalScript" referent="60">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- DIG & RUN! client entry point.
@@ -6119,13 +7723,21 @@ local State = require(Controllers.State)
 local UI = require(Controllers.UIController)
 local Camera = require(Controllers.CameraController)
 local Effects = require(Controllers.EffectsController)
+local InputMode = require(Controllers.InputMode)
+local Settings = require(Controllers.Settings)
+local Viewmodel = require(Controllers.ViewmodelController)
 local Dig = require(Controllers.DigController)
 local Interaction = require(Controllers.InteractionController)
 local Throw = require(Controllers.ThrowController)
 
 State.Init()
+InputMode.Init()
+State.Connect(function(d)
+	Settings.Load(d.Settings) -- adopt saved settings once
+end)
 UI.Init()
 Camera.Init()
+Viewmodel.Init()
 Effects.Init()
 Dig.Init()
 Interaction.Init()

@@ -423,9 +423,6 @@ function ShopUI.Build(gui: ScreenGui, closed: () -> ()): Frame
 		Visible = false }, gui)
 	corner(root, 16)
 	stroke(root, Color3.fromHex("C9A46B"), 4)
-	-- Modal button: while the shop is visible the cursor is released, even in first person.
-	mk("TextButton", { Name = "CursorRelease", Text = "", BackgroundTransparency = 1, Modal = true,
-		Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(-5, -5) }, root)
 
 	label(root, "EQUIPMENT SHOP", 30, P.Cream, { Size = UDim2.fromOffset(300, 40), Position = UDim2.fromOffset(16, 8),
 		TextXAlignment = Enum.TextXAlignment.Left })

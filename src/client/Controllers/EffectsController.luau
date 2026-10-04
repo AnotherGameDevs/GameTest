@@ -13,6 +13,7 @@ local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Audio = require(script.Parent.AudioController)
 local UI = require(script.Parent.UIController)
 local CameraController = require(script.Parent.CameraController)
+local Settings = require(script.Parent.Settings)
 local TreasureModels = require(ReplicatedStorage.Shared.TreasureModels)
 
 local player = Players.LocalPlayer
@@ -161,8 +162,11 @@ end
 
 -- Camera kick -------------------------------------------------------------------------------
 local kick = 0
-local function cameraKick(amount: number)
-	if CameraController.IsFirstPerson() and not FEEL.CameraKickInFirstPerson then
+local function cameraKick(amount: number, always: boolean?)
+	if not Settings.Get("CameraShake") then
+		return -- the player turned camera shake off
+	end
+	if not always and CameraController.IsFirstPerson() and not FEEL.CameraKickInFirstPerson then
 		return
 	end
 	kick = math.max(kick, amount)
@@ -397,7 +401,7 @@ local function onExplosion(pos: Vector3, blocks: number)
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if hrp then
 		local dist = ((hrp :: BasePart).Position - pos).Magnitude
-		cameraKick(math.clamp(0.9 - dist / 90, 0, 0.9))
+		cameraKick(math.clamp(0.9 - dist / 90, 0, 0.9), true)
 	end
 end
 

@@ -8,7 +8,7 @@ local State = {
 	Data = {
 		Cash = 0, Reputation = 0, Count = 0, Capacity = 1, BackpackValue = 0,
 		ToolId = Config.Starting.ToolId, BackpackId = Config.Starting.BackpackId,
-		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any,
+		OwnedTools = {}, OwnedBackpacks = {}, Carrying = nil, Consumables = {} :: any, Skins = {} :: any, Settings = {} :: any,
 	},
 	Loaded = false,
 }
