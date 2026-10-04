@@ -2,6 +2,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(ReplicatedStorage.Shared.Config)
+local BuildInfo = require(ReplicatedStorage.Shared.BuildInfo)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 
 local Services = script.Parent:WaitForChild("Services")
@@ -55,4 +56,4 @@ Remotes.Get("ClientReady").OnServerEvent:Connect(function(player)
 	end
 end)
 
-print(("[%s] Server ready."):format(Config.GameName))
+print(("[%s] Server ready. Build %s (source %s, built %s)"):format(Config.GameName, BuildInfo.Id, BuildInfo.Source, BuildInfo.Time))

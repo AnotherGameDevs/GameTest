@@ -4,6 +4,7 @@ local Config = require("./_build/shared/Config")
 local Defs = require("./_build/shared/Defs")
 local MineStyle = require("./_build/shared/MineStyle")
 local MineDetailSpecs = require("./_build/shared/MineDetailSpecs")
+local TreasureModels = require("./_build/shared/TreasureModels")
 
 local passed, failed = 0, 0
 local function check(name, cond, detail) if cond then passed += 1 else failed += 1; print("FAIL: " .. name .. (detail and ("  -> " .. detail) or "")) end end
@@ -32,13 +33,13 @@ do
 		local lid = layerOf(y)
 		for x = 0, S.SizeX - 1 do
 			for z = 0, S.SizeZ - 1 do
-				local c = MineStyle.Cell(x, y, z, lid, SEED, nil)
+				local c = MineStyle.Cell(x, y, z, lid, SEED)
 				local st = stats[lid]
 				st.n += 1
 				st.hexes[c.Hex] = true
 				st.tones[c.Tone] = (st.tones[c.Tone] or 0) + 1
 				st.mats[c.Material] = true
-				local again = MineStyle.Cell(x, y, z, lid, SEED, nil)
+				local again = MineStyle.Cell(x, y, z, lid, SEED)
 				if again.Hex ~= c.Hex or again.Material ~= c.Material then check("cell style is deterministic", false) end
 			end
 		end
@@ -61,65 +62,71 @@ do
 	for bx = 0, 6 do for bz = 0, 6 do
 		local first
 		for dx = 0, 2 do for dy = 0, 1 do for dz = 0, 2 do
-			local c = MineStyle.Cell(bx * 3 + dx, dy, bz * 3 + dz, "Soil", SEED, nil)
+			local c = MineStyle.Cell(bx * 3 + dx, dy, bz * 3 + dz, "Soil", SEED)
 			local isPatch = c.Tone == "patch"
 			if first == nil then first = isPatch elseif first ~= isPatch then coherent = false end
 		end end end
 	end end
 	check("soil patches are coherent regions", coherent)
-	check("a different seed rearranges the mine", MineStyle.Cell(5, 1, 5, "Soil", 1, nil).Hex ~= MineStyle.Cell(5, 1, 5, "Soil", 2, nil).Hex
-		or MineStyle.Cell(9, 1, 9, "Soil", 1, nil).Hex ~= MineStyle.Cell(9, 1, 9, "Soil", 2, nil).Hex
-		or MineStyle.Cell(3, 1, 12, "Soil", 1, nil).Hex ~= MineStyle.Cell(3, 1, 12, "Soil", 2, nil).Hex)
-	check("pocket cells use the pocket tint", MineStyle.Cell(4, 7, 4, "Clay", SEED, "Cache").Tone == "pocket")
+	check("a different seed rearranges the mine", MineStyle.Cell(5, 1, 5, "Soil", 1).Hex ~= MineStyle.Cell(5, 1, 5, "Soil", 2).Hex
+		or MineStyle.Cell(9, 1, 9, "Soil", 1).Hex ~= MineStyle.Cell(9, 1, 9, "Soil", 2).Hex
+		or MineStyle.Cell(3, 1, 12, "Soil", 1).Hex ~= MineStyle.Cell(3, 1, 12, "Soil", 2).Hex)
+	check("no cell is ever tinted as a discovery pocket (pockets have no visual marker)", (function()
+		for y = 0, S.Depth - 1 do for x = 0, 23 do for z = 0, 23 do if MineStyle.Cell(x, y, z, layerOf(y), SEED).Tone == "pocket" then return false end end end end
+		return true
+	end)())
 end
 
--- ------------------------------------------------------------------- details ------------------------------------------
+-- ------------------------------------------------------------------- pre-discovery rule -------------------------------
+-- An intact block must show NO reward, rarity clue or hint of where rewards are. Everything drawn on a mine cell comes from
+-- MineStyle.Detail -> MineDetailSpecs, which have no access to the buried loot; these checks pin that down.
 do
 	local allowed = {}
 	for lid, kinds in pairs(MineStyle.AMBIENT) do
 		allowed[lid] = {}
 		for _, k in ipairs(kinds) do allowed[lid][k] = true; check("ambient kind has specs: " .. k, MineDetailSpecs.Has(k)) end
 	end
-	-- tells: every treasure id can show a piece of ITSELF; chance follows rarity
-	local ids = {}
-	for tid in pairs(Defs.Treasure) do table.insert(ids, tid) end
-	table.sort(ids)
-	local ambient, total, ambientTell, wrongTell, lootAmbient = 0, 0, 0, 0, 0
-	local badAmbient = 0
-	local tellRate, tellTrials = {}, {}
+	-- the API takes no loot / pocket argument and exposes no tell machinery
+	check("Detail has no loot parameter (arity 5: x, y, z, layer, seed)", debug.info(MineStyle.Detail, "a") == 5)
+	check("no tell / treasure code exists in the mine remnant modules", MineDetailSpecs.Tell == nil and MineStyle.TELLS == nil and MineStyle.POCKET_AMBIENT == nil)
+	local ambient, total, badKind, tellish = 0, 0, 0, 0
 	for y = 0, S.Depth - 1 do
 		local lid = layerOf(y)
 		for x = 0, S.SizeX - 1 do for z = 0, S.SizeZ - 1 do
 			total += 1
-			local d = MineStyle.Detail(x, y, z, lid, SEED, nil, nil)
+			local d = MineStyle.Detail(x, y, z, lid, SEED)
 			if d then
 				ambient += 1
-				if d.Tell then ambientTell += 1 end
-				if not allowed[lid][d.Kind] then badAmbient += 1 end
-			end
-			for _, tid in ipairs(ids) do
-				local dl = MineStyle.Detail(x, y, z, lid, SEED, tid, nil)
-				tellTrials[tid] = (tellTrials[tid] or 0) + 1
-				if dl then
-					tellRate[tid] = (tellRate[tid] or 0) + 1
-					if not dl.Tell or dl.Loot ~= tid or dl.Kind ~= "tell" then wrongTell += 1 end
-				end
+				if not allowed[lid][d.Kind] then badKind += 1 end
+				if d.Tell ~= nil or d.Loot ~= nil or d.Kind == "tell" then tellish += 1 end
 			end
 		end end
 	end
-	check("only layer-appropriate ambient kinds", badAmbient == 0)
+	check("only layer-appropriate ambient kinds", badKind == 0)
+	check("no detail is a reward tell or carries a loot reference", tellish == 0)
 	check("ambient remnants are occasional (3-10% of cells)", ambient / total > 0.03 and ambient / total < 0.10, ("%.3f"):format(ambient / total))
-	check("ambient cells never claim to be rewards", ambientTell == 0)
-	check("a tell always names the cell's own reward", wrongTell == 0)
-	for _, tid in ipairs(ids) do
-		local want = Defs.Treasure[tid].Relic and 0 or Config.Mine.TellChance[Defs.Treasure[tid].Rarity]
-		local got = (tellRate[tid] or 0) / tellTrials[tid]
-		check("tell chance follows rarity: " .. tid, math.abs(got - want) < 0.06, ("%.2f vs %.2f"):format(got, want))
+	-- the remnant kinds must not look like collectibles
+	local forbidden = { "sherds", "fossil_impression", "worked_fragment", "carving", "coin", "ring", "necklace", "gem", "tablet", "tell" }
+	local clean = true
+	for _, kind in ipairs(MineDetailSpecs.Kinds) do
+		for _, f in ipairs(forbidden) do if kind:find(f, 1, true) then clean = false end end
 	end
-	-- pocket cells: ambient uses the pocket's own remnant
-	local kindsSeen = {}
-	for x = 0, 23 do local d = MineStyle.Detail(x, 7, 5, "Clay", SEED, nil, "Cache"); if d then kindsSeen[d.Kind] = true end end
-	check("cache pocket remnants are pottery sherds", kindsSeen.sherds and next(kindsSeen, "sherds") == nil)
+	check("no remnant is named or shaped like a collectible", clean)
+	-- remnant colours/materials can never coincide with a treasure model's colours, and are never shiny
+	local reward = {}
+	for id, def in pairs(Defs.Treasure) do
+		for _, sp in ipairs(TreasureModels.Specs(id, def)) do reward[sp.Color.Hex or tostring(sp.Color)] = true end
+	end
+	local colourClash, shiny = false, false
+	for _, kind in ipairs(MineDetailSpecs.Kinds) do
+		for _, sp in ipairs(MineDetailSpecs.Build(kind, 0)) do
+			if reward[sp.Color.Hex or tostring(sp.Color)] then colourClash = true end
+			local m = tostring(sp.Material)
+			if m:find("Metal") or m:find("Glass") or m:find("Neon") then shiny = true end
+		end
+	end
+	check("remnants never use a treasure colour", not colourClash)
+	check("remnants are never metal, glass or neon", not shiny)
 end
 
 -- ------------------------------------------------------------------- detail geometry ------------------------------------
@@ -133,44 +140,25 @@ do
 		local p = spec.Offset.p
 		return p.X - ex, p.X + ex, p.Y - ey, p.Y + ey, p.Z - ez, p.Z + ez
 	end
-	-- every ambient remnant (all variants): bounded, on the face, embedded in the wall, low
-	local ambientOk, embeddedOk, lowOk, boundedOk = true, true, true, true
+	local onFace, embedded, low, bounded = true, true, true, true
 	for _, kind in ipairs(MineDetailSpecs.Kinds) do
 		for variant = 0, 3 do
 			local specs = MineDetailSpecs.Build(kind, variant)
-			if #specs < 2 or #specs > 12 then boundedOk = false end
+			if #specs < 2 or #specs > 12 then bounded = false end
 			local maxZ, minZ = -1e9, 1e9
 			for _, sp in ipairs(specs) do
 				local x0, x1, y0, y1, z0, z1 = extent(sp)
 				maxZ, minZ = math.max(maxZ, z1), math.min(minZ, z0)
-				if x0 < -2.05 or x1 > 2.05 or y0 < -2.05 or y1 > 2.05 then ambientOk = false end
+				if x0 < -2.05 or x1 > 2.05 or y0 < -2.05 or y1 > 2.05 then onFace = false end
 			end
-			if not (minZ < 0 and minZ > -0.2) then embeddedOk = false end
-			if maxZ > 0.16 then lowOk = false end
+			if not (minZ < 0 and minZ > -0.2) then embedded = false end
+			if maxZ > 0.16 then low = false end
 		end
 	end
-	check("ambient remnants: bounded part counts", boundedOk)
-	check("ambient remnants: stay on their 4x4 face", ambientOk)
-	check("ambient remnants: embedded in the wall (nothing floats)", embeddedOk)
-	check("ambient remnants: low relief (<= 0.16 studs)", lowOk)
-	-- tells: the REAL artifact, partly out of the wall, never fully buried, never wider than the cell face
-	local shown, protrudes, onFace = true, true, true
-	for tid, def in pairs(Defs.Treasure) do
-		for variant = 0, (def.Relic and -1 or 3) do
-			local specs = MineDetailSpecs.Tell(tid, def, variant)
-			if #specs < 1 then shown = false end
-			local maxZ = -1e9
-			for _, sp in ipairs(specs) do
-				local x0, x1, y0, y1, _, z1 = extent(sp)
-				maxZ = math.max(maxZ, z1)
-				if x0 < -2.1 or x1 > 2.1 or y0 < -2.1 or y1 > 2.1 then onFace = false end
-			end
-			if math.abs(maxZ - Config.Mine.TellProtrude) > 0.06 then protrudes = false end
-		end
-	end
-	check("tells: every treasure shows part of itself", shown)
-	check("tells: stand TellProtrude studs out of the wall", protrudes)
-	check("tells: never wider than the cell face", onFace)
+	check("remnants: bounded part counts", bounded)
+	check("remnants: stay on their 4x4 face", onFace)
+	check("remnants: embedded in the wall (nothing floats)", embedded)
+	check("remnants: low relief (<= 0.16 studs)", low)
 end
 
 -- ------------------------------------------------------------------- pockets -------------------------------------------

@@ -8,7 +8,7 @@
 * **Important artifacts** (RequiresCarry): only in eligible cells (inside the grid, not the outer ring, not the bottom row, >= 2 cells from
   the exit-shaft side) and at most `Config.Loot.ImportantLimits[id]` per generation (claw 4, scarab 2, mask 1). Survivors are a uniform random
   subset of all rolled candidates (no depth bias); the rest become ordinary finds of that layer.
-* **Discovery pockets** (pottery cache / fossil patch / broken masonry) are placed at random from the same seed: no fixed coordinates.
+* **Discovery pockets** (pottery cache / fossil patch / broken masonry; hidden, no visual marker) are placed at random from the same seed: no fixed coordinates.
 * A rejoining player never touches any of this; only a completed reset calls `Generate`.
 
 ## Claims and anti-farming
@@ -22,8 +22,6 @@
 ## Presentation (no through-wall information)
 * Cell parts (and therefore remnants) exist only for **exposed** cells; unexposed rewards have no instance, highlight, name or prompt, and
   no loot coordinates exist on any client.
-* Once a reward's face is exposed it may show a **tell**: the **real artifact model** (same `TreasureModels` source) scaled to ~2.6 studs,
-  with 0.7 studs standing out of the wall and the rest buried inside the opaque block (chance by rarity: 35/50/65/100/100%). Clue = reward by
-  construction (`MineStyle.Detail` uses the cell's actual `LootBoard` entry). Ambient remnants never appear on loot cells.
-* Digging the block breaks the tell with it and the reward follows the existing flow (ordinary: backpack + reveal; important: server
+* **Intact cells never show a reward:** no artifact model, rarity colour, label or prompt on any exposed face (tells were removed after being observed as visible on untouched dirt). Guarded by `tests/mine_style_test.luau` and a reward-render allowlist in `tools/preflight.py`.
+* Destroying the block makes the server resolve the reward, which follows the existing flow (ordinary: backpack + reveal; important: server
   discovery -> physical artifact -> carry-home). Nothing is a free-standing surface decoration.

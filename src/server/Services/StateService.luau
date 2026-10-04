@@ -33,6 +33,7 @@ function StateService.Snapshot(player: Player)
 		BackpackId = data.Equipment.BackpackId,
 		OwnedTools = data.OwnedTools,
 		OwnedBackpacks = data.OwnedBackpacks,
+		Save = DataService.SaveInfo(player),
 		Stats = data.Stats,
 		Collection = data.Collection,
 		Display = data.Display,

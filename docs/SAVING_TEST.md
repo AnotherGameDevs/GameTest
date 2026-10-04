@@ -1,5 +1,7 @@
 # Testing saving without risking real profiles
 
+> Read `docs/ISOLATED_TEST_EXPERIENCE.md` first: it explains which environments can save at all and gives the exact setup + rejoin test. Studio now flushes all profiles on Stop; unsaved sessions show "Test session — progress will not save".
+
 ## What protects real profiles (implemented; NOT yet observed in Studio)
 * **Studio never touches the production store.** `DataService` opens `Config.Data.StudioStoreName` (`DigAndRun_STUDIO_TEST_v1`) when `RunService:IsStudio()`, and
   `Config.Data.StoreName` (`DigAndRun_PlayerData_v1`) only in published servers — even if *Studio Access to API Services* is enabled on the production place.

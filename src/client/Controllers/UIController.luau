@@ -19,6 +19,7 @@ local Audio = require(script.Parent.AudioController)
 local ShopUI = require(script.Parent.ShopUI)
 local PauseMenu = require(script.Parent.PauseMenu)
 local CollectionUI = require(script.Parent.CollectionUI)
+local Banner = require(script.Parent.BannerQueue)
 local Guide = require(script.Parent.GuideController)
 local InputMode = require(script.Parent.InputMode)
 local Bindings = require(script.Parent.Bindings)
@@ -201,31 +202,8 @@ function UI.ShowTreasure(id: string, stored: boolean, isNew: boolean?, carry: bo
 	end
 end
 
-local function showPopup(amountText: string, subText: string, sound: string)
-	Audio.Play(sound)
-	local pop = refs.sold
-	pop.Visible = true
-	refs.soldAmount.Text = amountText
-	refs.soldSub.Text = subText
-	pop.GroupTransparency = 0
-	refs.soldScale.Scale = 0.5
-	TweenService:Create(refs.soldScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1.1 }):Play()
-	refs.soldToken = (refs.soldToken or 0) + 1
-	local token = refs.soldToken
-	task.delay(1.8, function()
-		if refs.soldToken == token then
-			local tw = TweenService:Create(pop, TweenInfo.new(0.5), { GroupTransparency = 1 })
-			tw:Play()
-			tw.Completed:Wait()
-			if refs.soldToken == token then
-				pop.Visible = false
-			end
-		end
-	end)
-end
-
 local function showSold(amount: number, count: number)
-	showPopup("+" .. Util.FormatCash(amount), ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S"), "Sell")
+	Banner.Push("+" .. Util.FormatCash(amount), ("SOLD %d TREASURE%s"):format(count, count == 1 and "" or "S"), "Sell", P.Gold, 1.8)
 end
 
 -- Build ---------------------------------------------------------------------------------------------
@@ -283,16 +261,17 @@ local function build()
 	refs.mineTitle = label(refs.mine, "MINE", 12, K.Muted, { Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 3), TextStrokeTransparency = 1 })
 	refs.mineTime = label(refs.mine, "--:--", 22, P.Cream, { Size = UDim2.new(1, 0, 0, 26), Position = UDim2.fromOffset(0, 18) })
 
+	-- Test-session notice: shown ONLY when this session's progress is not being saved (no DataStore / failed load in Studio). A real
+	-- published server never shows it (a failed load kicks instead). It states the fact; it contains no profile data.
+	refs.testNotice = panel(gui, UDim2.fromOffset(170, 44), UDim2.new(1, -180, 0, 176))
+	refs.testNotice.Visible = false
+	stroke(refs.testNotice, P.Danger, 2)
+	refs.testNoticeText = label(refs.testNotice, "TEST SESSION - progress will not save", 13, P.Danger, { Size = UDim2.new(1, -10, 1, 0),
+		Position = UDim2.fromOffset(5, 0), TextWrapped = true, TextStrokeTransparency = 1 })
+
 	-- Treasure cards (left, mid)
 	refs.cards = mk("Frame", { Size = UDim2.fromOffset(260, 300), Position = UDim2.new(0, 10, 0.5, -60), BackgroundTransparency = 1 }, gui)
 	mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 6) }, refs.cards)
-
-	-- Popup (sold / artifact secured)
-	refs.sold = mk("CanvasGroup", { Size = UDim2.fromOffset(460, 130), AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.36), BackgroundTransparency = 1, Visible = false }, gui)
-	refs.soldScale = mk("UIScale", {}, refs.sold)
-	refs.soldAmount = label(refs.sold, "+$0", 76, P.Gold, { Size = UDim2.new(1, 0, 0, 84), TextStrokeTransparency = 0 })
-	refs.soldSub = label(refs.sold, "", 26, P.Cream, { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.fromOffset(0, 88) })
 
 	-- Bottom-left stack: explanation, place artifact, return to camp
 	local base = TOUCH and 230 or 70
@@ -319,6 +298,7 @@ local function build()
 	ShopUI.Build(gui, function()
 		InputMode.CloseMenu("Shop")
 	end)
+	Banner.Build(gui)
 	PauseMenu.Build(gui)
 	PauseMenu.BuildGearButton(gui)
 	CollectionUI.Build(gui)
@@ -418,6 +398,9 @@ function UI.Init()
 		local dyn = d.Consumables and d.Consumables.dynamite or 0
 		refs.dynBadge.Visible = dyn > 0 and not TOUCH
 		refs.dynText.Text = ("DYNAMITE x%d   [%s] throw"):format(dyn, Bindings.Name(Bindings.ThrowDynamite))
+		-- never present temporary defaults as saved progress
+		local save = d.Save
+		refs.testNotice.Visible = save ~= nil and save.Saving == false
 		updateObjective(d)
 		if ShopUI.IsOpen() then
 			ShopUI.Render()
@@ -426,12 +409,11 @@ function UI.Init()
 
 	Remotes.Get("Sold").OnClientEvent:Connect(showSold)
 	Remotes.Get("ArtifactDeposited").OnClientEvent:Connect(function(name: string, value: number, isNew: boolean?)
-		showPopup("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper() .. (isNew and "  -  NEW ENTRY!" or ""), "Deposit")
+		Banner.Push("+" .. Util.FormatCash(value), "ARTIFACT SECURED: " .. name:upper() .. (isNew and "  -  NEW ENTRY!" or ""), "Deposit", P.Gold, 2.8)
 	end)
 	Remotes.Get("SetCompleted").OnClientEvent:Connect(function(layerId: string, layerName: string)
-		task.delay(2.2, function() -- after the deposit/find popup has had its moment
-			showPopup("SET COMPLETE!", layerName .. " COLLECTION", "SetComplete")
-		end)
+		-- Sent by the server only at the moment a set is completed (never on state updates or rejoin); the key makes it once per session too.
+		Banner.Push("SET COMPLETE!", ("%s COLLECTION"):format(layerName), "SetComplete", P.Teal, 3.4, "set:" .. layerId)
 	end)
 	Remotes.Get("ReturnResult").OnClientEvent:Connect(function(ok: boolean, seconds: number, reason: string?)
 		if reason == "CARRYING" then

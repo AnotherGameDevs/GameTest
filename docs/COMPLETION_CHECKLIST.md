@@ -20,7 +20,9 @@ overlapping HUD on narrow windows, shop not scale-to-fit, MetricsService printin
 | S4 | 8 tiers + 5 backpacks, previews, compare, inspect, no placeholder tabs | ✅ | model only (`economy_sim`) | ❌ | prices provisional; shop render skips unchanged state |
 | S5 | Deeper layered mine, layer gating, mine variation, buried remnants, discovery pockets | ✅ | ✅ (mine_style) | ❌ | `MINE_DETAIL.md` |
 | S5b | Mine reset lifecycle + recovery area + generation ids | ✅ | ✅ (loot_reset) | ❌ | `MINE_RESET.md` |
-| S5c | Hidden randomized loot, per-generation limits, real-artifact tells | ✅ | ✅ | ❌ | `LOOT.md` |
+| S5c | Hidden randomized loot, per-generation limits; no reward visible on intact cells (tells removed) | ✅ | ✅ | ❌ | `LOOT.md` |
+| S5d | Set-complete banner queue (responsive, no clipping) | ✅ | ✅ (layout math only) | ❌ | `BannerLayout`, `ui_layout_test` |
+| S5e | Save visibility: test-session notice, diagnostics, Studio flush, build id | ✅ | ✅ (fake store) | ❌ | `ISOLATED_TEST_EXPERIENCE.md` |
 | S6 | Personal important artifacts: carry/place/deposit/recovery | ✅ | ✅ (artifact tests) | ❌ | `ARTIFACT_RECOVERY.md` |
 | S6b | Artifact models | 4 final-pending-review, **7 UNFINISHED (meshes generated, not imported)** | structure only | ❌ | blocked on Studio import: `ARTIFACT_MESHES.md` |
 | S6c | **Server relic contested PvP** | ✅ | ✅ (relic, 69 checks) | ❌ **AWAITING MULTIPLAYER VALIDATION** | `RELIC_PVP.md`; run sheet `RELIC_PLAYTEST.md`; incomplete |

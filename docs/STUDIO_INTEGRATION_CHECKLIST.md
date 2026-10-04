@@ -1,8 +1,8 @@
 # Studio integration checklist (one prioritised list)
 
-**File to open:** `Build/DigAndRun.rbxlx` from branch `claude/amazing-albattani-9y7to1` (size 499,081 bytes, SHA-256
-`c80faeafe1f1fc7cc43539ff21c612fb3f9af07d075e3c43bb046e909c1a46f9`; verify with `sha256sum Build/DigAndRun.rbxlx`). If you changed code (mesh ids, audio ids) rebuild with
-`rojo build default.project.json -o Build/DigAndRun.rbxlx` — then the hash differs, which is expected.
+**File to open:** `Build/DigAndRun.rbxlx` (also delivered as `DigAndRun_build_20261004-1743-0abbbb4f.rbxlx`), branch `claude/amazing-albattani-9y7to1`.
+Build id **20261004-1743-0abbbb4f** — must appear in Pause menu (P) as `Build:` and in server Output; size 509,784 bytes, SHA-256 `790d86da0c7702804ef245e08c478f02425fcd6d9629c4d8c3a306315b2d1875` (see `Build/BUILD_INFO.txt`).
+If the build id shown differs you opened an older file. After editing code run `bash tools/build.sh` (stamps a new id, tests, builds, verifies every script is in the file).
 **Engine verification status: INCOMPLETE. Every row below is `not run` until you observe it.** Offline tests (`bash tests/run_all.sh`, `python3 tools/preflight.py`) do not count as engine checks.
 Stop at the first failing step in a section, copy the Output errors and tell me which step.
 
@@ -17,6 +17,11 @@ Test → Clients and Servers → 2 Players (1 for sections A–E). View → Outp
 | A3 No empty yellow outline | Press P, J, open/close shop, finish/skip tutorial: no empty rounded yellow frame remains anywhere | not run |
 | A4 Camp walk | Walk spawn → gate (~40 studs). Shop (teal canopy), appraisal stall, receiving table, recovery pad "ARTIFACT RECOVERY" by the gate, gold SAFE ZONE stripe + 2 signs, elevator tower right of the pit, shelf at the west. No floating signs, no sand inside the pit, nothing blocking the route | not run |
 | A5 Output check | no `WorldAudit` offender lines; `[DataService]` line states the save mode | not run |
+
+### A2. Fixes under observation (priority 1b — all `not run`)
+* **Untouched dirt shows no artifact:** walk the whole mine at spawn, look at every exposed top-layer face and walls of the entrance cut; nothing recognisable as an artifact/coin/shard anywhere until a block is dug. Repeat after a mine reset and when joining a running server.
+* **SET COMPLETE banner:** complete a collection set; text fully visible at 1920×1080, 1366×768 and a small window (resize the Game window); centered, not over the crosshair, disappears after ~4 s, two completions queue; does not repeat on rejoin.
+* **Save notice:** with an unpublished/API-off session the HUD shows "Test session — progress will not save"; in the isolated test experience it does not. Then run the rejoin test in `docs/ISOLATED_TEST_EXPERIENCE.md`.
 
 ## B. Fresh player: mine, sell, purchase, rejoin
 | Step | Expected | Result |

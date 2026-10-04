@@ -14,6 +14,8 @@ local Bindings = require(script.Parent.Bindings)
 local Audio = require(script.Parent.AudioController)
 local K = require(script.Parent.UIKit)
 local Guide = require(script.Parent.GuideController)
+local BuildInfo = require(ReplicatedStorage.Shared.BuildInfo)
+local State = require(script.Parent.State)
 
 local P = Config.Palette
 local mk, corner, stroke, label = K.mk, K.corner, K.stroke, K.label
@@ -180,6 +182,21 @@ local function buildSettings(parent: Instance)
 	restart.Activated:Connect(function()
 		Audio.Play("UI")
 		Guide.Restart()
+	end)
+	-- troubleshooting: which build is running and whether this session saves (no profile contents)
+	label(body, "Build " .. BuildInfo.Id, 12, MUTED, { Size = UDim2.fromOffset(340, 16), Position = UDim2.fromOffset(0, 296),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	local saveLine = label(body, "", 12, MUTED, { Size = UDim2.fromOffset(340, 16), Position = UDim2.fromOffset(0, 312),
+		TextXAlignment = Enum.TextXAlignment.Left, TextStrokeTransparency = 1 })
+	table.insert(syncers, function()
+		local save = State.Data.Save
+		if not save then
+			saveLine.Text = "Saving: not loaded yet"
+		elseif save.Saving then
+			saveLine.Text = save.Mode == "studio-test-store" and "Saving: Studio test store" or "Saving: on"
+		else
+			saveLine.Text = "Saving: OFF (test session)"
+		end
 	end)
 end
 

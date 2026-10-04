@@ -39,6 +39,41 @@ if not studio or not store or studio.group(1) == store.group(1): problems.append
 audio = files[os.path.join(root, "client", "Controllers", "AudioController.luau")]
 for sid in re.findall(r'Id = "([^"]*)"', audio):
     if sid and not (sid.startswith("rbxasset://sounds/") or re.fullmatch(r"rbxassetid://\d{4,}", sid)): problems.append(f"AudioController: odd sound id {sid!r}")
+# ---- reward-rendering paths: only these scripts may build reward geometry (reveals, pickups, carry, journal, shelf, relic, viewmodel). ----
+ALLOWED_REWARD_RENDER = {"shared/TreasureModels.luau", "shared/ToolModels.luau", "client/Controllers/EffectsController.luau", "client/Controllers/CollectionUI.luau",
+                         "client/Controllers/CampShelf.luau", "client/Controllers/ViewmodelController.luau", "server/Services/ArtifactService.luau",
+                         "server/Services/RelicService.luau", "shared/MeshAssetsDoc.luau"}
+MINE_PATH = {"shared/MineStyle.luau", "shared/MineDetailSpecs.luau", "shared/LootPlan.luau", "shared/Grid.luau", "server/Services/MineDetails.luau",
+             "server/Services/SiteService.luau", "server/Services/MineShiftService.luau"}
+for path, text in files.items():
+    rel = os.path.relpath(path, root).replace(os.sep, "/")
+    code = "\n".join(l.split("--")[0] for l in text.splitlines())  # ignore comments
+    if "TreasureModels" in code and rel not in ALLOWED_REWARD_RENDER:
+        problems.append(f"{rel}: uses TreasureModels but is not an allowed reward-rendering script (pre-discovery rewards must never be drawn)")
+    if rel in MINE_PATH:
+        if "TreasureModels" in code or "BuildAny" in code:
+            problems.append(f"{rel}: mine generation/decoration must not build treasure geometry")
+        if re.search(r"\bTell\b|\.Tell\b|tell_|Config\.Mine\.Tell", code):
+            problems.append(f"{rel}: reward 'tell' machinery must not exist in the mine path")
+        if rel in ("server/Services/MineDetails.luau", "shared/MineDetailSpecs.luau", "shared/MineStyle.luau") and re.search(r"Defs\.Treasure|lootId|board:Peek", code):
+            problems.append(f"{rel}: mine remnants/styling must not read the buried loot")
+# ---- persistence boundaries ----
+def code_of(rel):
+    return "\n".join(l.split("--")[0] for l in files[os.path.join(root, *rel.split("/"))].splitlines())
+relic = code_of("server/Services/RelicService.luau")
+if relic.count("MarkDirty") != 1 or "data.Cash +=" not in relic:
+    problems.append("RelicService: profile writes must happen exactly once, in Deposit (an unsecured relic must never be persisted as a reward)")
+for rel in ("server/Services/MineShiftService.luau", "server/Services/SiteService.luau", "server/Services/MineLifecycle.luau"):
+    c = code_of(rel)
+    if re.search(r"MarkDirty|\.Cash\b|OwnedTools\s*\[|\.Equipment\s*=|\.Collection\s*\[", c):
+        problems.append(f"{rel}: a mine reset must not touch player progression (found a profile write)")
+ds = code_of("server/Services/DataService.luau")
+if "StudioStoreName" not in ds or "ProfileStore.Save" not in ds or "ProfileStore.Load" not in ds:
+    problems.append("DataService must use ProfileStore and the isolated Studio store")
+if re.search(r"if isStudio\(\) then\s*return\s*end", ds.split("BindToClose")[1] if "BindToClose" in ds else ""):
+    problems.append("DataService.BindToClose must also flush saves in Studio")
+bi = files[os.path.join(root, "shared", "BuildInfo.luau")]
+print("build id in source:", re.search(r'Id = "([^"]+)"', bi).group(1))
 print(f"checked {len(files)} files, {len(events)} remotes, {len(limits)} rate-limit keys")
 if problems:
     print("\n".join("FAIL: " + p for p in problems)); sys.exit(1)

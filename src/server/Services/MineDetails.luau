@@ -14,12 +14,8 @@ local function faceFrame(center: Vector3, normal: Vector3, half: number): CFrame
 	return CFrame.lookAt(origin, origin - normal, up)
 end
 
--- The part specs for a MineStyle.Detail result: a small remnant, or - for a tell - the real artifact's visible part.
-function MineDetails.Specs(detail, treasureDefs)
-	if detail.Tell then
-		local def = treasureDefs[detail.Loot]
-		return def and MineDetailSpecs.Tell(detail.Loot, def, detail.Variant) or {}
-	end
+-- The part specs for a MineStyle.Detail result (ambient geology only).
+function MineDetails.Specs(detail)
 	if not MineDetailSpecs.Has(detail.Kind) then
 		return {}
 	end

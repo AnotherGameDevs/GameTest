@@ -2,6 +2,7 @@
 local Config = require("./_build/shared/Config")
 local Defs = require("./_build/shared/Defs")
 local MineStyle = require("./_build/shared/MineStyle")
+local MineDetailSpecs = require("./_build/shared/MineDetailSpecs")
 local RelicRules = require("./_build/shared/RelicRules")
 local RelicEvent = require("../src/server/Services/RelicEvent")
 local MineLifecycle = require("../src/server/Services/MineLifecycle")
@@ -20,10 +21,7 @@ do
 	check("ordinary loot stays ordinary however valuable", Defs.KindOf(Defs.Treasure.cut_gemstone) == "Ordinary" and Defs.Treasure.cut_gemstone.Value > 100)
 	check("rarity alone never makes a relic", (function() for _, d in pairs(Defs.Treasure) do if d.Rarity == "Epic" and d.Relic then return false end end return true end)())
 	check("the relic is limited to one per generation", Config.Loot.ImportantLimits.sun_mask == 1)
-	check("an undiscovered relic is never hinted at (no tell, no remnant)", (function()
-		for x = 0, 23 do for z = 0, 23 do if MineStyle.Detail(x, 17, z, "Ruins", 1337, "sun_mask", nil) ~= nil then return false end end end
-		return true
-	end)())
+	check("an undiscovered relic is never hinted at: remnants are independent of buried loot (Detail has no loot argument)", debug.info(MineStyle.Detail, "a") == 5 and MineDetailSpecs.Tell == nil)
 end
 
 -- ================================================================== discovery, pickup, ownership ====================

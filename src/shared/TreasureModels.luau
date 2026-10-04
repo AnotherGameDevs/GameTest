@@ -322,7 +322,7 @@ local function meshSpecs(entries)
 end
 
 -- Part specs (origin-centred) for a treasure id. `def` is the Defs entry (passed in to avoid a require cycle). The same specs
--- (mesh set when configured, else the primitive fallback) feed reveals, carrying, journal, shelf and buried tells.
+-- (mesh set when configured, else the primitive fallback) feed reveals, carrying, world pickups, the journal and the shelf (never anything inside the intact mine).
 function TreasureModels.Specs(treasureId: string, def)
 	local assets = Config.MeshAssets[treasureId]
 	if assets and #assets > 0 then

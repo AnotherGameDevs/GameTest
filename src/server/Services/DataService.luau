@@ -9,8 +9,9 @@ local Config = require(ReplicatedStorage.Shared.Config)
 local Util = require(ReplicatedStorage.Shared.Util)
 local Defs = require(ReplicatedStorage.Shared.Defs)
 local DataMigrations = require(script.Parent.DataMigrations)
-local SessionLock = require(script.Parent.SessionLock)
 local SaveMode = require(script.Parent.SaveMode)
+local ProfileStore = require(script.Parent.ProfileStore)
+local SessionLock = require(script.Parent.SessionLock)
 local SettingsSpec = require(ReplicatedStorage.Shared.SettingsSpec)
 local CollectionSpec = require(ReplicatedStorage.Shared.CollectionSpec)
 
@@ -72,11 +73,32 @@ if Config.Data.Enabled then
 	end
 end
 
+local storeName = RunService:IsStudio() and Config.Data.StudioStoreName or Config.Data.StoreName
+-- What kind of storage this server session has (never personal data): used for logs and the player-facing test-session notice.
+local storageMode: string
+if not Config.Data.Enabled then
+	storageMode = "disabled"
+elseif not store then
+	storageMode = "no-datastore"
+elseif RunService:IsStudio() then
+	storageMode = "studio-test-store"
+else
+	storageMode = "production-store"
+end
+print(("[DataService] storage mode: %s (store '%s', Studio=%s, JobId='%s')"):format(storageMode, store and storeName or "-", tostring(RunService:IsStudio()), game.JobId))
+if storageMode == "no-datastore" or storageMode == "disabled" then
+	warn("[DataService] NO DataStore: every session is memory-only and nothing will be saved. (Publish the place and, for Studio testing, enable Studio Access to API Services on an isolated TEST place: docs/ISOLATED_TEST_EXPERIENCE.md)")
+end
+
+local diagnostics = { LoadsOk = 0, LoadsFailed = 0, LockRefusals = 0, SavesOk = 0, SavesFailed = 0, MemoryOnlyProfiles = 0, Kicks = 0 }
+
 local LOCK_TIMEOUT = 120 -- seconds after which another server's lock is treated as dead (crash / lost release)
 local LOCK_REFRESH = 45 -- rewrite at least this often so a live session's lock never goes stale
 local profiles: { [Player]: { Data: any, Dirty: boolean, NoSave: boolean, SaveReason: string, LastWrite: number, Saving: boolean } } = {}
 local loadedCallbacks: { (Player, any) -> () } = {}
 local lastSaveWarn: { [Player]: number } = {}
+local lastSaveLog: { [Player]: number } = {}
+local inFlightFinalSaves = 0
 
 local function key(player: Player)
 	return "Player_" .. player.UserId
@@ -89,7 +111,7 @@ end
 local function attempt(fn: () -> any, tries: number)
 	local ok, result
 	if isStudio() then
-		tries = 1 -- fail fast in Studio so a missing API permission doesn't delay loading
+		tries = math.min(tries, 2) -- fail fast in Studio so a missing API permission doesn't delay loading
 	end
 	for i = 1, tries do
 		ok, result = pcall(fn)
@@ -103,11 +125,7 @@ local function attempt(fn: () -> any, tries: number)
 	return false, result
 end
 
--- Session lock: a profile records which server (JobId) owns it. A second server refuses to load a profile that is
--- locked by a live session, so two servers can never both write one player's progress. Stale locks expire.
-local function lockedByOther(old): boolean
-	return SessionLock.IsLockedByOther(old, game.JobId, os.time(), LOCK_TIMEOUT)
-end
+local storeCtx = { JobId = game.JobId, Lock = SessionLock, Now = os.time, LockTimeout = LOCK_TIMEOUT, Attempt = attempt }
 
 function DataService.OnLoaded(cb: (Player, any) -> ())
 	table.insert(loadedCallbacks, cb)
@@ -147,27 +165,24 @@ function DataService.Save(player: Player, force: boolean?, release: boolean?): b
 	p.Saving = true
 	p.Dirty = false
 	local snapshot = Util.DeepCopy(p.Data)
-	local lostLock = false
-	local ok, err = attempt(function()
-		store:UpdateAsync(key(player), function(old)
-			lostLock = false
-			if lockedByOther(old) then
-				lostLock = true
-				return nil -- another live server owns this profile: do NOT overwrite it
-			end
-			snapshot.SessionLock = (not release) and SessionLock.Claim(game.JobId, os.time()) or nil
-			return snapshot
-		end)
-	end, 3)
+	local result = ProfileStore.Save(store, key(player), snapshot, release == true, storeCtx, 3)
+	local ok, lostLock, err = result.Ok, result.LostLock, result.Err
 	p.Saving = false
-	if ok and not lostLock then
+	if ok then
 		p.LastWrite = os.clock()
+		diagnostics.SavesOk += 1
+		if os.clock() - (lastSaveLog[player] or -1e9) > 300 or release then
+			lastSaveLog[player] = os.clock()
+			print(("[DataService] saved %s (%s%s)"):format(player.Name, release and "final, lock released" or "autosave", force and ", forced" or ""))
+		end
 		return true
 	end
+	diagnostics.SavesFailed += 1
 	p.Dirty = true
 	if lostLock then
 		p.NoSave = true -- never write again from this server
-		warn(("[DataService] %s's profile is now owned by another server; saving from this one is disabled."):format(player.Name))
+		diagnostics.LockRefusals += 1
+		warn(("[DataService] SESSION LOCK lost: %s's profile is now owned by another server; saving from this one is disabled."):format(player.Name))
 	elseif os.clock() - (lastSaveWarn[player] or 0) > 30 then
 		lastSaveWarn[player] = os.clock()
 		warn(("[DataService] Save failed for %s (will retry): %s"):format(player.Name, tostring(err)))
@@ -179,29 +194,13 @@ local function load(player: Player)
 	local data
 	local readOk, locked = true, false
 	if store then
-		local ok, result = attempt(function()
-			local read
-			store:UpdateAsync(key(player), function(old)
-				locked = false
-				if lockedByOther(old) then
-					locked = true
-					return nil
-				end
-				read = old
-				local new = old or {}
-				new.SessionLock = SessionLock.Claim(game.JobId, os.time())
-				return new
-			end)
-			return read
-		end, 4)
-		readOk = ok
-		if ok then
-			data = result
-		end
+		local r = ProfileStore.Load(store, key(player), storeCtx, 4)
+		readOk, locked, data = r.Ok, r.Locked, r.Data
 		if locked then
-			warn("[DataService] Profile locked by another server for " .. player.Name)
-		elseif not ok then
-			warn("[DataService] Load failed for " .. player.Name .. ": " .. tostring(result))
+			diagnostics.LockRefusals += 1
+			warn(("[DataService] SESSION LOCK: %s's profile is held by another live server; refusing to load it here."):format(player.Name))
+		elseif not r.Ok then
+			warn(("[DataService] LOAD FAILED for %s: %s"):format(player.Name, tostring(r.Err)))
 		end
 	end
 
@@ -220,17 +219,12 @@ local function load(player: Player)
 	local mode = SaveMode.Decide({ StoreAvailable = store ~= nil, ReadOk = readOk and not locked, Locked = locked, HasData = hasData,
 		MigrateOk = migrateOk, IsStudio = isStudio() })
 	if mode.Kick then
+		diagnostics.LoadsFailed += 1
+		diagnostics.Kicks += 1
+		warn(("[DataService] %s refused (%s): nothing was written."):format(player.Name, mode.Reason))
 		-- we may hold the lock from a successful read: let go of it, then refuse the join
 		if store and readOk and not locked then
-			pcall(function()
-				store:UpdateAsync(key(player), function(old)
-					if old and old.SessionLock and old.SessionLock.JobId == game.JobId then
-						old.SessionLock = nil
-						return old
-					end
-					return nil
-				end)
-			end)
+			ProfileStore.Release(store, key(player), storeCtx)
 		end
 		if player.Parent then
 			player:Kick(SaveMode.KickMessages[mode.Reason] or "Your saved progress could not be loaded.")
@@ -242,24 +236,19 @@ local function load(player: Player)
 	end
 	local noSave = not mode.Persist
 	if not player.Parent then
-		if store and not noSave then
-			-- joined and left before the profile was kept: release the lock we just took
-			pcall(function()
-				store:UpdateAsync(key(player), function(old)
-					if old and old.SessionLock and old.SessionLock.JobId == game.JobId then
-						old.SessionLock = nil
-						return old
-					end
-					return nil
-				end)
-			end)
+		if store and readOk and not locked then
+			ProfileStore.Release(store, key(player), storeCtx) -- joined and left before the profile was kept: release the lock we took
 		end
 		return
 	end
 	if noSave then
+		diagnostics.MemoryOnlyProfiles += 1
 		warn(("[DataService] %s plays on a MEMORY-ONLY profile (%s): nothing will be saved this session."):format(player.Name, mode.Reason))
 	elseif isStudio() then
 		print(("[DataService] Studio session saving to the TEST store '%s' (%s)."):format(Config.Data.StudioStoreName, mode.Reason))
+	end
+	if not noSave then
+		diagnostics.LoadsOk += 1
 	end
 	profiles[player] = { Data = data, Dirty = false, NoSave = noSave, SaveReason = mode.Reason, LastWrite = os.clock(), Saving = false }
 	for _, cb in ipairs(loadedCallbacks) do
@@ -285,7 +274,9 @@ function DataService.Init()
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
+		inFlightFinalSaves += 1
 		DataService.Save(player, true, true)
+		inFlightFinalSaves -= 1
 		profiles[player] = nil
 		lastSaveWarn[player] = nil
 	end)
@@ -299,11 +290,10 @@ function DataService.Init()
 		end
 	end)
 
-	-- Shutdown: save every profile in parallel and wait for them (Roblox allows ~30 s), instead of a fixed sleep.
+	-- Shutdown: flush every profile and wait for it (Roblox allows ~30 s). This ALSO runs in Studio: stopping a Studio test closes the server
+	-- immediately, and without waiting here a short test session's progress (autosave is every 60 s) would be lost.
+	-- Players already leaving have their own final save in flight (inFlightFinalSaves); wait for those too.
 	game:BindToClose(function()
-		if isStudio() then
-			return
-		end
 		local pending = 0
 		for player in pairs(profiles) do
 			pending += 1
@@ -313,13 +303,34 @@ function DataService.Init()
 			end)
 		end
 		local deadline = os.clock() + 25
-		while pending > 0 and os.clock() < deadline do
-			task.wait(0.2)
+		while (pending > 0 or inFlightFinalSaves > 0) and os.clock() < deadline do
+			task.wait(0.1)
 		end
-		if pending > 0 then
-			warn(("[DataService] Shutdown: %d profile(s) did not finish saving."):format(pending))
+		if pending > 0 or inFlightFinalSaves > 0 then
+			warn(("[DataService] Shutdown: %d profile save(s) did not finish in time."):format(pending + inFlightFinalSaves))
 		end
+		print(("[DataService] shutdown summary: loadsOk=%d loadsFailed=%d lockRefusals=%d savesOk=%d savesFailed=%d memoryOnly=%d kicks=%d"):format(
+			diagnostics.LoadsOk, diagnostics.LoadsFailed, diagnostics.LockRefusals, diagnostics.SavesOk, diagnostics.SavesFailed,
+			diagnostics.MemoryOnlyProfiles, diagnostics.Kicks))
 	end)
+end
+
+-- Counters for the server Output / tests; contains no profile contents.
+function DataService.Diagnostics()
+	return table.clone(diagnostics)
+end
+
+function DataService.StorageMode(): string
+	return storageMode
+end
+
+-- What the player may be told about their own session (no profile contents): whether progress is being saved and why not.
+function DataService.SaveInfo(player: Player)
+	local p = profiles[player]
+	if not p then
+		return nil
+	end
+	return { Saving = not p.NoSave, Reason = p.SaveReason, Mode = storageMode }
 end
 
 return DataService

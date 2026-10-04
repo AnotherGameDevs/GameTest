@@ -149,11 +149,9 @@ Config.MeshAssets = {}
 -- MESH_ASSETS_END
 
 -- Mine appearance and buried discoveries (docs/MINE_DETAIL.md). All placement is a pure function of (cell, layer, seed).
+-- Rewards are NEVER drawn in the mine before their block is destroyed: no tells, no pocket markers, no remnants shaped like treasure.
 Config.Mine = {
-	TellChance = { Common = 0.35, Uncommon = 0.5, Rare = 0.65, Epic = 1, Legendary = 1 }, -- chance a buried reward shows part of ITSELF once its face is exposed
-	TellProtrude = 0.7, -- studs of the real artifact that stand out of the wall
 	AmbientChance = { Soil = 0.07, Clay = 0.06, Stone = 0.07, Ruins = 0.07 }, -- chance an exposed non-loot cell carries an ambient remnant
-	PocketChance = 0.55, -- chance a non-loot cell INSIDE a pocket carries that pocket's remnant
 	MaxDetails = 160, -- hard cap on live detail objects in the whole mine
 	MaxDetailParts = 1800, -- ...and on the parts they use
 	Pockets = { Cache = 3, Fossil = 3, Masonry = 2 }, -- discovery pockets per generation

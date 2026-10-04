@@ -19,7 +19,6 @@ local health: { number } = {}
 local maxHealth: { number } = {}
 local board = LootBoard.new(0, {})
 local parts: { [number]: Part } = {}
-local pocketOf: { [number]: string } = {} -- cell -> discovery pocket kind
 local detailBuilt: { [number]: boolean } = {}
 local liveDetails = 0
 local liveDetailParts = 0
@@ -58,7 +57,7 @@ local function ensureDetail(idx: number)
 	end
 	local x, y, z = Grid.FromIndex(idx)
 	local layer = Defs.LayerAtCell(y)
-	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed, board:Peek(idx), pocketOf[idx])
+	local spec = MineStyle.Detail(x, y, z, layer.Id, currentSeed) -- never looks at what is buried
 	if not spec then
 		return
 	end
@@ -66,11 +65,11 @@ local function ensureDetail(idx: number)
 	for i = 0, 5 do
 		local face = (spec.FaceRot + i) % 6 + 1
 		if faceOpen(x, y, z, face) and not (isExitWall and face == 3) then
-			local specs = MineDetails.Specs(spec, Defs.Treasure)
+			local specs = MineDetails.Specs(spec)
 			if #specs == 0 or liveDetailParts + #specs > Config.Mine.MaxDetailParts then
 				return
 			end
-			local n = MineDetails.Build(specs, spec.Tell and "tell" or spec.Kind, part, part.Position, FACE_NORMALS[face])
+			local n = MineDetails.Build(specs, spec.Kind, part, part.Position, FACE_NORMALS[face])
 			if n > 0 then
 				detailBuilt[idx] = true
 				detailPartCount[idx] = n
@@ -88,7 +87,7 @@ local function spawnPart(idx: number)
 	end
 	local x, y, z = Grid.FromIndex(idx)
 	local layer = Defs.LayerAtCell(y)
-	local style = MineStyle.Cell(x, y, z, layer.Id, currentSeed, pocketOf[idx])
+	local style = MineStyle.Cell(x, y, z, layer.Id, currentSeed)
 	local part = Instance.new("Part")
 	part.Name = tostring(idx)
 	part.Anchored = true
@@ -132,7 +131,6 @@ function SiteService.Generate(lootSeedIn: number?, cosmeticSeedIn: number?)
 	table.clear(health)
 	table.clear(maxHealth)
 	table.clear(parts)
-	table.clear(pocketOf)
 	table.clear(detailBuilt)
 	table.clear(detailPartCount)
 	liveDetails = 0
@@ -155,11 +153,6 @@ function SiteService.Generate(lootSeedIn: number?, cosmeticSeedIn: number?)
 	-- the fresh loot seed. A rejoining player never triggers this; only a completed reset does.
 	local plan = LootPlan.Generate(Random.new(lootSeed), lootSeed)
 	board = LootBoard.new(generation, plan.Loot)
-	for _, pocket in ipairs(plan.Pockets) do
-		for _, c in ipairs(pocket.Cells) do
-			pocketOf[Grid.ToIndex(c[1], c[2], c[3])] = pocket.Kind
-		end
-	end
 	generationCounts = plan.Counts
 
 	-- Instance only the cells that start exposed: the top surface row, plus the wall of cells facing the exit shaft

@@ -3,12 +3,11 @@
 -- reproduces it exactly, and a new seed (mine refresh) gives a new arrangement. Tested in tests/mine_style_test.luau.
 --   * Cell(): colour + material per cell, built from PATCHES (blocky 3x2x3 regions) and wavy BANDS (strata), never
 --     per-cell noise. Each layer has a small palette.
---   * Detail(): which small remnant (if any) a cell carries, and whether it is an ambient remnant or a "tell" of the
---     cell's REAL loot. Reward tells only appear on cells that really hold that reward; ambient remnants never appear on
---     loot cells and never use treasure colours.
---   * Pockets(): a few compact discovery pockets (pottery cache in clay, fossil patch in stone, broken masonry in ruins).
+--   * Detail(): which small AMBIENT geology remnant (roots, pebbles, cracks, seams, rubble, mortar lines) a cell carries. It is a
+--     function of position, layer and the COSMETIC seed only: it never sees what is buried, never looks like a collectible and
+--     never uses a treasure colour, so an intact block shows no reward, no rarity clue and no hint of where rewards are.
+--   * Pockets(): where the (hidden) discovery pockets sit; used by LootPlan to cluster rewards. They have NO visual marker.
 local Config = require(script.Parent.Config)
-local Defs = require(script.Parent.Defs)
 
 local MineStyle = {}
 
@@ -34,11 +33,6 @@ local PALETTE = {
 	Stone = { Material = "Slate", Base = { "68717C", "646D78" }, Dark = "59626D", Light = "77818C", Seam = { "6F9A9B", "A9B4B8" } },
 	Ruins = { Material = "Limestone", Base = { "D8B678", "D2B073" }, Course = "C7A667", Patch = "BE9E63", Carved = "A98A55" },
 }
-local POCKET_STYLE = { -- tinted regions that mark a discovery pocket as it is uncovered (subtle, same family as the layer)
-	Cache = { Hex = "9A4E2E", Alt = "B5683F", Material = "Sandstone" },
-	Fossil = { Hex = "8A8F96", Alt = "A39F92", Material = "Slate" },
-	Masonry = { Hex = "CDBB92", Alt = "B09A6E", Material = "Limestone" },
-}
 MineStyle.POCKET_LAYER = { Cache = "Clay", Fossil = "Stone", Masonry = "Ruins" }
 
 local function pick(list, h: number)
@@ -52,16 +46,9 @@ local function band(x: number, y: number, z: number, thickness: number, seed: nu
 end
 
 -- Appearance of one cell. Returns { Hex, Material, Tone }.
-function MineStyle.Cell(x: number, y: number, z: number, layerId: string, seed: number, pocketKind: string?)
+function MineStyle.Cell(x: number, y: number, z: number, layerId: string, seed: number)
 	local pal = PALETTE[layerId] or PALETTE.Soil
 	local patch = hash(x // 3, y // 2, z // 3, seed, 1) -- one value per 3x2x3 region: patches, not noise
-	if pocketKind then
-		local ps = POCKET_STYLE[pocketKind]
-		if ps then
-			local alt = (x + z + y) % 2 == 0
-			return { Hex = alt and ps.Hex or ps.Alt, Material = ps.Material, Tone = "pocket" }
-		end
-	end
 	if layerId == "Soil" then
 		local hex = pick(pal.Base, hash(x, y, z, seed, 2))
 		local tone = "base"
@@ -91,40 +78,15 @@ function MineStyle.Cell(x: number, y: number, z: number, layerId: string, seed: 
 end
 
 -- Details -----------------------------------------------------------------------------------------------------------
-MineStyle.AMBIENT = { -- remnants by layer (exactly the set asked for: roots/stones in soil, pottery in clay, seams + fossil
-	Soil = { "roots", "pebbles" }, -- impressions in stone, worked fragments + carvings in the ruins)
-	Clay = { "sherds" },
-	Stone = { "seam", "fossil_impression" },
-	Ruins = { "worked_fragment", "carving" },
+MineStyle.AMBIENT = { -- remnants by layer: plain geology only. Nothing here may resemble a coin, shard, ring, fossil, tablet or any other reward.
+	Soil = { "roots", "pebbles" },
+	Clay = { "cracks", "pebbles" },
+	Stone = { "seam", "cracks" },
+	Ruins = { "rubble", "mortar" },
 }
-MineStyle.POCKET_AMBIENT = { Cache = "sherds", Fossil = "fossil_impression", Masonry = "worked_fragment" }
--- A "tell" is a small part of the cell's REAL reward standing out of its exposed face (built from the actual artifact model).
 
--- Returns nil or { Kind, Variant (0-3), FaceRot (0-5), Tell (bool), Loot (treasure id for tells) }.
--- Loot cells never carry ambient remnants and non-loot cells never carry tells, so a clue always matches the assigned reward.
-function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed: number, lootId: string?, pocketKind: string?)
-	local variant = math.floor(hash(x, y, z, seed, 14) * 4)
-	local faceRot = math.floor(hash(x, y, z, seed, 15) * 6)
-	if lootId then
-		local def = Defs.Treasure[lootId]
-		if not def or def.Relic then
-			return nil -- the contested server relic stays fully concealed until its block breaks: no tell, no remnant
-		end
-		local chance = Config.Mine.TellChance[def.Rarity] or 0.4
-		if pocketKind then
-			chance = math.max(chance, 0.9)
-		end
-		if hash(x, y, z, seed, 12) < chance then
-			return { Kind = "tell", Variant = variant, FaceRot = faceRot, Tell = true, Loot = lootId }
-		end
-		return nil
-	end
-	if pocketKind then
-		if hash(x, y, z, seed, 16) < Config.Mine.PocketChance then
-			return { Kind = MineStyle.POCKET_AMBIENT[pocketKind], Variant = variant, FaceRot = faceRot, Tell = false }
-		end
-		return nil
-	end
+-- Returns nil or { Kind, Variant (0-3), FaceRot (0-5) }. Deliberately has NO parameter for what is buried in the cell.
+function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed: number)
 	if hash(x, y, z, seed, 11) >= (Config.Mine.AmbientChance[layerId] or 0) then
 		return nil
 	end
@@ -132,7 +94,11 @@ function MineStyle.Detail(x: number, y: number, z: number, layerId: string, seed
 	if not kinds then
 		return nil
 	end
-	return { Kind = pick(kinds, hash(x, y, z, seed, 13)), Variant = variant, FaceRot = faceRot, Tell = false }
+	return {
+		Kind = pick(kinds, hash(x, y, z, seed, 13)),
+		Variant = math.floor(hash(x, y, z, seed, 14) * 4),
+		FaceRot = math.floor(hash(x, y, z, seed, 15) * 6),
+	}
 end
 
 -- Pockets -----------------------------------------------------------------------------------------------------------
